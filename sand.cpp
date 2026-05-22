@@ -2,23 +2,9 @@
 #include <cstdlib>
 #include <vector>
 #include <cstring>
-
-constexpr int cellSize = 5;
-
-struct Grid
-{
-    std::vector<int> cells;
-    std::vector<int> next;
-    int rows = 0;
-    int cols = 0;
-
-    inline int idx(int i, int j) const { return i * cols + j; }
-};
-
-struct Player
-{
-    int posX, posY;
-};
+#include "player.h"
+#include "grid.h"
+#include "constants.h"
 
 Grid grid;
 
@@ -114,38 +100,6 @@ void drawGrid()
             );
         }
     }
-}
-
-void drawPlayer(const Player& player)
-{
-    DrawRectangle(player.posX * cellSize, player.posY * cellSize, cellSize, cellSize, RED);
-}
-
-void handlePlayerInput(Player* player)
-{
-    // TODO: Collision with Sand
-    /*
-        Logic: If going left and there is sand, check above (y-1) and move there if empty, otherwise reject.
-        Same for right. For down, check below (y+1) and move there if empty, otherwise reject.
-    */
-    if (IsKeyDown(KEY_A) && player->posX > 0)              
-    { 
-        player->posX--; 
-    }
-    if (IsKeyDown(KEY_D) && player->posX < grid.cols - 1)  
-    { 
-        player->posX++; 
-    }
-    if (IsKeyDown(KEY_W) && player->posY > 0)              
-    { 
-        player->posY--; 
-    }
-    if (IsKeyDown(KEY_S) && player->posY < grid.rows - 1)  
-    { 
-        player->posY++; 
-    }
-
-    // TODO: Add jump with timer & gravity
 }
 
 void handleInput(int rangeSize)
