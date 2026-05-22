@@ -1,11 +1,13 @@
 #include <raylib.h>
-#include <stdlib.h>
+#include <cstdlib>
+#include <vector>
 
-#define cellSize 5
+constexpr int cellSize = 5;
 
-int *grid;
-int *nextgrid;
-int rows, cols;
+std::vector<int> grid;
+std::vector<int> nextgrid;
+int rows = 0;
+int cols = 0;
 
 /*
 	initializeGrid: 
@@ -22,14 +24,8 @@ void initializeGrid(int screenWidth, int screenHeight)
 	rows = screenHeight / cellSize;
 	cols = screenWidth / cellSize;
 
-	// Allocate memory for grids
-	grid = (int *)malloc(rows * cols * sizeof(int));
-	nextgrid = (int *)malloc(rows * cols * sizeof(int));
-	for (int i = 0; i < rows * cols; i++)
-	{
-		grid[i] = 0;
-		nextgrid[i] = 0;
-	}
+	grid.assign(rows * cols, 0);
+	nextgrid.assign(rows * cols, 0);
 }
 
 
@@ -44,8 +40,8 @@ void initializeGrid(int screenWidth, int screenHeight)
 */
 void resizeGrid(int newCols, int newRows)
 {
-	int *newGrid = (int *)malloc(newRows * newCols * sizeof(int));
-	int *newNextgrid = (int *)malloc(newRows * newCols * sizeof(int));
+	std::vector<int> newGrid(newRows * newCols, 0);
+	std::vector<int> newNextgrid(newRows * newCols, 0);
 
 	for (int i = 0; i < newRows; i++)
 	{
@@ -55,19 +51,11 @@ void resizeGrid(int newCols, int newRows)
 			{
 				newGrid[i * newCols + j] = grid[i * cols + j];
 			}
-			else
-			{
-				newGrid[i * newCols + j] = 0;
-			}
-			newNextgrid[i * newCols + j] = 0;
 		}
 	}
 
-	free(grid);
-	free(nextgrid);
-
-	grid = newGrid;
-	nextgrid = newNextgrid;
+	grid.swap(newGrid);
+	nextgrid.swap(newNextgrid);
 	cols = newCols;
 	rows = newRows;
 }
@@ -130,8 +118,22 @@ void drawGrid()
 	}
 }
 
-void handleMouseInput(int rangeSize)
+void resetGrid()
 {
+    std::fill(grid.begin(), grid.end(), 0);
+    std::fill(nextgrid.begin(), nextgrid.end(), 0);
+}
+
+
+
+
+void handleInput(int rangeSize)
+{
+    if (IsKeyPressed(KEY_R))
+    {
+        resetGrid();
+    }
+
 	if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
 	{
 		Vector2 pos = GetMousePosition();
@@ -155,6 +157,7 @@ void handleMouseInput(int rangeSize)
 			}
 		}
 	}
+    
 	if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
 	{
 		Vector2 pos = GetMousePosition();
@@ -182,13 +185,11 @@ int main()
 
 		BeginDrawing();
 		ClearBackground(BLACK);
-		handleMouseInput(2);
+		handleInput(2);
 		drawGrid();
 		EndDrawing();
 	}
 
-	free(grid);
-	free(nextgrid);
 	CloseWindow();
 	return 0;
 }
