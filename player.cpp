@@ -56,28 +56,34 @@ void handlePlayerInput(Player* player)
         player->grounded = false;
     }
 
-    // gravity
     if (!player->grounded)
     {
         player->velY = std::min(player->velY + GRAVITY, MAX_FALL);
-    }
-    // step downward one cell at a time to avoid tunneling
-    int steps = (int)std::abs(player->velY);
-    int dir   = player->velY >= 0 ? 1 : -1;
 
-    for (int s = 0; s < steps; s++)
+        int steps = (int)std::abs(player->velY);
+        int dir   = player->velY >= 0 ? 1 : -1;
+
+        for (int s = 0; s < steps; s++)
+        {
+            int nextY = player->posY + dir;
+            if (nextY >= 0 && nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)] == 0)
+            {
+                player->posY = nextY;
+                player->grounded = false;
+            }
+            else
+            {
+                player->velY = 0.0f;
+                if (dir == 1) player->grounded = true;
+                break;
+            }
+        }
+    }
+    else
     {
-        int nextY = player->posY + dir;
-        if (nextY >= 0 && nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)] == 0)
-        {
-            player->posY = nextY;
+        // if sand beneath was erased, start falling
+        int nextY = player->posY + 1;
+        if (nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)] == 0)
             player->grounded = false;
-        }
-        else
-        {
-            player->velY = 0.0f;
-            if (dir == 1) player->grounded = true;
-            break;
-        }
     }
 }
