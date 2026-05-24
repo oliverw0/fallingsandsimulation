@@ -5,21 +5,107 @@
 #include "player.h"
 #include "grid.h"
 #include "constants.h"
+#include "cells/material.h"
 
 Grid grid;
+CellMaterial selectedMaterial = CellMaterial::Sand;
+
+static bool isEmpty(const Cell& c)
+{
+    return c.material == CellMaterial::Empty;
+}
+
+static bool inBounds(int i, int j)
+{
+    return i >= 0 && i < grid.rows && j >= 0 && j < grid.cols;
+}
+
+// Destination must be empty in the write buffer (next), not the stale read buffer (cells).
+static bool canMoveTo(int i, int j)
+{
+    if (!inBounds(i, j))
+        return false;
+    return isEmpty(grid.next[grid.idx(i, j)]);
+}
+
+static void moveCell(int fromI, int fromJ, int toI, int toJ, const Cell& cell)
+{
+    grid.next[grid.idx(fromI, fromJ)] = Cell{};
+    grid.next[grid.idx(toI, toJ)] = cell;
+}
+
+// Returns true if the cell moved.
+static bool tryFallDown(int i, int j, const Cell& cell, bool allowDiagonal)
+{
+    if (canMoveTo(i + 1, j))
+    {
+        moveCell(i, j, i + 1, j, cell);
+        return true;
+    }
+
+    if (!allowDiagonal)
+        return false;
+
+    if (canMoveTo(i + 1, j - 1))
+    {
+        moveCell(i, j, i + 1, j - 1, cell);
+        return true;
+    }
+    if (canMoveTo(i + 1, j + 1))
+    {
+        moveCell(i, j, i + 1, j + 1, cell);
+        return true;
+    }
+    return false;
+}
+
+static bool tryFlowSideways(int i, int j, const Cell& cell)
+{
+    int dir = GetRandomValue(0, 1) ? 1 : -1;
+    int alt = -dir;
+
+    if (canMoveTo(i, j + dir))
+    {
+        moveCell(i, j, i, j + dir, cell);
+        return true;
+    }
+    if (canMoveTo(i, j + alt))
+    {
+        moveCell(i, j, i, j + alt, cell);
+        return true;
+    }
+    return false;
+}
+
+static void updateLiquid(int i, int j, const Cell& cell)
+{
+    if (tryFallDown(i, j, cell, false))
+        return;
+    if (tryFallDown(i, j, cell, true))
+        return;
+    if (tryFlowSideways(i, j, cell))
+        return;
+    // already in next from the frame-start copy
+}
+
+static void updateGranular(int i, int j, const Cell& cell)
+{
+    if (!tryFallDown(i, j, cell, true))
+        return; // already in next from the frame-start copy
+}
 
 void initializeGrid(int screenWidth, int screenHeight)
 {
     grid.rows = screenHeight / cellSize;
     grid.cols = screenWidth / cellSize;
-    grid.cells.assign(grid.rows * grid.cols, 0);
-    grid.next.assign(grid.rows * grid.cols, 0);
+    grid.cells.assign(grid.rows * grid.cols, Cell{});
+    grid.next.assign(grid.rows * grid.cols, Cell{});
 }
 
 void resizeGrid(int newCols, int newRows)
 {
-    std::vector<int> newCells(newRows * newCols, 0);
-    std::vector<int> newNext(newRows * newCols, 0);
+    std::vector<Cell> newCells(newRows * newCols, Cell{});
+    std::vector<Cell> newNext(newRows * newCols, Cell{});
 
     for (int i = 0; i < newRows; i++)
     {
@@ -38,90 +124,85 @@ void resizeGrid(int newCols, int newRows)
 
 void resetGrid()
 {
-    std::fill(grid.cells.begin(), grid.cells.end(), 0);
-    std::fill(grid.next.begin(), grid.next.end(), 0);
+    std::fill(grid.cells.begin(), grid.cells.end(), Cell{});
+    std::fill(grid.next.begin(), grid.next.end(), Cell{});
 }
 
 void drawGrid()
 {
-    // Simulate — bottom-up so particles don't cascade in one frame
+    // Start each step with a full copy so stone/idle cells survive, then mutate next.
+    grid.next = grid.cells;
+
+    // Bottom-up: lower rows update before rows above them.
     for (int i = grid.rows - 1; i >= 0; i--)
     {
         for (int j = 0; j < grid.cols; j++)
         {
-            if (grid.cells[grid.idx(i, j)] == 1)
-            {
-                int below  = 0;
-                int belowA = 0;
-                int belowB = 0;
+            const int k = grid.idx(i, j);
+            const Cell& cell = grid.cells[k];
 
-                if (i + 1 < grid.rows)
-                {
-                    below = grid.cells[grid.idx(i + 1, j)];
-                    if (j - 1 >= 0)       belowA = grid.cells[grid.idx(i + 1, j - 1)];
-                    if (j + 1 < grid.cols) belowB = grid.cells[grid.idx(i + 1, j + 1)];
-                }
+            if (cell.material == CellMaterial::Empty)
+                continue;
 
-                if (i + 1 < grid.rows && below == 0)
-                {
-                    grid.next[grid.idx(i, j)] = 0;
-                    grid.next[grid.idx(i + 1, j)] = 1;
-                }
-                else if (i + 1 < grid.rows && belowA == 0 && j - 1 >= 0)
-                {
-                    grid.next[grid.idx(i, j)] = 0;
-                    grid.next[grid.idx(i + 1, j - 1)] = 1;
-                }
-                else if (i + 1 < grid.rows && belowB == 0 && j + 1 < grid.cols)
-                {
-                    grid.next[grid.idx(i, j)] = 0;
-                    grid.next[grid.idx(i + 1, j + 1)] = 1;
-                }
-                else
-                {
-                    grid.next[grid.idx(i, j)] = 1;
-                }
-            }
+            // Particle already moved out of this slot earlier this frame.
+            if (isEmpty(grid.next[k]))
+                continue;
+
+            const MaterialProps& p = props(cell.material);
+            if (!p.falls)
+                continue;
+
+            if (p.flows)
+                updateLiquid(i, j, cell);
+            else
+                updateGranular(i, j, cell);
         }
     }
 
-    // Swap pointers instead of copying element-by-element
     grid.cells.swap(grid.next);
-    std::fill(grid.next.begin(), grid.next.end(), 0);
 
-    // Draw
     for (int i = 0; i < grid.rows; i++)
     {
         for (int j = 0; j < grid.cols; j++)
         {
             DrawRectangle(
                 j * cellSize, i * cellSize, cellSize, cellSize,
-                grid.cells[grid.idx(i, j)] == 1 ? BLUE : BLACK
+                props(grid.cells[grid.idx(i, j)].material).color
             );
         }
     }
 }
 
-void handleInput(int rangeSize)
+
+void handleInput(int radius)
 {
     Vector2 pos = GetMousePosition();
     int x = pos.x / cellSize;
     int y = pos.y / cellSize;
 
     if (IsKeyPressed(KEY_R))
-        resetGrid();
-
-    for (int dy = -rangeSize; dy <= rangeSize; ++dy)
     {
-        for (int dx = -rangeSize; dx <= rangeSize; ++dx)
+        resetGrid();
+        return;
+    }
+
+    if (IsKeyPressed(KEY_ONE)) selectedMaterial = CellMaterial::Sand;
+    if (IsKeyPressed(KEY_TWO)) selectedMaterial = CellMaterial::Water;
+    if (IsKeyPressed(KEY_THREE)) selectedMaterial = CellMaterial::Stone;
+
+    for (int dy = -radius; dy <= radius; ++dy)
+    {
+        for (int dx = -radius; dx <= radius; ++dx)
         {
             int nx = x + dx;
             int ny = y + dy;
 
             if (nx >= 0 && nx < grid.cols && ny >= 0 && ny < grid.rows)
             {
-                if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))  grid.cells[grid.idx(ny, nx)] = 1;
-                if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON)) grid.cells[grid.idx(ny, nx)] = 0;
+                if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+                    grid.cells[grid.idx(ny, nx)] = Cell{ selectedMaterial };
+                if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
+                    grid.cells[grid.idx(ny, nx)] = Cell{};
             }
         }
     }

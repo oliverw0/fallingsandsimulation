@@ -21,9 +21,9 @@ void handlePlayerInput(Player* player)
 
     if (IsKeyDown(KEY_A) && player->posX > 0)              
     { 
-        if (grid.cells[player->posY * grid.cols + player->posX - 1] != 0) // Check for sand
+        if (grid.cells[player->posY * grid.cols + player->posX - 1].material != CellMaterial::Empty && props(grid.cells[(player->posY - 1) * grid.cols + player->posX - 1].material).blocks)
         {
-            if (player->posY > 0 && grid.cells[(player->posY - 1) * grid.cols + player->posX - 1] == 0)
+            if (player->posY > 0 && grid.cells[(player->posY - 1) * grid.cols + player->posX - 1].material == CellMaterial::Empty)
             {
                 player->posX--;
                 player->posY--;
@@ -36,9 +36,9 @@ void handlePlayerInput(Player* player)
     }
     if (IsKeyDown(KEY_D) && player->posX < grid.cols - 1)  
     { 
-        if (grid.cells[player->posY * grid.cols + player->posX + 1] != 0) // Check for sand
+        if (grid.cells[player->posY * grid.cols + player->posX + 1].material != CellMaterial::Empty && props(grid.cells[(player->posY - 1) * grid.cols + player->posX - 1].material).blocks)
         {
-            if (player->posY > 0 && grid.cells[(player->posY - 1) * grid.cols + player->posX + 1] == 0)
+            if (player->posY > 0 && grid.cells[(player->posY - 1) * grid.cols + player->posX + 1].material == CellMaterial::Empty)
             {
                 player->posX++;
                 player->posY--;
@@ -66,7 +66,7 @@ void handlePlayerInput(Player* player)
         for (int s = 0; s < steps; s++)
         {
             int nextY = player->posY + dir;
-            if (nextY >= 0 && nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)] == 0)
+            if (nextY >= 0 && nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)].material == CellMaterial::Empty)
             {
                 player->posY = nextY;
                 player->grounded = false;
@@ -83,7 +83,7 @@ void handlePlayerInput(Player* player)
     {
         // if sand beneath was erased, start falling
         int nextY = player->posY + 1;
-        if (nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)] == 0)
+        if (nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)].material == CellMaterial::Empty)
             player->grounded = false;
     }
 }

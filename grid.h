@@ -1,10 +1,11 @@
 #pragma once
 #include <vector>
+#include "cells/cell.h"
 
 struct Grid
 {
-    std::vector<int> cells;
-    std::vector<int> next;
+    std::vector<Cell> cells;
+    std::vector<Cell> next;
     int rows = 0;
     int cols = 0;
 
