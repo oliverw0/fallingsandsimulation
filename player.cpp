@@ -19,34 +19,49 @@ void drawPlayer(const Player& player)
 void handlePlayerInput(Player* player)
 {
 
-    if (IsKeyDown(KEY_A) && player->posX > 0)              
-    { 
-        if (grid.cells[player->posY * grid.cols + player->posX - 1].material != CellMaterial::Empty && props(grid.cells[(player->posY - 1) * grid.cols + player->posX - 1].material).blocks)
+    // LEFT movement (A)
+    if (IsKeyDown(KEY_A) && player->posX > 0)
+    {
+        int leftX = player->posX - 1;
+        int currY = player->posY;
+
+        // If the cell to the left does not block movement, move
+        if (!props(grid.cells[grid.idx(currY, leftX)].material).blocks)
         {
-            if (player->posY > 0 && grid.cells[(player->posY - 1) * grid.cols + player->posX - 1].material == CellMaterial::Empty)
+            player->posX--;
+        }
+        // Else, try to step up and left if not blocked
+        else if (player->posY > 0)
+        {
+            int aboveY = player->posY - 1;
+            if (!props(grid.cells[grid.idx(aboveY, leftX)].material).blocks)
             {
                 player->posX--;
                 player->posY--;
             }
         }
-        else
-        {
-            player->posX--; 
-        }
     }
-    if (IsKeyDown(KEY_D) && player->posX < grid.cols - 1)  
-    { 
-        if (grid.cells[player->posY * grid.cols + player->posX + 1].material != CellMaterial::Empty && props(grid.cells[(player->posY - 1) * grid.cols + player->posX - 1].material).blocks)
+
+    // RIGHT movement (D)
+    if (IsKeyDown(KEY_D) && player->posX < grid.cols - 1)
+    {
+        int rightX = player->posX + 1;
+        int currY = player->posY;
+
+        // If the cell to the right does not block movement, move
+        if (!props(grid.cells[grid.idx(currY, rightX)].material).blocks)
         {
-            if (player->posY > 0 && grid.cells[(player->posY - 1) * grid.cols + player->posX + 1].material == CellMaterial::Empty)
+            player->posX++;
+        }
+        // Else, try to step up and right if not blocked
+        else if (player->posY > 0)
+        {
+            int aboveY = player->posY - 1;
+            if (!props(grid.cells[grid.idx(aboveY, rightX)].material).blocks)
             {
                 player->posX++;
                 player->posY--;
             }
-        }
-        else
-        {
-            player->posX++; 
         }
     }
 
@@ -66,7 +81,7 @@ void handlePlayerInput(Player* player)
         for (int s = 0; s < steps; s++)
         {
             int nextY = player->posY + dir;
-            if (nextY >= 0 && nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)].material == CellMaterial::Empty)
+            if (nextY >= 0 && nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->posX)].material).blocks)
             {
                 player->posY = nextY;
                 player->grounded = false;
@@ -83,7 +98,8 @@ void handlePlayerInput(Player* player)
     {
         // if sand beneath was erased, start falling
         int nextY = player->posY + 1;
-        if (nextY < grid.rows && grid.cells[grid.idx(nextY, player->posX)].material == CellMaterial::Empty)
+        if (nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->posX)].material).blocks)
+   
             player->grounded = false;
     }
 }

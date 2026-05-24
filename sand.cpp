@@ -35,6 +35,7 @@ static void moveCell(int fromI, int fromJ, int toI, int toJ, const Cell& cell)
 }
 
 // Returns true if the cell moved.
+// TODO: Implement water displacement
 static bool tryFallDown(int i, int j, const Cell& cell, bool allowDiagonal)
 {
     if (canMoveTo(i + 1, j))
@@ -79,8 +80,6 @@ static bool tryFlowSideways(int i, int j, const Cell& cell)
 
 static void updateLiquid(int i, int j, const Cell& cell)
 {
-    if (tryFallDown(i, j, cell, false))
-        return;
     if (tryFallDown(i, j, cell, true))
         return;
     if (tryFlowSideways(i, j, cell))
