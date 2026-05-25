@@ -6,6 +6,7 @@
 #include "grid.h"
 #include "constants.h"
 #include "cells/material.h"
+#include "cells/reactions.h"
 
 Grid grid;
 CellMaterial selectedMaterial = CellMaterial::Sand;
@@ -166,6 +167,32 @@ static bool tryFloat(int i, int j, const Cell& cell, bool allowDiagonal)
     return false;
 }
 
+static bool tryReact(int i, int j, const Cell& cell){
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}}; // directions
+
+    for (auto& d : dirs) 
+    {
+        int ni = i + d[0], nj = j + d[1]; // first and last of each pair
+        if (!inBounds(ni,nj)) continue;
+        
+        const Cell& neighbour = grid.cells[grid.idx(ni,nj)];
+        
+        if (neighbour.material == CellMaterial::Empty) continue;
+
+        const Reaction* r = findReaction(cell.material, neighbour.material);
+
+        if (!r) continue; // check if reaction is not found (nullptr)
+        
+        if (r->chance > 1 && GetRandomValue(0, r->chance - 1) != 0) continue; // check if random value has not been met
+
+        grid.next[grid.idx(i,  j )] = Cell{ r->resultA };
+        grid.next[grid.idx(ni, nj)] = Cell{ r->resultB };
+        return true;
+    }
+    return false;
+}
+
+
 static void updateLiquid(int i, int j, const Cell& cell)
 {
     if (tryFallDown(i, j, cell, true))
@@ -188,6 +215,7 @@ static void updateGranular(int i, int j, const Cell& cell)
     if (!tryFallDown(i, j, cell, true))
         return; // already in next from the frame-start copy
 }
+
 
 void initializeGrid(int screenWidth, int screenHeight)
 {
@@ -244,21 +272,32 @@ void drawGrid()
                 continue;
 
             const MaterialProps& p = props(cell.material);
+            
             if (!p.falls)
             {
                 continue;
             }
             if (p.density < 0)
             {
-                updateGas(i, j, cell);
+                if (!tryReact(i, j, cell))
+                {
+                    updateGas(i, j, cell);
+                }
+
             }    
             else if (p.flows)
             {
-                updateLiquid(i, j, cell);
+                if (!tryReact(i, j, cell)) 
+                {
+                    updateLiquid(i, j, cell);
+                }
             }
             else
-            {
-                updateGranular(i, j, cell);
+            {    
+                if (!tryReact(i, j, cell)) 
+                {
+                    updateGranular(i, j, cell);
+                }
             }
         }
     }
