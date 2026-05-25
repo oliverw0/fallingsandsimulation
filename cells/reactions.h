@@ -11,7 +11,8 @@ struct Reaction {
 };
 
 inline const Reaction reactions[] = {
-    { CellMaterial::Water, CellMaterial::Lava, CellMaterial::Steam, CellMaterial::Stone, 1},
+    { CellMaterial::Water, CellMaterial::Lava, CellMaterial::Steam, CellMaterial::Stone, 1 },
+    { CellMaterial::Lava, CellMaterial::Sand, CellMaterial::Steam, CellMaterial::Glass, 1 },
 };
 
 inline const Reaction* findReaction(CellMaterial a, CellMaterial b) {
