@@ -10,6 +10,7 @@
 Grid grid;
 CellMaterial selectedMaterial = CellMaterial::Sand;
 int radius = 1;
+int* radiusPtr = &radius;
 
 static bool isEmpty(const Cell& c)
 {
@@ -215,7 +216,6 @@ void drawGrid()
     }
 }
 
-
 void handleInput(int radius)
 {
     Vector2 pos = GetMousePosition();
@@ -232,8 +232,8 @@ void handleInput(int radius)
     if (IsKeyPressed(KEY_TWO)) selectedMaterial = CellMaterial::Water;
     if (IsKeyPressed(KEY_THREE)) selectedMaterial = CellMaterial::Stone;
 
-    if (IsKeyPressed(KEY_MINUS) && radius > 0) radius -= 1;
-    if (IsKeyPressed(KEY_EQUAL) && radius < 10) radius += 1;
+    if (IsKeyPressed(KEY_MINUS) && radius > 0) *radiusPtr -= 1;
+    if (IsKeyPressed(KEY_EQUAL) && radius < 10) *radiusPtr += 1;
 
     for (int dy = -radius; dy <= radius; ++dy)
     {
