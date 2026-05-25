@@ -28,19 +28,39 @@ static bool canMoveTo(int i, int j)
     return isEmpty(grid.next[grid.idx(i, j)]);
 }
 
+static bool canDisplace(int i, int j, const Cell& cell)
+{
+    if (!inBounds(i, j))
+        return false;
+    const Cell& target = grid.cells[grid.idx(i, j)];
+    if (isEmpty(target))
+        return false;
+    return props(target.material).density < props(cell.material).density;
+}
+
 static void moveCell(int fromI, int fromJ, int toI, int toJ, const Cell& cell)
 {
     grid.next[grid.idx(fromI, fromJ)] = Cell{};
     grid.next[grid.idx(toI, toJ)] = cell;
 }
 
+static void displaceCell(int fromI, int fromJ, int toI, int toJ)
+{
+    grid.next[grid.idx(fromI, fromJ)] = grid.cells[grid.idx(toI, toJ)];
+    grid.next[grid.idx(toI, toJ)] = grid.cells[grid.idx(fromI, fromJ)];
+}
+
 // Returns true if the cell moved.
-// TODO: Implement water displacement
 static bool tryFallDown(int i, int j, const Cell& cell, bool allowDiagonal)
 {
     if (canMoveTo(i + 1, j))
     {
         moveCell(i, j, i + 1, j, cell);
+        return true;
+    }
+    if (canDisplace(i + 1, j, cell))
+    {
+        displaceCell(i, j, i + 1, j);
         return true;
     }
 
