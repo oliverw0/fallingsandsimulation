@@ -9,6 +9,7 @@
 
 Grid grid;
 CellMaterial selectedMaterial = CellMaterial::Sand;
+int radius = 1;
 
 static bool isEmpty(const Cell& c)
 {
@@ -209,6 +210,9 @@ void handleInput(int radius)
     if (IsKeyPressed(KEY_TWO)) selectedMaterial = CellMaterial::Water;
     if (IsKeyPressed(KEY_THREE)) selectedMaterial = CellMaterial::Stone;
 
+    if (IsKeyPressed(KEY_MINUS) && radius > 0) radius -= 1;
+    if (IsKeyPressed(KEY_EQUAL) && radius < 10) radius += 1;
+
     for (int dy = -radius; dy <= radius; ++dy)
     {
         for (int dx = -radius; dx <= radius; ++dx)
@@ -243,7 +247,7 @@ int main()
 
         BeginDrawing();
         ClearBackground(BLACK);
-        handleInput(5);
+        handleInput(radius);
         handlePlayerInput(&player);
         drawGrid();
         drawPlayer(player);
