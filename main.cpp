@@ -235,20 +235,57 @@ void handleInput(int radius)
     if (IsKeyPressed(KEY_MINUS) && radius > 0) *radiusPtr -= 1;
     if (IsKeyPressed(KEY_EQUAL) && radius < 10) *radiusPtr += 1;
 
-    for (int dy = -radius; dy <= radius; ++dy)
+   int bx = radius, by = 0, berr = 1 - radius;
+    while (bx >= by)
     {
-        for (int dx = -radius; dx <= radius; ++dx)
+        for (int scanX = x - bx; scanX <= x + bx; ++scanX)
         {
-            int nx = x + dx;
-            int ny = y + dy;
-
-            if (nx >= 0 && nx < grid.cols && ny >= 0 && ny < grid.rows)
+            if (scanX >= 0 && scanX < grid.cols)
             {
-                if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
-                    grid.cells[grid.idx(ny, nx)] = Cell{ selectedMaterial };
-                if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
-                    grid.cells[grid.idx(ny, nx)] = Cell{};
+                if (y + by >= 0 && y + by < grid.rows)
+                {
+                    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+                        grid.cells[grid.idx(y + by, scanX)] = Cell{ selectedMaterial };
+                    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
+                        grid.cells[grid.idx(y + by, scanX)] = Cell{};
+                }
+                if (y - by >= 0 && y - by < grid.rows)
+                {
+                    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+                        grid.cells[grid.idx(y - by, scanX)] = Cell{ selectedMaterial };
+                    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
+                        grid.cells[grid.idx(y - by, scanX)] = Cell{};
+                }
             }
+        }
+        for (int scanX = x - by; scanX <= x + by; ++scanX)
+        {
+            if (scanX >= 0 && scanX < grid.cols)
+            {
+                if (y + bx >= 0 && y + bx < grid.rows)
+                {
+                    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+                        grid.cells[grid.idx(y + bx, scanX)] = Cell{ selectedMaterial };
+                    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
+                        grid.cells[grid.idx(y + bx, scanX)] = Cell{};
+                }
+                if (y - bx >= 0 && y - bx < grid.rows)
+                {
+                    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+                        grid.cells[grid.idx(y - bx, scanX)] = Cell{ selectedMaterial };
+                    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
+                        grid.cells[grid.idx(y - bx, scanX)] = Cell{};
+                }
+            }
+        }
+
+        ++by;
+        if (berr < 0)
+            berr += 2 * by + 1;
+        else
+        {
+            --bx;
+            berr += 2 * (by - bx) + 1;
         }
     }
 }
