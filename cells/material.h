@@ -7,6 +7,8 @@ enum class CellMaterial : unsigned char {
     Sand,
     Water,
     Stone,
+    Lava,
+    Steam,
 };
 
 struct MaterialProps {
@@ -22,7 +24,9 @@ inline const MaterialProps& props(CellMaterial m) {
         { BLACK,  false, false, false, 0 },  // Empty
         { YELLOW,   true,  false, true, 2 },  // Sand
         { BLUE, true,  true,  false, 1 },  // Water
-        { WHITE,   false, false, true, 0 },  // Stone
+        { GRAY,   false, false, true, 9 },  // Stone
+        { ORANGE, true, true, false, 1 },   // Lava
+        { LIGHTGRAY, true, false, false, -1 },   // Steam
     };
     return table[static_cast<unsigned char>(m)];
 }

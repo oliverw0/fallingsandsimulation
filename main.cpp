@@ -122,6 +122,50 @@ static bool tryFlowSideways(int i, int j, const Cell& cell)
     return false;
 }
 
+static bool tryFloat(int i, int j, const Cell& cell, bool allowDiagonal)
+{
+    if (allowDiagonal) {
+        if (canMoveTo(i - 1, j - 1) && GetRandomValue(0, 5) == 1 ? 1 : false) {
+            moveCell(i, j, i - 1, j - 1, cell);
+            return true;
+        }
+
+        if (canMoveTo(i - 1, j + 1) && GetRandomValue(0, 5) == 1 ? 1 : false) {
+            moveCell(i, j, i - 1, j + 1, cell);
+            return true;
+        }
+    }
+
+    if (canMoveTo(i - 1, j))
+    {
+        moveCell(i, j, i - 1, j, cell);
+        return true;
+    }
+
+    if (canDisplace(i - 1, j, cell))
+    {
+        displaceCell(i, j, i - 1, j);
+        return true;
+    }
+
+    if (!allowDiagonal)
+    {
+        return false;
+    }
+
+    if (canMoveTo(i - 1, j - 1))
+    {
+        moveCell(i, j, i - 1, j - 1, cell);
+        return true;
+    }
+    if (canMoveTo(i - 1, j + 1))
+    {
+        moveCell(i, j, i - 1, j + 1, cell);
+        return true;
+    }
+    return false;
+}
+
 static void updateLiquid(int i, int j, const Cell& cell)
 {
     if (tryFallDown(i, j, cell, true))
@@ -130,6 +174,14 @@ static void updateLiquid(int i, int j, const Cell& cell)
         return;
     // already in next from the frame-start copy
 }
+
+static void updateGas(int i, int j, const Cell& cell){
+    if (tryFloat(i, j, cell, true))
+        return;
+    if (tryFlowSideways(i, j, cell))
+        return;
+}
+
 
 static void updateGranular(int i, int j, const Cell& cell)
 {
@@ -193,12 +245,21 @@ void drawGrid()
 
             const MaterialProps& p = props(cell.material);
             if (!p.falls)
+            {
                 continue;
-
-            if (p.flows)
+            }
+            if (p.density < 0)
+            {
+                updateGas(i, j, cell);
+            }    
+            else if (p.flows)
+            {
                 updateLiquid(i, j, cell);
+            }
             else
+            {
                 updateGranular(i, j, cell);
+            }
         }
     }
 
@@ -231,6 +292,8 @@ void handleInput(int radius)
     if (IsKeyPressed(KEY_ONE)) selectedMaterial = CellMaterial::Sand;
     if (IsKeyPressed(KEY_TWO)) selectedMaterial = CellMaterial::Water;
     if (IsKeyPressed(KEY_THREE)) selectedMaterial = CellMaterial::Stone;
+    if (IsKeyPressed(KEY_FOUR)) selectedMaterial = CellMaterial::Lava;
+    if (IsKeyPressed(KEY_FIVE)) selectedMaterial = CellMaterial::Steam;
 
     if (IsKeyPressed(KEY_MINUS) && radius > 0) *radiusPtr -= 1;
     if (IsKeyPressed(KEY_EQUAL) && radius < 10) *radiusPtr += 1;
