@@ -14,14 +14,15 @@ struct MaterialProps {
     bool falls;
     bool flows;
     bool blocks;
+    int density;
 };
 
 inline const MaterialProps& props(CellMaterial m) {
     static const MaterialProps table[] = {
-        { BLACK,  false, false, false },  // Empty
-        { YELLOW,   true,  false, true },  // Sand
-        { BLUE, true,  true,  false },  // Water
-        { WHITE,   false, false, true  },  // Stone
+        { BLACK,  false, false, false, 0 },  // Empty
+        { YELLOW,   true,  false, true, 2 },  // Sand
+        { BLUE, true,  true,  false, 1 },  // Water
+        { WHITE,   false, false, true, 3 },  // Stone
     };
     return table[static_cast<unsigned char>(m)];
 }
