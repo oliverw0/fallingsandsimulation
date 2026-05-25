@@ -36,7 +36,7 @@ static bool canDisplace(int i, int j, const Cell& cell)
     const Cell& target = grid.cells[grid.idx(i, j)];
     if (isEmpty(target))
         return false;
-    return props(target.material).density < props(cell.material).density;
+    return props(target.material).density < props(cell.material).density && !props(target.material).blocks;
 }
 
 static void moveCell(int fromI, int fromJ, int toI, int toJ, const Cell& cell)
@@ -54,11 +54,31 @@ static void displaceCell(int fromI, int fromJ, int toI, int toJ)
 // Returns true if the cell moved.
 static bool tryFallDown(int i, int j, const Cell& cell, bool allowDiagonal)
 {
+
+    // check allowDiagonal.
+    // check diagonal positions.
+    // Random chance to fall that way instead of straight down
+
+    if (allowDiagonal) {
+        if (canMoveTo(i + 1, j - 1) && GetRandomValue(0, 5) == 1 ? 1 : false) {
+            moveCell(i,j,i + 1, j - 1, cell);
+            return true;
+        }   
+
+        if (canMoveTo(i + 1, j + 1) && GetRandomValue(0, 5) == 1 ? 1 : false) {
+            moveCell(i,j,i + 1, j + 1, cell);
+            return true;
+        }   
+    }
+
+    // remainder of logic
+
     if (canMoveTo(i + 1, j))
     {
         moveCell(i, j, i + 1, j, cell);
         return true;
     }
+
     if (canDisplace(i + 1, j, cell))
     {
         displaceCell(i, j, i + 1, j);
@@ -66,7 +86,9 @@ static bool tryFallDown(int i, int j, const Cell& cell, bool allowDiagonal)
     }
 
     if (!allowDiagonal)
+    {
         return false;
+    }
 
     if (canMoveTo(i + 1, j - 1))
     {
