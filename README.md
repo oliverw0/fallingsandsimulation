@@ -2,7 +2,7 @@
 
 Very basic falling sand simulation. Still in development.
 
-Compile with `g++ sand.cpp player.cpp -o sand.exe -lraylib`
+Compile with `g++ main.cpp player.cpp -o sand.exe -lraylib`
 
 Run: `./sand.exe`
 
