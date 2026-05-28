@@ -3,7 +3,12 @@
 class Entity
 {
 protected:
-    std::vector<int> hitbox; // width, height in cells
+    struct Hitbox
+    {
+        int width;
+        int height;
+    } hitbox;
+
     int posX = 0;
     int posY = 0;
 
@@ -37,5 +42,15 @@ public:
     void setPosX(int x)
     {
         posX = x;
+    }
+
+    void setHitbox(int width, int height)
+    {
+        hitbox = { width, height };
+    }
+
+    Hitbox getHitbox() const
+    {
+        return hitbox;
     }
 };

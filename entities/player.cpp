@@ -12,10 +12,10 @@ constexpr float JUMP_FORCE  = -std::sqrt(2.0f * GRAVITY * JUMP_HEIGHT);
 
 void drawPlayer(const Player& player)
 {
-    DrawRectangle(player.getPosition()[0] * cellSize, player.getPosition()[1] * cellSize, cellSize, cellSize, RED);
+    DrawRectangle(player.getPosX()* cellSize , player.getPosY() * cellSize, cellSize, cellSize, RED);
 }
 
-void handlePlayerInput(Player* player)
+void handlePlayerInput(Player* player, Grid& grid)
 {
     int posX = player->getPosX();
     int posY = player->getPosY();
