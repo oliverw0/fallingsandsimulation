@@ -2,7 +2,7 @@
 #include <cstdlib>
 #include <vector>
 #include <cstring>
-#include "player.h"
+#include "entities/player.h"
 #include "grid.h"
 #include "constants.h"
 #include "cells/material.h"

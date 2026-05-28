@@ -1,7 +1,6 @@
-#pragma once
 #include "player.h"
-#include "grid.h"    
-#include "constants.h"   
+#include "../grid.h"    
+#include "../constants.h"   
 #include <raylib.h>
 #include <algorithm>
 #include <cmath>
@@ -13,54 +12,54 @@ constexpr float JUMP_FORCE  = -std::sqrt(2.0f * GRAVITY * JUMP_HEIGHT);
 
 void drawPlayer(const Player& player)
 {
-    DrawRectangle(player.posX * cellSize, player.posY * cellSize, cellSize, cellSize, RED);
+    DrawRectangle(player.getPosition()[0] * cellSize, player.getPosition()[1] * cellSize, cellSize, cellSize, RED);
 }
 
 void handlePlayerInput(Player* player)
 {
+    int posX = player->getPosX();
+    int posY = player->getPosY();
 
     // LEFT movement (A)
-    if (IsKeyDown(KEY_A) && player->posX > 0)
+    if (IsKeyDown(KEY_A) && posX > 0)
     {
-        int leftX = player->posX - 1;
-        int currY = player->posY;
+        int leftX = posX - 1;
+        int currY = posY;
 
         // If the cell to the left does not block movement, move
         if (!props(grid.cells[grid.idx(currY, leftX)].material).blocks)
         {
-            player->posX--;
+            player->setPosX(leftX);
         }
         // Else, try to step up and left if not blocked
-        else if (player->posY > 0)
+        else if (posY > 0)
         {
-            int aboveY = player->posY - 1;
+            int aboveY = posY - 1;
             if (!props(grid.cells[grid.idx(aboveY, leftX)].material).blocks)
             {
-                player->posX--;
-                player->posY--;
+                player->setPosition(leftX, aboveY);
             }
         }
     }
 
     // RIGHT movement (D)
-    if (IsKeyDown(KEY_D) && player->posX < grid.cols - 1)
+    if (IsKeyDown(KEY_D) && posX < grid.cols - 1)
     {
-        int rightX = player->posX + 1;
-        int currY = player->posY;
+        int rightX = posX + 1;
+        int currY = posY;
 
         // If the cell to the right does not block movement, move
         if (!props(grid.cells[grid.idx(currY, rightX)].material).blocks)
         {
-            player->posX++;
+            player->setPosX(rightX);
         }
         // Else, try to step up and right if not blocked
-        else if (player->posY > 0)
+        else if (posY > 0)
         {
-            int aboveY = player->posY - 1;
+            int aboveY = posY - 1;
             if (!props(grid.cells[grid.idx(aboveY, rightX)].material).blocks)
             {
-                player->posX++;
-                player->posY--;
+                player->setPosition(rightX, aboveY);
             }
         }
     }
@@ -80,10 +79,10 @@ void handlePlayerInput(Player* player)
 
         for (int s = 0; s < steps; s++)
         {
-            int nextY = player->posY + dir;
-            if (nextY >= 0 && nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->posX)].material).blocks)
+            int nextY = player->getPosY() + dir;
+            if (nextY >= 0 && nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->getPosX())].material).blocks)
             {
-                player->posY = nextY;
+                player->setPosY(nextY);
                 player->grounded = false;
             }
             else
@@ -97,9 +96,10 @@ void handlePlayerInput(Player* player)
     else
     {
         // if sand beneath was erased, start falling
-        int nextY = player->posY + 1;
-        if (nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->posX)].material).blocks)
-   
+        int nextY = player->getPosY() + 1;
+        if (nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->getPosX())].material).blocks)
+        {
             player->grounded = false;
+        }
     }
 }
