@@ -37,6 +37,7 @@ private:
     void updateGranular(int i, int j, const Cell& cell);
     void initializeGrid(int screenWidth, int screenHeight);
     void resetGrid();
+    void simulateGrid();
     void drawGrid();
     void handleInput();
 };

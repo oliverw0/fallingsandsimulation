@@ -238,7 +238,7 @@ void World::resetGrid()
     std::fill(grid.next.begin(), grid.next.end(), Cell{});
 }
 
-void World::drawGrid()
+void World::simulateGrid()
 {
     grid.next = grid.cells;
 
@@ -263,29 +263,27 @@ void World::drawGrid()
             if (p.density < 0)
             {
                 if (!tryReact(i, j, cell))
-                {
                     updateGas(i, j, cell);
-                }
             }
             else if (p.flows)
             {
                 if (!tryReact(i, j, cell))
-                {
                     updateLiquid(i, j, cell);
-                }
             }
             else
             {
                 if (!tryReact(i, j, cell))
-                {
                     updateGranular(i, j, cell);
-                }
             }
         }
     }
 
     grid.cells.swap(grid.next);
 
+}
+
+void World::drawGrid()
+{
     for (int i = 0; i < grid.rows; i++)
     {
         for (int j = 0; j < grid.cols; j++)
@@ -379,6 +377,7 @@ void World::update()
     if (IsWindowResized())
         resizeGrid(GetScreenWidth() / cellSize, GetScreenHeight() / cellSize);
 
+    simulateGrid();
     handleInput();
     handlePlayerInput(&player, grid);
 }
