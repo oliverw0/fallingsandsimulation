@@ -1,6 +1,7 @@
 #include "player.h"
-#include "../grid.h"    
-#include "../constants.h"   
+
+#include "../constants.h"
+#include "../cells/material.h"
 #include <raylib.h>
 #include <algorithm>
 #include <cmath>
@@ -10,96 +11,80 @@ constexpr float MAX_FALL    = 8.0f;
 constexpr float JUMP_HEIGHT = 20.0f;
 constexpr float JUMP_FORCE  = -std::sqrt(2.0f * GRAVITY * JUMP_HEIGHT);
 
-void drawPlayer(const Player& player)
+void Player::draw() const
 {
-    DrawRectangle(player.getPosX()* cellSize , player.getPosY() * cellSize, cellSize, cellSize, RED);
+    DrawRectangle(getPosX() * cellSize, getPosY() * cellSize, cellSize, cellSize, RED);
 }
 
-void handlePlayerInput(Player* player, Grid& grid)
+void Player::update(SimulationContext& ctx)
 {
-    int posX = player->getPosX();
-    int posY = player->getPosY();
+    Grid& grid = ctx.grid;
+    int posX = getPosX();
+    int posY = getPosY();
 
-    // LEFT movement (A)
     if (IsKeyDown(KEY_A) && posX > 0)
     {
         int leftX = posX - 1;
         int currY = posY;
 
-        // If the cell to the left does not block movement, move
         if (!props(grid.cells[grid.idx(currY, leftX)].material).blocks)
-        {
-            player->setPosX(leftX);
-        }
-        // Else, try to step up and left if not blocked
+            setPosX(leftX);
         else if (posY > 0)
         {
             int aboveY = posY - 1;
             if (!props(grid.cells[grid.idx(aboveY, leftX)].material).blocks)
-            {
-                player->setPosition(leftX, aboveY);
-            }
+                setPosition(leftX, aboveY);
         }
     }
 
-    // RIGHT movement (D)
     if (IsKeyDown(KEY_D) && posX < grid.cols - 1)
     {
         int rightX = posX + 1;
         int currY = posY;
 
-        // If the cell to the right does not block movement, move
         if (!props(grid.cells[grid.idx(currY, rightX)].material).blocks)
-        {
-            player->setPosX(rightX);
-        }
-        // Else, try to step up and right if not blocked
+            setPosX(rightX);
         else if (posY > 0)
         {
             int aboveY = posY - 1;
             if (!props(grid.cells[grid.idx(aboveY, rightX)].material).blocks)
-            {
-                player->setPosition(rightX, aboveY);
-            }
+                setPosition(rightX, aboveY);
         }
     }
 
-    if ((IsKeyPressed(KEY_W) || IsKeyPressed(KEY_SPACE)) && player->grounded)
+    if ((IsKeyPressed(KEY_W) || IsKeyPressed(KEY_SPACE)) && grounded)
     {
-        player->velY = JUMP_FORCE;
-        player->grounded = false;
+        velY = JUMP_FORCE;
+        grounded = false;
     }
 
-    if (!player->grounded)
+    if (!grounded)
     {
-        player->velY = std::min(player->velY + GRAVITY, MAX_FALL);
+        velY = std::min(velY + GRAVITY, MAX_FALL);
 
-        int steps = (int)std::abs(player->velY);
-        int dir   = player->velY >= 0 ? 1 : -1;
+        int steps = (int)std::abs(velY);
+        int dir   = velY >= 0 ? 1 : -1;
 
         for (int s = 0; s < steps; s++)
         {
-            int nextY = player->getPosY() + dir;
-            if (nextY >= 0 && nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->getPosX())].material).blocks)
+            int nextY = getPosY() + dir;
+            if (nextY >= 0 && nextY < grid.rows && !props(grid.cells[grid.idx(nextY, getPosX())].material).blocks)
             {
-                player->setPosY(nextY);
-                player->grounded = false;
+                setPosY(nextY);
+                grounded = false;
             }
             else
             {
-                player->velY = 0.0f;
-                if (dir == 1) player->grounded = true;
+                velY = 0.0f;
+                if (dir == 1) grounded = true;
                 break;
             }
         }
     }
     else
     {
-        // if sand beneath was erased, start falling
-        int nextY = player->getPosY() + 1;
-        if (nextY < grid.rows && !props(grid.cells[grid.idx(nextY, player->getPosX())].material).blocks)
-        {
-            player->grounded = false;
-        }
+        int nextY = getPosY() + 1;
+        if (nextY < grid.rows && !props(grid.cells[grid.idx(nextY, getPosX())].material).blocks)
+            grounded = false;
     }
 }

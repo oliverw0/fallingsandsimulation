@@ -1,8 +1,10 @@
 #pragma once
-#include "../grid.h"
-#include "entity.h"
 
-class Player : public Entity
+#include "entity.h"
+#include "i_entity.h"
+#include "simulation_context.h"
+
+class Player : public Entity, public IEntity
 {
 public:
     Player(int x, int y)
@@ -11,11 +13,10 @@ public:
         setHitbox(1, 3);
     }
 
+    void update(SimulationContext& ctx) override;
+    void draw() const override;
 
     float speed = 1.0f;
     float velY = 0.0f;
     bool grounded = false;
 };
-
-void handlePlayerInput(Player* player, Grid& grid);
-void drawPlayer(const Player& player);

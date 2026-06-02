@@ -1,7 +1,7 @@
 #pragma once
 #include <vector>
 #include "../constants.h"
-#include "../entities/player.h"
+#include "../entities/entity_manager.h"
 #include "../grid.h"
 #include "../cells/material.h"
 #include "../cells/reactions.h"
@@ -10,7 +10,7 @@ class World
 {
 public:
     Grid grid;
-    Player player;
+    EntityManager entities;
 
     CellMaterial selectedMaterial = CellMaterial::Sand;
     int radius = 1;

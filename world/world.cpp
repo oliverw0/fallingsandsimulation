@@ -1,13 +1,14 @@
 #include "world.h"
 
+#include "../entities/player.h"
+#include "../entities/simulation_context.h"
 #include <algorithm>
 #include <raylib.h>
 
 World::World(int screenWidth, int screenHeight)
-    : player(0, 0)
 {
     initializeGrid(screenWidth, screenHeight);
-    player.setPosition(grid.cols / 2, grid.rows / 2);
+    entities.spawn<Player>(grid.cols / 2, grid.rows / 2);
 }
 
 bool World::isEmpty(const Cell& c) const
@@ -378,8 +379,11 @@ void World::update()
         resizeGrid(GetScreenWidth() / cellSize, GetScreenHeight() / cellSize);
 
     simulateGrid();
+
+    SimulationContext ctx{ grid };
+    entities.update(ctx);
+
     handleInput();
-    handlePlayerInput(&player, grid);
 }
 
 void World::draw()
@@ -387,6 +391,6 @@ void World::draw()
     BeginDrawing();
     ClearBackground(BLACK);
     drawGrid();
-    drawPlayer(player);
+    entities.draw();
     EndDrawing();
 }
