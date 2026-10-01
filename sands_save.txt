@@ -1,0 +1,12 @@
+bank 4
+runs 4
+deepest 2
+owned 0
+equip 0
+owned 2
+owned 6
+equip 6
+owned 10
+equip 10
+owned 12
+equip 12

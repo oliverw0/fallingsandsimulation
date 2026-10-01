@@ -1,9 +1,11 @@
 // material.h
 #pragma once
 #include <raylib.h>
+#include <cstdint>
 
-enum class CellMaterial : unsigned char {
+enum class CellMaterial : uint8_t {
     Empty = 0,
+    Bedrock,
     Sand,
     WetSand,
     Water,
@@ -11,26 +13,102 @@ enum class CellMaterial : unsigned char {
     Lava,
     Steam,
     Glass,
+    Dirt,
+    Grass,
+    Gravel,
+    Wood,
+    Leaves,
+    Brick,
+    Bone,
+    Snow,
+    Ice,
+    Acid,
+    Oil,
+    Gunpowder,
+    Fire,
+    Smoke,
+    Miasma,
+    Blood,
+    Coal,
+    CopperOre,
+    IronOre,
+    GoldOre,
+    Firestone,
+    Frostite,
+    Stormite,
+    Venomite,
+    Adamantite,
+    Obsidian,
+    Basalt,
+    Moss,
+    Keg,
+    Metal,
+    Spikes,
+    Platform, // one-way planks: stand on them, jump up through them, S to drop through
+    Count
 };
 
+// Collectable resources. Ore cells map onto these.
+enum Res { R_COPPER, R_IRON, R_COAL, R_GOLD, R_FIRESTONE, R_FROSTITE, R_STORMITE, R_VENOMITE, R_ADAMANTITE, RES_COUNT };
+
+enum class Kind : uint8_t { Air, Solid, Powder, Liquid, Gas, Fire };
+
 struct MaterialProps {
-    Color color;
-    bool falls;
-    bool flows;
-    bool blocks;
+    const char* name;
+    Color a, b;      // each cell picks a colour between a and b from its shade byte
+    Kind kind;
     int density;
+    int hardness;    // what an explosion / weapon needs to break it, 255 = never
+    int flammable;   // % chance to catch per exposure
+    int burnTime;
+    int ore;         // Res + 1, 0 = not an ore
+    int dispersion;  // liquids: how far they spread sideways per tick
 };
 
 inline const MaterialProps& props(CellMaterial m) {
     static const MaterialProps table[] = {
-        { BLACK,  false, false, false, 0 },  // Empty
-        { YELLOW,   true,  false, true, 2 },  // Sand
-        { BEIGE,   true,  false, true, 2 },  // WetSand
-        { BLUE, true,  true,  false, 1 },  // Water
-        { GRAY,   false, false, true, 9 },  // Stone
-        { ORANGE, true, true, false, 1 },   // Lava
-        { LIGHTGRAY, true, false, false, -1 },   // Steam
-        { WHITE, false, false, true, 9 },   // Glass
+        { "Air",        {0,0,0,0},         {0,0,0,0},         Kind::Air,     0,   0,   0,   0, 0, 0 },
+        { "Bedrock",    {22,20,26,255},    {46,42,52,255},    Kind::Solid, 100, 255,   0,   0, 0, 0 },
+        { "Sand",       {196,164,96,255},  {236,208,138,255}, Kind::Powder, 20,   0,   0,   0, 0, 0 },
+        { "Wet Sand",   {132,108,66,255},  {168,140,88,255},  Kind::Powder, 21,   0,   0,   0, 0, 0 },
+        { "Water",      {30,84,180,190},   {56,120,214,205},  Kind::Liquid, 10,   0,   0,   0, 0, 5 },
+        { "Stone",      {74,74,82,255},    {134,132,142,255}, Kind::Solid,  50,   3,   0,   0, 0, 0 },
+        { "Lava",       {220,70,16,255},   {255,160,40,255},  Kind::Liquid, 15,   0,   0,   0, 0, 1 },
+        { "Steam",      {190,190,200,120}, {230,230,240,90},  Kind::Gas,    -2,   0,   0,   0, 0, 0 },
+        { "Glass",      {150,195,212,150}, {200,235,245,185}, Kind::Solid,  50,   2,   0,   0, 0, 0 },
+        { "Dirt",       {74,48,30,255},    {126,88,56,255},   Kind::Solid,  40,   1,   0,   0, 0, 0 },
+        { "Grass",      {42,104,34,255},   {96,168,62,255},   Kind::Solid,  40,   1,   8,  30, 0, 0 },
+        { "Gravel",     {88,84,80,255},    {150,144,136,255}, Kind::Powder, 22,   0,   0,   0, 0, 0 },
+        { "Wood",       {88,56,32,255},    {146,104,60,255},  Kind::Solid,  40,   2,   5, 160, 0, 0 },
+        { "Leaves",     {28,80,28,255},    {74,138,48,255},   Kind::Solid,  30,   1,  25,  25, 0, 0 },
+        { "Brick",      {94,52,44,255},    {152,92,74,255},   Kind::Solid,  50,   4,   0,   0, 0, 0 },
+        { "Bone",       {186,182,162,255}, {234,230,210,255}, Kind::Powder, 18,   0,   0,   0, 0, 0 },
+        { "Snow",       {212,220,236,255}, {250,252,255,255}, Kind::Powder, 15,   0,   0,   0, 0, 0 },
+        { "Ice",        {136,186,228,230}, {198,230,252,240}, Kind::Solid,  45,   2,   0,   0, 0, 0 },
+        { "Acid",       {96,216,36,220},   {164,255,96,230},  Kind::Liquid, 11,   0,   0,   0, 0, 3 },
+        { "Oil",        {36,28,24,235},    {74,60,44,235},    Kind::Liquid,  8,   0,  60,  50, 0, 3 },
+        { "Gunpowder",  {38,38,42,255},    {86,84,88,255},    Kind::Powder, 19,   0, 100,   4, 0, 0 },
+        { "Fire",       {255,200,60,255},  {255,90,20,255},   Kind::Fire,   -1,   0,   0,   0, 0, 0 },
+        { "Smoke",      {50,50,54,140},    {92,92,98,110},    Kind::Gas,    -1,   0,   0,   0, 0, 0 },
+        { "Miasma",     {106,148,48,100},  {152,192,82,90},   Kind::Gas,    -3,   0,  90,   2, 0, 0 },
+        { "Blood",      {116,8,14,235},    {172,22,28,235},   Kind::Liquid, 10,   0,   0,   0, 0, 2 },
+        { "Coal",       {20,20,22,255},    {60,58,60,255},    Kind::Solid,  50,   3,   3, 240, R_COAL + 1, 0 },
+        { "Copper Ore", {146,80,46,255},   {236,156,94,255},  Kind::Solid,  50,   3,   0,   0, R_COPPER + 1, 0 },
+        { "Iron Ore",   {116,80,70,255},   {200,174,164,255}, Kind::Solid,  50,   4,   0,   0, R_IRON + 1, 0 },
+        { "Gold Ore",   {176,136,28,255},  {255,228,104,255}, Kind::Solid,  50,   3,   0,   0, R_GOLD + 1, 0 },
+        { "Firestone",  {176,38,14,255},   {255,134,42,255},  Kind::Solid,  50,   5,   0,   0, R_FIRESTONE + 1, 0 },
+        { "Frostite",   {66,156,228,255},  {184,238,255,255}, Kind::Solid,  50,   5,   0,   0, R_FROSTITE + 1, 0 },
+        { "Stormite",   {106,66,206,255},  {204,174,255,255}, Kind::Solid,  50,   5,   0,   0, R_STORMITE + 1, 0 },
+        { "Venomite",   {36,146,52,255},   {124,238,112,255}, Kind::Solid,  50,   5,   0,   0, R_VENOMITE + 1, 0 },
+        { "Adamantite", {28,126,116,255},  {94,234,214,255},  Kind::Solid,  50,   6,   0,   0, R_ADAMANTITE + 1, 0 },
+        { "Obsidian",   {18,12,30,255},    {58,42,80,255},    Kind::Solid,  50,   6,   0,   0, 0, 0 },
+        { "Basalt",     {40,36,38,255},    {82,74,76,255},    Kind::Solid,  50,   5,   0,   0, 0, 0 },
+        { "Moss",       {30,76,34,255},    {74,132,60,255},   Kind::Solid,  40,   1,  10,  40, 0, 0 },
+        { "Powder Keg", {106,60,26,255},   {162,104,54,255},  Kind::Solid,  40,   2, 100,   6, 0, 0 },
+        { "Iron Plate", {78,84,94,255},    {132,140,150,255}, Kind::Solid,  60,   7,   0,   0, 0, 0 },
+        { "Spikes",     {136,136,146,255}, {214,214,224,255}, Kind::Solid,  50,   4,   0,   0, 0, 0 },
+        { "Platform",   {120,82,48,255},   {172,124,74,255},  Kind::Solid,  40,   2,   5, 120, 0, 0 },
     };
+    static_assert(sizeof(table) / sizeof(table[0]) == (int)CellMaterial::Count, "material table out of sync");
     return table[static_cast<unsigned char>(m)];
 }
