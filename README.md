@@ -2,9 +2,9 @@
 
 A falling-sand roguelike in the spirit of Noita, set in a medieval world. Every pixel is simulated: sand falls, water flows, oil burns, gunpowder chains into explosions and acid eats through stone.
 
-Every run starts in **Hearthwick**, a village where coins banked from earlier runs buy permanent unlocks (starting weapons, a staff, starter spells, armour, a spare flask and the grappling hook). You set out with a frying pan plus whatever you've equipped, and descend through seven stages with a sanctuary between each:
+Every run starts in **Hearthwick**, a Norse harbour village where coins banked from earlier runs buy permanent unlocks (starting weapons, a staff, starter spells, armour, a spare flask and the grappling hook). Walk out along the pier and press F at the longship to set sail with a frying pan plus whatever you've equipped. It's always night: the moon lights the open ground, and torches and lanterns light buildings and mineshafts. You descend through seven stages with a sanctuary between each:
 
-1. **The Greenmarch** - a mostly horizontal march across rolling plains, past farmhouses (walk-through, with upstairs rooms and cellars linked by tunnels), watchtowers and palisade gates to Dunmoor's moat and gatehouse (dire wolves, goblins, redcaps, tower archers). One old mineshaft per run drops by rope into a single sprawling cave system below: optional, but full of chests, dropped weapons and the skeletons of those who went before, plus a few sealed hollows you can only dig into (follow the gold seams)
+1. **The Whispering Dunes, then the Greenmarch** - you run aground on a moonlit beach and cross quiet dunes (cacti, tumbleweeds, a giant's bones, only the wind for company; nothing hunts you here, and very rarely there's a buried chest). Then comes a mostly horizontal march across rolling plains, past farmhouses (walk-through, with upstairs rooms and cellars linked by tunnels), watchtowers and palisade gates to Dunmoor's moat and gatehouse (dire wolves, goblins, redcaps, tower archers). One old mineshaft per run drops by rope into a single sprawling cave system below: optional, but full of chests, dropped weapons and the skeletons of those who went before, plus a few sealed hollows you can only dig into (follow the gold seams)
 2. **Castle Dunmoor** - enter through a stained-glass hall, then descend a chain of gothic rooms joined by ramps, drop-downs and plank-capped shafts (castle guards, knights, cultists)
 3. **Forsaken Crypts** - masonry tunnels, coffins, acid vats and arrow traps (skeletons, archers, cultists)
 4. **Deepdelve Mines** - powder kegs, gunpowder crates, miasma pockets and collapsing ceilings. Boss: **The Black Knight**
@@ -14,13 +14,22 @@ Every run starts in **Hearthwick**, a village where coins banked from earlier ru
 
 ## Build
 
-Needs raylib 5.5 (MSYS2: `pacman -S mingw-w64-ucrt-x86_64-raylib`).
+Needs raylib 5.5 and a C++17 compiler.
+
+**Linux** (Fedora: `sudo dnf install raylib-devel gcc-c++`; Debian/Ubuntu: `sudo apt install libraylib-dev g++`. If your distro's raylib is older than 5.x, build it from source at github.com/raysan5/raylib.)
+
+```
+g++ -std=c++17 -O2 *.cpp -o sand -lraylib -lm
+./sand
+```
+
+**Windows** (MSYS2: `pacman -S mingw-w64-ucrt-x86_64-raylib`):
 
 ```
 g++ -std=c++17 -O2 *.cpp -o sand.exe -lraylib -lopengl32 -lgdi32 -lwinmm
 ```
 
-Run `./sand.exe`. Dev tools: `./sand.exe --selftest` checks the staff casting rules; `./sand.exe --dump <dir>` renders every stage to a PNG.
+Dev tools: `--selftest` checks the staff casting rules; `--dump <dir>` renders every stage to a PNG.
 
 ## Controls
 
@@ -38,7 +47,7 @@ Run `./sand.exe`. Dev tools: `./sand.exe --selftest` checks the staff casting ru
 | 1-6, mouse wheel | Switch item |
 | Q | Drink a healing flask |
 | G | Drop the current item |
-| F | Interact (chests, anvil, shrine, portal) |
+| F | Interact (chests, anvil, shrine, portal, the longship) |
 | Tab | Inventory: drag spells between bag and staff slots, drag hotbar items to reorder or onto the bin to drop; right-click to quick equip / unequip |
 | Esc | Pause (UI size with - / =, reduce screen shake with K) |
 | F1 | Controls overlay |

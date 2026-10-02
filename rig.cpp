@@ -1,6 +1,6 @@
 // Character art and animation:
-//  - the player is a jointed chibi rig drawn into a small canvas, then outlined
-//  - creature sprites get automatic outlines/rim light (bosses are also Scale2x'd)
+//  - the player is a jointed rig drawn into a small pixel canvas
+//  - creature sprites are hand-shaded with no outline (bosses are drawn at 2x)
 //  - ragdolls: verlet stick figures that tumble through the falling-sand world
 #include "game.h"
 #include "sprites.h"
@@ -71,75 +71,63 @@ static void canvasEnd(bool flash)
         for (int x = 0; x < CW; x++)
         {
             Color c = canvas[y * CW + x];
-            if (!c.a)
-            {
-                bool edge = (x > 0 && canvas[y * CW + x - 1].a) || (x < CW - 1 && canvas[y * CW + x + 1].a) ||
-                            (y > 0 && canvas[(y - 1) * CW + x].a) || (y < CH - 1 && canvas[(y + 1) * CW + x].a);
-                if (!edge) continue;
-                c = OUTLINE;
-            }
-            else if (flash)
-                c = WHITE;
+            if (!c.a) continue;
+            if (flash) c = WHITE;
             DrawRectangle(cox + x, coy + y, 1, 1, c);
         }
 }
 
-// ---------------------------------------------------------------- player heads (12x9, facing right)
-// h/H hair, s/S skin, F eye white, u iris, A/D/L armour, v visor, g glow, p plume, n horn
+// ---------------------------------------------------------------- player heads (6 wide, facing right)
+// h/H hair & beard, s/S skin, u eye, A/D/L armour, c/C mail, v eye slot, g glow, n horn
 
-static const char* HEAD_HAIR[] = {
-    "..hHHh..",
-    ".hhHHHh.",
-    "hhhSssH.",
-    "hhSsFus.",
-    "hhSssss.",
-    ".hSssSs.",
-    "..hSss..",
+static const char* HEAD_BARE[] = { // braided hair and a full beard
+    ".hHHh.",
+    "hHhhHh",
+    "hhssus",
+    "hhSsss",
+    "hhSSs.",
+    "h.hHh.",
+    "..hh..",
 };
-static const char* HEAD_KETTLE[] = {
-    "...LL...",
-    "..LAAD..",
-    "DDDDDDDD",
-    ".hSsFus.",
-    ".hSssss.",
-    "..SssSs.",
-    "...Sss..",
+static const char* HEAD_SPANGEN[] = { // riveted cap with a nasal guard
+    "..LL..",
+    ".LAAD.",
+    "LAAAAD",
+    "DDDDDA",
+    "hhssuA",
+    "hhSssS",
+    "h.hHh.",
+    "..hh..",
 };
-static const char* HEAD_GREAT[] = {
-    "..LLLL..",
-    ".LAAAAD.",
-    ".AAAAAAD",
-    ".AAvvvvD",
-    ".AAAAvAD",
-    ".DAAAAAD",
-    "..DDDD..",
+static const char* HEAD_GJERMUNDBU[] = { // rounded helm with spectacle guards
+    "..LL..",
+    ".LAAD.",
+    "LAAAAD",
+    "DDDDDD",
+    "hhsAvA",
+    "hhSsAS",
+    "h.hHh.",
+    "..hh..",
 };
-static const char* HEAD_CREST[] = {
-    "..LDLL..",
-    ".LAAAAD.",
-    ".AAAAAAD",
-    ".AAvvvvD",
-    ".AAAAvAD",
-    ".DAAAAAD",
-    "..DDDD..",
+static const char* HEAD_RUNE[] = { // closed helm, mail aventail, eyes burning with the armour's element
+    "..LL..",
+    ".LAAD.",
+    "LAAAAD",
+    "DDDDDD",
+    "DAAggA",
+    "DAAAAD",
+    "cCcCc.",
+    ".CcC..",
 };
-static const char* HEAD_PLUME[] = {
-    "pp.LLL..",
-    ".pLAAAD.",
-    ".AAAAAAD",
-    ".AAggggD",
-    ".AAAAvAD",
-    ".DAAAAAD",
-    "..DDDD..",
-};
-static const char* HEAD_HORNED[] = {
-    "n......n",
-    "n.LLLL.n",
-    ".nAAAAn.",
-    ".AAggggD",
-    ".AAAAAAD",
-    ".DAAAAAD",
-    "..DDDD..",
+static const char* HEAD_HORNED[] = { // the adamantium war-helm
+    "n....n",
+    "nLLLLn",
+    "LAAAAD",
+    "DDDDDD",
+    "DAAggA",
+    "DAAAAD",
+    "cCcCc.",
+    ".CcC..",
 };
 
 // ---------------------------------------------------------------- player rig
@@ -177,27 +165,86 @@ static void simulateCape(Player& P, Vector2 anchor, float f)
         }
 }
 
-struct Look { Color tunic, tunicD, sleeve, sleeveD, pants, boot, skin, skinD, hairD, hairL, A, Ad, Ah; bool metal; };
+// Five armour sets, each visible on the body: wool tunic, leather jerkin, mail byrnie, rune-etched lamellar, adamantium scale.
+enum ArmourSet { AS_WOOL, AS_LEATHER, AS_MAIL, AS_LAMELLAR, AS_SCALE };
+struct Look
+{
+    int set;
+    Color tunic, tunicD, tunicL, trim, pants, wrap, boot, bracer, cloak, fur, skin, skinD, hairD, hairL, A, Ad, Ah, glow;
+    bool metal;
+    const char* const* head;
+    int headRows;
+};
 
 static Look playerLook()
 {
     Player& P = G.p;
     Look k;
     k.metal = P.armour >= 0;
-    k.A = k.metal ? METALS[P.armour].color : Color{164, 136, 100, 255};
-    k.Ad = mul(k.A, 0.62f);
-    k.Ah = brighten(k.A, 45);
-    k.tunic = k.metal ? k.A : Color{168, 40, 52, 255};
-    k.tunicD = k.metal ? k.Ad : Color{112, 24, 36, 255};
-    k.sleeve = k.metal ? k.Ah : Color{218, 217, 204, 255};
-    k.sleeveD = k.metal ? k.A : Color{180, 180, 174, 255};
-    k.pants = k.metal ? mul(k.A, 0.55f) : Color{146, 153, 164, 255};
-    k.boot = {143, 98, 63, 255};
-    k.skin = {255, 209, 156, 255};
-    k.skinD = {229, 147, 99, 255};
-    k.hairD = {105, 72, 58, 255};
-    k.hairL = {145, 100, 81, 255};
+    k.A = k.metal ? METALS[P.armour].color : Color{150, 150, 156, 255};
+    k.Ad = mul(k.A, 0.6f);
+    k.Ah = brighten(k.A, 50);
+    Element el = k.metal ? METALS[P.armour].el : EL_PHYS;
+    k.glow = el != EL_PHYS ? ELEMENT_COLORS[el] : Color{120, 255, 230, 255};
+    k.skin = {236, 190, 150, 255};
+    k.skinD = {196, 136, 102, 255};
+    k.hairD = {116, 70, 40, 255}; // auburn
+    k.hairL = {164, 104, 56, 255};
+    k.pants = {86, 72, 60, 255};
+    k.wrap = {150, 132, 104, 255};
+    k.boot = {96, 62, 40, 255};
+    k.bracer = {110, 74, 46, 255};
+    k.fur = {150, 132, 110, 255};
+    if (!k.metal) k.set = AS_WOOL;
+    else if (P.armour <= M_IRON) k.set = AS_LEATHER;
+    else if (P.armour == M_ADAMANTIUM) k.set = AS_SCALE;
+    else if (el != EL_PHYS) k.set = AS_LAMELLAR;
+    else k.set = AS_MAIL;
+    switch (k.set)
+    {
+    case AS_WOOL:
+        k.tunic = {84, 98, 64, 255}; k.trim = {184, 146, 70, 255}; k.cloak = {132, 38, 36, 255};
+        k.head = HEAD_BARE; k.headRows = 7;
+        break;
+    case AS_LEATHER:
+        k.tunic = {128, 84, 50, 255}; k.trim = k.A; k.cloak = {44, 60, 96, 255};
+        k.head = HEAD_SPANGEN; k.headRows = 8;
+        break;
+    case AS_MAIL:
+        k.tunic = k.A; k.trim = k.Ad; k.cloak = {70, 66, 64, 255}; k.bracer = k.Ad;
+        k.head = HEAD_GJERMUNDBU; k.headRows = 8;
+        break;
+    case AS_LAMELLAR:
+        k.tunic = k.A; k.trim = k.glow; k.cloak = mul(k.glow, 0.42f); k.bracer = k.Ad; k.fur = {70, 64, 60, 255};
+        k.head = HEAD_RUNE; k.headRows = 8;
+        break;
+    default:
+        k.tunic = k.A; k.trim = {214, 180, 80, 255}; k.cloak = {32, 30, 38, 255}; k.bracer = k.A; k.fur = {60, 56, 54, 255};
+        k.pants = {48, 44, 50, 255}; k.wrap = k.Ad;
+        k.head = HEAD_HORNED; k.headRows = 8;
+        break;
+    }
+    k.tunicD = mul(k.tunic, 0.66f);
+    k.tunicL = brighten(k.tunic, 34);
     return k;
+}
+
+// Body pixel colour for the armour set at torso row r (0 = shoulders) and column c (front is +).
+static Color bodyColor(const Look& k, int r, int c, int half)
+{
+    bool front = c == half, back = c == -half;
+    Color base = k.tunic;
+    switch (k.set)
+    {
+    case AS_WOOL: base = (r + c * 3) % 7 == 0 ? mul(k.tunic, 0.9f) : k.tunic; break; // a coarse weave
+    case AS_LEATHER: base = (r % 3 == 1 && (c + 8) % 2 == 0 && !front && !back) ? mul(k.A, 0.85f) : ((r + c * 2) % 5 == 0 ? mul(k.tunic, 0.9f) : k.tunic); break; // riveted hide
+    case AS_MAIL: base = (r + c + 16) % 2 ? k.A : mul(k.A, 0.78f); break;
+    case AS_LAMELLAR: base = r % 2 ? k.Ad : (((c + 9 + r / 2) % 3) ? k.A : mul(k.A, 0.82f)); break;
+    default: base = ((c + 9 + (r / 2) % 2) % 2 == 0 && r % 2) ? k.Ad : k.A; break; // overlapping scales
+    }
+    if (front) return brighten(base, 30);
+    if (back) return mul(base, 0.68f);
+    return base;
 }
 
 // The weapon carried on the back while out of combat.
@@ -301,18 +348,18 @@ void drawPlayerRig(int camX, int camY)
     else if (std::fabs(m.vx) > 0.12f)
     {
         float q = P.runPhase * (m.vx * f < 0 ? -1.0f : 1.0f); // backpedal plays the cycle in reverse
-        float fa = 0.85f * std::sin(q), ba = 0.85f * std::sin(q + PI);
+        float fa = 0.8f * std::sin(q), ba = 0.8f * std::sin(q + PI);
         ps.fThigh = fa;
         ps.fShin = fa - 1.0f * (0.5f + 0.5f * std::sin(q + 1.9f));
         ps.bThigh = ba;
         ps.bShin = ba - 1.0f * (0.5f + 0.5f * std::sin(q + PI + 1.9f));
-        ps.lean = 0.22f * std::min(1.0f, std::fabs(m.vx) * 1.2f) * (m.vx * f < 0 ? -0.5f : 1.0f);
-        ps.backArm = -1.0f * std::sin(q);
-        ps.frontArm = 1.0f * std::sin(q);
+        ps.lean = 0.2f * std::min(1.0f, std::fabs(m.vx) * 1.2f) * (m.vx * f < 0 ? -0.5f : 1.0f);
+        ps.backArm = -0.9f * std::sin(q);
+        ps.frontArm = 0.9f * std::sin(q);
         ps.bob = std::fabs(std::sin(q)) * 1.0f;
     }
     else
-        ps = {0.12f, 0.04f, -0.12f, -0.04f, 0.0f, 0.15f, -0.15f, std::sin(t * 0.05f) > 0.3f ? 1.0f : 0.0f}; // idle breathing
+        ps = {0.1f, 0.03f, -0.1f, -0.03f, 0.0f, 0.12f, -0.12f, std::sin(t * 0.05f) > 0.3f ? 1.0f : 0.0f}; // idle breathing
 
     float sy = P.squash * (air && !P.rollT ? 1 + clampf(-m.vy * 0.03f, -0.1f, 0.12f) : 1);
     if (P.rollT) sy *= 0.75f;
@@ -320,12 +367,13 @@ void drawPlayerRig(int camX, int camY)
     float bx = std::floor(m.x) + m.w * 0.5f - camX, by = std::floor(m.y) + m.h - camY; // whole-pixel anchor, no shimmer
     auto off = [&](float ang, float len) { return Vector2{f * std::sin(ang) * len * sx, std::cos(ang) * len * sy}; };
 
-    // full-height proportions: long legs, torso, modest head
-    Vector2 hip = {bx, by - 8.2f * sy + ps.bob};
+    // a lean warrior with real proportions: ~23px tall, legs 10, torso 7, head 6
+    const float LEG = 5.0f, TORSO = 7.0f;
+    Vector2 hip = {bx, by - 2 * LEG * sy + 0.5f + ps.bob};
     if (P.crouch && !P.prone) // knees bent: the hips sit as high as the legs reach
-        hip.y = by - std::max(std::cos(ps.fThigh) + std::cos(ps.fShin), std::cos(ps.bThigh) + std::cos(ps.bShin)) * 4.1f * sy;
-    if (P.prone) { hip.y = by - 2.5f; hip.x = bx - f * 4; }
-    Vector2 shoulder = {hip.x + f * std::sin(ps.lean) * 6 * sx, hip.y - std::cos(ps.lean) * 6 * sy};
+        hip.y = by - std::max(std::cos(ps.fThigh) + std::cos(ps.fShin), std::cos(ps.bThigh) + std::cos(ps.bShin)) * LEG * sy;
+    if (P.prone) { hip.y = by - 3.0f; hip.x = bx - f * 5; }
+    Vector2 shoulder = {hip.x + f * std::sin(ps.lean) * TORSO * sx, hip.y - std::cos(ps.lean) * TORSO * sy};
 
     simulateCape(P, {shoulder.x + camX - f * 2.0f, shoulder.y + camY + 0.5f}, f);
     if (m.iframes > 0 && P.rollT == 0 && (G.frame / 3) % 2) return; // hurt blink
@@ -333,119 +381,120 @@ void drawPlayerRig(int camX, int camY)
     Look k = playerLook();
     canvasBegin((int)std::floor(bx) - CW / 2, (int)std::floor(by) - CH + 16);
 
-    Color capeC = {150, 28, 40, 255};
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 6; i++) // the cloak: wide at the shoulders, tapering as it streams out
     {
-        Color c = lerpColor(capeC, mul(capeC, 0.55f), i / 6.0f);
+        Color c = lerpColor(k.cloak, mul(k.cloak, 0.5f), i / 6.0f);
         Vector2 a = {P.cape[i].x - camX, P.cape[i].y - camY}, b = {P.cape[i + 1].x - camX, P.cape[i + 1].y - camY};
-        int w = i < 2 ? 3 : (i < 4 ? 2 : 1);
-        for (int j = 0; j < w; j++) seg({a.x, a.y + j}, {b.x, b.y + j}, j == w - 1 ? mul(c, 0.8f) : c);
+        int w = i < 2 ? 3 : 2;
+        for (int j = 0; j < w; j++) seg({a.x, a.y + j}, {b.x, b.y + j}, j == w - 1 ? mul(c, 0.75f) : (j == 0 ? brighten(c, 14) : c));
     }
 
     if (P.rollT > 0)
     {
         rotA = f * (1 - P.rollT / 20.0f) * 2 * PI;
         rotCx = bx;
-        rotCy = by - 10;
+        rotCy = by - 11;
     }
 
     if (hasWeapon && !drawn && P.rollT == 0 && !P.prone) drawStowed(*wpn, shoulder, hip, f);
 
-    auto leg = [&](float th, float sh, Color pc) {
-        Vector2 kn = add(hip, off(th, 4.1f));
-        Vector2 ft = add(kn, off(sh, 4.1f));
-        thick(hip, kn, 2, pc, f);
-        thick(kn, ft, 2, mul(pc, 0.92f), f);
-        for (int i = -1; i <= 1; i++) px(ft.x + i * f, ft.y, k.boot);
-        px(ft.x, ft.y - 1, mul(k.boot, 1.15f));
-        px(ft.x - f, ft.y - 1, mul(k.boot, 0.8f));
+    auto leg = [&](float th, float sh, float dim) {
+        Vector2 kn = add(hip, off(th, LEG));
+        Vector2 ft = add(kn, off(sh, LEG));
+        thick(hip, kn, 2, mul(k.pants, dim), f);
+        thick(kn, ft, 2, mul(k.wrap, dim), f);
+        for (float tt : {0.25f, 0.6f}) // leg wraps wound round the shin
+        {
+            Vector2 w = {kn.x + (ft.x - kn.x) * tt, kn.y + (ft.y - kn.y) * tt};
+            for (int i = -1; i <= 0; i++) px(w.x + i * 0.5f, w.y, mul(k.wrap, 0.72f * dim));
+        }
+        for (int i = -1; i <= 1; i++) px(ft.x + i * f, ft.y, mul(k.boot, dim * (i == 1 ? 0.8f : 1.0f)));
+        px(ft.x, ft.y - 1, mul(k.boot, dim * 1.15f));
     };
-    auto arm = [&](Vector2 sh, float ang, Color sleeve, Color sleeveD) {
-        Vector2 el = add(sh, off(ang, 3.2f));
-        Vector2 hand = add(el, off(ang * 0.9f, 2.6f));
-        thick(sh, el, 2, sleeve, f);
-        seg(el, hand, sleeveD);
-        px(hand.x, hand.y, k.skin);
-        px(hand.x + f, hand.y, k.skinD);
+    auto arm = [&](Vector2 sh, float ang, float dim) {
+        Vector2 el = add(sh, off(ang, 3.6f));
+        Vector2 hand = add(el, off(ang * 0.9f, 3.0f));
+        thick(sh, el, 2, mul(k.set == AS_WOOL || k.set == AS_LEATHER ? mul(k.tunic, 1.05f) : k.A, dim), f);
+        thick(el, hand, 2, mul(k.bracer, dim), f);
+        px(hand.x, hand.y, mul(k.skin, dim));
+        px(hand.x + f, hand.y, mul(k.skinD, dim));
         return hand;
     };
 
-    arm({shoulder.x - f * 2.5f, shoulder.y + 0.5f}, ps.backArm, k.sleeveD, mul(k.sleeveD, 0.85f));
-    leg(ps.bThigh, ps.bShin, mul(k.pants, 0.75f));
+    arm({shoulder.x - f * 2.0f, shoulder.y + 1}, ps.backArm, 0.72f);
+    leg(ps.bThigh, ps.bShin, 0.75f);
+    leg(ps.fThigh, ps.fShin, 1.0f);
 
-    // torso: tunic (or armour), gold belt
-    for (int r = 0; r <= 6; r++)
+    // torso: broad shoulders narrowing to the belt, patterned by the armour set
+    static const int halfW[8] = {3, 3, 3, 2, 2, 2, 2, 2};
+    for (int r = 0; r <= 7; r++)
     {
-        float tt = r / 6.0f;
+        float tt = r / 7.0f;
         float cx = shoulder.x + (hip.x - shoulder.x) * tt, cy = shoulder.y + (hip.y - shoulder.y) * tt;
-        int half = r < 1 ? 3 : 2;
+        int half = halfW[r];
+        for (int c = -half; c <= half; c++) px(cx + c * f, cy, bodyColor(k, r, c, half));
+    }
+    // the skirt of the tunic (or byrnie) flares over the thighs
+    for (int r = 1; r <= 3; r++)
+    {
+        int half = r < 3 ? 2 : 3;
         for (int c = -half; c <= half; c++)
         {
-            Color col = c == (int)(half * f) ? mul(k.tunic, 1.15f) : (c == -(int)(half * f) ? k.tunicD : k.tunic);
-            px(cx + c, cy, col);
+            Color col = r == 3 ? (k.set == AS_WOOL ? k.trim : mul(bodyColor(k, r + 8, c, half), 0.8f)) : bodyColor(k, r + 8, c, half);
+            if (k.set == AS_LEATHER && r == 3 && c % 2) continue; // hanging leather strips
+            px(hip.x + c * f, hip.y + r * sy, col);
         }
     }
-    for (int c = -2; c <= 2; c++) px(hip.x + c, hip.y - 1, c == (int)f ? Color{215, 184, 77, 255} : Color{181, 154, 61, 255});
-    for (int c = -2; c <= 2; c++) px(hip.x + c * 1.1f, hip.y, k.tunicD); // tunic hem
-    if (!k.metal)
+    for (int c = -2; c <= 2; c++) // belt and buckle
+        px(hip.x + c * f, hip.y, c == 1 ? Color{224, 190, 90, 255} : Color{66, 44, 30, 255});
+    if (k.set == AS_WOOL) for (int c = -3; c <= 3; c++) px(shoulder.x + c * f, shoulder.y + 3 + (c > 0 ? 0 : 0), (c + 3) % 2 ? k.trim : mul(k.trim, 0.8f)); // woven band across the chest
+    if (k.set == AS_LAMELLAR || k.set == AS_SCALE) // a rune glowing on the breast (Algiz, for protection)
     {
-        px(shoulder.x + f, shoulder.y + 1, k.tunicD);
-        px(shoulder.x, shoulder.y + 1, mul(k.tunic, 1.2f));
+        Color g = (G.frame / 8) % 7 ? k.glow : WHITE;
+        float rx = shoulder.x + (hip.x - shoulder.x) * 0.35f + f * 0.5f, ry = shoulder.y + 2;
+        for (int d = 0; d < 4; d++) px(rx, ry + d, g);
+        px(rx - 1, ry, g);
+        px(rx + 1, ry, g);
     }
-    else
-    {
-        px(shoulder.x + f, shoulder.y + 2, brighten(k.A, 70)); // breastplate shine
-        for (int c = 0; c < 3; c++)
-        {
-            px(shoulder.x + f * (3 + 0.4f * c), shoulder.y - 1 + c, c ? k.A : k.Ah); // pauldrons
-            px(shoulder.x - f * 3, shoulder.y + c, k.Ad);
-        }
-    }
+    for (int c = -2; c <= 2; c++) // fur collar where the cloak is pinned
+        px(shoulder.x + c * f, shoulder.y, (c + 3) % 3 ? k.fur : mul(k.fur, 0.8f));
+    if (k.set >= AS_MAIL) // pauldrons
+        for (int dy = 0; dy < 2; dy++)
+            for (int dx = 0; dx < 2; dx++)
+                px(shoulder.x + f * (2 + dx), shoulder.y + dy, dy == 0 ? k.Ah : (dx == 1 ? k.Ad : k.A));
 
-    // head: hair for the hero, a helmet that shows the armour tier otherwise
-    const char* const* head = HEAD_HAIR;
-    Element el = k.metal ? METALS[P.armour].el : EL_PHYS;
-    if (k.metal)
-    {
-        if (P.armour <= M_IRON) head = HEAD_KETTLE;
-        else if (P.armour == M_ADAMANTIUM) head = HEAD_HORNED;
-        else if (el != EL_PHYS) head = HEAD_PLUME;
-        else if (P.armour == M_DAMASCUS) head = HEAD_CREST;
-        else head = HEAD_GREAT;
-    }
-    Color glow = el != EL_PHYS ? ELEMENT_COLORS[el] : Color{120, 255, 230, 255};
+    // head
     bool blink = (G.frame % 220) < 6;
-    float hx = std::floor(shoulder.x) - 4 + (f > 0 ? 1 : 0) + (P.prone ? f * 3 : 0), hy = std::floor(shoulder.y) - 7 + (P.prone ? 2 : 0);
-    for (int j = 0; j < 7; j++)
-        for (int i = 0; i < 8; i++)
+    int rows = k.headRows;
+    float hx = std::floor(shoulder.x) - 3 + (f > 0 ? 1 : 0) + (P.prone ? f * 3 : 0), hy = std::floor(shoulder.y) - rows + 1 + (P.prone ? 2 : 0);
+    for (int j = 0; j < rows; j++)
+        for (int i = 0; i < 6; i++)
         {
-            char ch = head[j][i];
-            if (ch == '.') continue;
+            char ch = k.head[j][i];
             Color c;
             switch (ch)
             {
             case 's': c = k.skin; break;
             case 'S': c = k.skinD; break;
             case 'F': c = blink ? k.skinD : Color{241, 240, 253, 255}; break;
-            case 'u': c = blink ? k.skinD : Color{40, 93, 170, 255}; break;
+            case 'u': c = blink ? k.skinD : Color{60, 110, 170, 255}; break;
             case 'h': c = k.hairD; break;
             case 'H': c = k.hairL; break;
             case 'A': c = k.A; break;
             case 'D': c = k.Ad; break;
             case 'L': c = k.Ah; break;
+            case 'c': c = mul(k.A, 0.85f); break;
+            case 'C': c = k.Ad; break;
             case 'v': c = {18, 18, 26, 255}; break;
-            case 'g': c = (G.frame / 8) % 6 ? glow : WHITE; break;
-            case 'p': c = (j + G.frame / 6) % 3 ? glow : mul(glow, 0.7f); break;
+            case 'g': c = (G.frame / 8) % 6 ? k.glow : WHITE; break;
             case 'n': c = {232, 226, 206, 255}; break;
             default: continue;
             }
-            px(hx + (f > 0 ? i : 7 - i), hy + j, c);
+            px(hx + (f > 0 ? i : 5 - i), hy + j, c);
         }
 
-    leg(ps.fThigh, ps.fShin, k.pants);
-
     // front arm: swings while unarmed, lowers a drawn blade, aims ranged weapons, reaches for the rope
-    Vector2 shF = {shoulder.x + f * 2.0f, shoulder.y + 0.5f};
+    Vector2 shF = {shoulder.x + f * 1.5f, shoulder.y + 1};
     Vector2 handF;
     bool weaponInHand = drawn && P.rollT == 0 && !P.prone;
     float aimAng = P.aim;
@@ -462,13 +511,15 @@ void drawPlayerRig(int camX, int camY)
     if (P.hook == 2) { aimAng = std::atan2(P.hy - camY - shF.y, P.hx - camX - shF.x); weaponInHand = false; }
     if (weaponInHand || P.hook == 2)
     {
-        handF = {shF.x + std::cos(aimAng) * 4.5f, shF.y + std::sin(aimAng) * 4.5f};
-        thick(shF, handF, 2, k.sleeve, f);
+        Vector2 el = {shF.x + std::cos(aimAng) * 3.0f, shF.y + std::sin(aimAng) * 3.0f};
+        handF = {shF.x + std::cos(aimAng) * 5.5f, shF.y + std::sin(aimAng) * 5.5f};
+        thick(shF, el, 2, k.set == AS_WOOL || k.set == AS_LEATHER ? mul(k.tunic, 1.05f) : k.A, f);
+        thick(el, handF, 2, k.bracer, f);
         px(handF.x, handF.y, k.skin);
         px(handF.x + 1, handF.y, k.skinD);
     }
     else
-        handF = arm(shF, ps.frontArm, k.sleeve, k.sleeveD);
+        handF = arm(shF, ps.frontArm, 1.0f);
 
     rotA = 0;
     canvasEnd(m.hurtFlash > 0);
@@ -477,57 +528,42 @@ void drawPlayerRig(int camX, int camY)
 
 // ---------------------------------------------------------------- creature sprites
 
-// Optional Scale2x (EPX), then rim light and a dark outline.
+// Sprite pixels, optionally enlarged 2x: Scale2x (EPX) smooths the simple object icons,
+// plain doubling keeps the hand-shaded boss art crisp.
 struct BigSprite { int w = 0, h = 0; std::vector<Color> px; };
+enum { SC_NATIVE, SC_EPX, SC_DOUBLE };
 
-static const BigSprite& bigOf(const Sprite& s, Color tint, bool epx)
+static const BigSprite& bigOf(const Sprite& s, Color tint, int mode)
 {
-    static std::map<std::tuple<const void*, unsigned, bool>, BigSprite> cache;
-    auto key = std::make_tuple((const void*)&s, (unsigned)ColorToInt(tint), epx);
+    static std::map<std::tuple<const void*, unsigned, int>, BigSprite> cache;
+    auto key = std::make_tuple((const void*)&s, (unsigned)ColorToInt(tint), mode);
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
 
     int w = spriteWidth(s), h = s.h;
-    bool wolfArt = (&s == &SPR_WOLF_A || &s == &SPR_WOLF_B) && ColorToInt(tint) != ColorToInt(WHITE);
     auto at = [&](int x, int y) -> char { return (x < 0 || y < 0 || x >= w || y >= h) ? '.' : s.rows[y][x]; };
-    int k = epx ? 2 : 1, W2 = w * k, H2 = h * k;
-    std::vector<char> g(W2 * H2);
+    int k = mode == SC_NATIVE ? 1 : 2;
+    BigSprite b;
+    b.w = w * k;
+    b.h = h * k;
+    b.px.assign(b.w * b.h, BLANK);
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++)
         {
-            char P = at(x, y);
-            if (!epx) { g[y * W2 + x] = P; continue; }
-            char A = at(x, y - 1), B = at(x + 1, y), C = at(x - 1, y), D = at(x, y + 1);
-            g[(2 * y) * W2 + 2 * x] = (C == A && C != D && A != B) ? A : P;
-            g[(2 * y) * W2 + 2 * x + 1] = (A == B && A != C && B != D) ? B : P;
-            g[(2 * y + 1) * W2 + 2 * x] = (D == C && D != B && C != A) ? C : P;
-            g[(2 * y + 1) * W2 + 2 * x + 1] = (B == D && B != A && D != C) ? D : P;
-        }
-    BigSprite b;
-    b.w = W2 + 2;
-    b.h = H2 + 2;
-    b.px.assign(b.w * b.h, BLANK);
-    auto G2 = [&](int x, int y) -> char { return (x < 0 || y < 0 || x >= W2 || y >= H2) ? '.' : g[y * W2 + x]; };
-    for (int y = -1; y <= H2; y++)
-        for (int x = -1; x <= W2; x++)
-        {
-            char ch = G2(x, y);
-            Color c;
-            if (ch == '.')
+            char P = at(x, y), q[4] = {P, P, P, P};
+            if (mode == SC_EPX)
             {
-                bool edge = G2(x - 1, y) != '.' || G2(x + 1, y) != '.' || G2(x, y - 1) != '.' || G2(x, y + 1) != '.';
-                if (!edge) continue;
-                c = OUTLINE;
+                char A = at(x, y - 1), B = at(x + 1, y), C = at(x - 1, y), D = at(x, y + 1);
+                q[0] = (C == A && C != D && A != B) ? A : P;
+                q[1] = (A == B && A != C && B != D) ? B : P;
+                q[2] = (D == C && D != B && C != A) ? C : P;
+                q[3] = (B == D && B != A && D != C) ? D : P;
             }
-            else
+            for (int j = 0; j < k * k; j++)
             {
-                c = paletteColor(ch, tint);
-                if (ch == 'n' && wolfArt) c = tint; // wolf coats: 'n' fur takes the tint, 'N' a darker shade of it
-                if (ch == 'N' && wolfArt) c = {(unsigned char)(tint.r * 0.66f), (unsigned char)(tint.g * 0.66f), (unsigned char)(tint.b * 0.66f), 255};
-                if (G2(x, y - 1) == '.' || G2(x - 1, y) == '.') c = brighten(c, 24);
-                else if (G2(x, y + 1) == '.' || G2(x + 1, y) == '.') c = brighten(c, -20);
+                char ch = q[mode == SC_NATIVE ? 0 : j];
+                if (ch != '.') b.px[(y * k + j / k) * b.w + x * k + j % k] = paletteColor(ch, tint);
             }
-            b.px[(y + 1) * b.w + (x + 1)] = c;
         }
     return cache[key] = b;
 }
@@ -544,8 +580,7 @@ static void drawBig(const BigSprite& b, float ax, float ay, bool flip, float sxs
             int si = flip ? b.w - 1 - i : i;
             float lx = (si - b.w * 0.5f) * sxs, ly = (j - b.h + 1) * sys;
             float X = ax + lx + lean * (-ly) / b.h * 4.0f, Y = ay + ly;
-            bool outline = c.r == OUTLINE.r && c.g == OUTLINE.g && c.b == OUTLINE.b;
-            if (flash.a && !outline) c = Color{flash.r, flash.g, flash.b, c.a};
+            if (flash.a) c = Color{flash.r, flash.g, flash.b, c.a};
             c.a = (unsigned char)(c.a * alpha);
             DrawRectangle((int)std::floor(X), (int)std::floor(Y), rw, rh, c);
         }
@@ -553,12 +588,12 @@ static void drawBig(const BigSprite& b, float ax, float ay, bool flip, float sxs
 
 void drawSpriteNative(const Sprite& s, float x, float bottom, bool flip)
 {
-    drawBig(bigOf(s, WHITE, false), x, bottom, flip, 1, 1, 0, BLANK, 1);
+    drawBig(bigOf(s, WHITE, SC_NATIVE), x, bottom, flip, 1, 1, 0, BLANK, 1);
 }
 
 void drawSpriteBig(const Sprite& s, float x, float bottom, bool flip, Color tint)
 {
-    drawBig(bigOf(s, tint, true), x, bottom, flip, 1, 1, 0, BLANK, 1);
+    drawBig(bigOf(s, tint, SC_EPX), x, bottom, flip, 1, 1, 0, BLANK, 1);
 }
 
 const Sprite& enemySprite(const Mob& m)
@@ -592,7 +627,7 @@ const Sprite& enemySprite(const Mob& m)
 static const BigSprite& mobArt(const Mob& m)
 {
     static const Color coats[5] = {{132, 128, 122, 255}, {128, 92, 60, 255}, {64, 60, 62, 255}, {204, 200, 190, 255}, {156, 98, 54, 255}}; // grey, brown, black, white, russet
-    return bigOf(enemySprite(m), m.type == E_WOLF ? coats[(m.id * 7) % 5] : WHITE, m.boss);
+    return bigOf(enemySprite(m), m.type == E_WOLF ? coats[(m.id * 7) % 5] : WHITE, m.boss ? SC_DOUBLE : SC_NATIVE);
 }
 
 void drawMobAnimated(const Mob& m, int camX, int camY)
@@ -640,7 +675,7 @@ void burstSprite(const Mob& m)
         for (int i = 0; i < b.w; i++)
         {
             Color c = b.px[j * b.w + i];
-            if (c.a < 200 || (c.r == OUTLINE.r && c.g == OUTLINE.g)) continue;
+            if (c.a < 200) continue;
             float x = ox + (m.facing < 0 ? b.w - 1 - i : i), y = oy + j;
             float dx = x - m.cx(), dy = y - m.cy();
             spawnParticle(x, y, dx * 0.08f + frange(-0.6f, 0.6f) + m.vx * 0.5f, dy * 0.05f + frange(-2.0f, -0.4f), irange(30, 70), c, 0.12f);
@@ -749,10 +784,7 @@ void drawRagdolls(int camX, int camY)
         float alpha = r.life > 660 ? (720 - r.life) / 60.0f : 1.0f;
         auto P = [&](int i) { return Vector2{r.p[i].x - camX, r.p[i].y - camY}; };
         auto limbLine = [&](int a, int b, float w, Color c) {
-            Color o = OUTLINE;
-            o.a = (unsigned char)(255 * alpha);
             c.a = (unsigned char)(255 * alpha);
-            DrawLineEx(P(a), P(b), w + 2, o);
             DrawLineEx(P(a), P(b), w, c);
         };
         float s = r.scale;
@@ -764,10 +796,9 @@ void drawRagdolls(int camX, int camY)
         limbLine(1, 2, 4 * s, r.body);
         limbLine(1, 8, 1.5f * s, mul(r.limb, 0.9f));
         Vector2 h = P(0);
-        Color o = OUTLINE, hc = r.head;
-        o.a = hc.a = (unsigned char)(255 * alpha);
-        DrawCircleV(h, 3.2f * s + 1, o);
-        DrawCircleV(h, 3.2f * s, hc);
+        Color hc = r.head;
+        hc.a = (unsigned char)(255 * alpha);
+        DrawCircleV(h, 2.6f * s, hc);
         if (r.bony) DrawRectangle((int)h.x - 1, (int)h.y - 1, 1, 1, OUTLINE);
     }
 }
@@ -779,20 +810,20 @@ void ragdollForMob(const Mob& m)
     bool bony = false;
     switch (m.type)
     {
-    case E_GOBLIN: head = {98, 162, 62, 255}; body = {131, 88, 56, 255}; limb = {98, 162, 62, 255}; break;
-    case E_BOMBER: head = {214, 52, 52, 255}; body = {131, 88, 56, 255}; limb = {98, 162, 62, 255}; break;
-    case E_SKELETON: head = body = limb = {236, 232, 214, 255}; bony = true; break;
-    case E_ARCHER: head = {236, 232, 214, 255}; body = {124, 58, 156, 255}; limb = {236, 232, 214, 255}; bony = true; break;
-    case E_CULTIST: head = {70, 30, 98, 255}; body = {124, 58, 156, 255}; limb = {124, 58, 156, 255}; break;
-    case E_KNIGHT: head = {226, 232, 242, 255}; body = {182, 190, 204, 255}; limb = {104, 112, 130, 255}; break;
+    case E_GOBLIN: head = {146, 166, 92, 255}; body = {92, 66, 46, 255}; limb = {102, 122, 64, 255}; break;
+    case E_BOMBER: head = {196, 62, 52, 255}; body = {92, 66, 46, 255}; limb = {102, 122, 64, 255}; break;
+    case E_SKELETON: head = body = limb = {222, 214, 190, 255}; bony = true; break;
+    case E_ARCHER: head = {222, 214, 190, 255}; body = {108, 72, 130, 255}; limb = {172, 164, 142, 255}; bony = true; break;
+    case E_CULTIST: head = {70, 46, 88, 255}; body = {108, 72, 130, 255}; limb = {150, 104, 168, 255}; break;
+    case E_KNIGHT: head = {200, 206, 214, 255}; body = {196, 62, 52, 255}; limb = {142, 148, 162, 255}; break;
     case E_IMP: head = body = limb = {242, 128, 36, 255}; break;
-    case E_GOLEM: head = body = limb = {132, 128, 122, 255}; break;
-    case E_BLACKKNIGHT: head = {104, 112, 130, 255}; body = {70, 76, 92, 255}; limb = {50, 54, 66, 255}; break;
-    case E_LICH: head = {236, 232, 214, 255}; body = {124, 58, 156, 255}; limb = {70, 30, 98, 255}; bony = true; break;
-    case E_REDCAP: head = {214, 52, 52, 255}; body = {131, 88, 56, 255}; limb = {255, 209, 156, 255}; break;
-    case E_DRAUGR: head = {104, 112, 130, 255}; body = {132, 128, 122, 255}; limb = {110, 168, 222, 255}; break;
-    case E_TROLL: head = body = {98, 162, 62, 255}; limb = {56, 110, 44, 255}; break;
-    case E_GUARD: head = {182, 190, 204, 255}; body = {214, 52, 52, 255}; limb = {146, 153, 164, 255}; break;
+    case E_GOLEM: head = body = limb = {116, 118, 132, 255}; break;
+    case E_BLACKKNIGHT: head = {94, 100, 116, 255}; body = {58, 62, 76, 255}; limb = {58, 62, 76, 255}; break;
+    case E_LICH: head = {222, 214, 190, 255}; body = {108, 72, 130, 255}; limb = {70, 46, 88, 255}; bony = true; break;
+    case E_REDCAP: head = {196, 62, 52, 255}; body = {92, 66, 46, 255}; limb = {186, 138, 106, 255}; break;
+    case E_DRAUGR: head = {130, 180, 220, 255}; body = {78, 80, 94, 255}; limb = {80, 120, 170, 255}; break;
+    case E_TROLL: head = body = {118, 134, 88, 255}; limb = {82, 98, 62, 255}; break;
+    case E_GUARD: head = {186, 138, 106, 255}; body = {196, 62, 52, 255}; limb = {78, 80, 94, 255}; break;
     default: burstSprite(m); return;
     }
     spawnRagdoll(m.cx(), m.y + m.h, (float)m.h, m.vx * 0.8f + frange(-0.5f, 0.5f), std::min(m.vy, 0.0f) - frange(0.5f, 1.5f), head, body, limb, bony, ENEMIES[m.type].gore);
@@ -802,7 +833,7 @@ void ragdollForPlayer()
 {
     Mob& m = G.p.m;
     Look k = playerLook();
-    spawnRagdoll(m.cx(), m.y + m.h, (float)m.h, m.vx + frange(-0.5f, 0.5f), m.vy - 1.5f, k.metal ? k.A : k.hairD, k.tunic, k.pants, false, CellMaterial::Blood);
+    spawnRagdoll(m.cx(), m.y + m.h, (float)m.h + 3, m.vx + frange(-0.5f, 0.5f), m.vy - 1.5f, k.metal ? k.A : k.hairD, k.tunic, k.pants, false, CellMaterial::Blood);
 }
 
 // ---------------------------------------------------------------- held weapon
@@ -817,11 +848,7 @@ void drawHeld(float ox, float oy)
     Color brown = {110, 70, 40, 255};
     auto pt = [&](float ang, float d) { return Vector2{ox + std::cos(ang) * d, oy + std::sin(ang) * d}; };
     float pa = 0;
-    // every stroke gets a dark outline underneath to match the sprites
-    auto line = [&](Vector2 p0, Vector2 p1, float th, Color c) {
-        DrawLineEx(p0, p1, th + 2, OUTLINE);
-        DrawLineEx(p0, p1, th, c);
-    };
+    auto line = [&](Vector2 p0, Vector2 p1, float th, Color c) { DrawLineEx(p0, p1, th, c); };
     auto across = [&](Vector2 c, float half, float th, Color col) {
         line({c.x - std::cos(pa) * half, c.y - std::sin(pa) * half}, {c.x + std::cos(pa) * half, c.y + std::sin(pa) * half}, th, col);
     };
@@ -857,15 +884,14 @@ void drawHeld(float ox, float oy)
         {
             line(pt(a, -2), pt(a, L), 1.5f, brown);
             Vector2 hd = pt(a, L + 1.5f);
-            DrawCircleV(hd, 4.2f, OUTLINE);
-            DrawCircleV(hd, 3.2f, mc);
+            DrawCircleV(hd, 3.2f, mul(mc, 0.7f));
+            DrawCircleV(hd, 2.6f, mc);
             DrawCircleV({hd.x - 1, hd.y - 1}, 1.2f, brighten(mc, 60));
         }
         else if (w.type == W_PAN)
         {
             line(pt(a, -2), pt(a, L), 1.5f, brown);
             Vector2 hd = pt(a, L + 3.5f);
-            DrawCircleV(hd, 5.0f, OUTLINE);
             DrawCircleV(hd, 4.0f, {70, 70, 78, 255});
             DrawCircleV(hd, 2.6f, {96, 96, 104, 255});
         }
@@ -894,7 +920,6 @@ void drawHeld(float ox, float oy)
         BeginBlendMode(BLEND_ADDITIVE);
         DrawCircleGradient((int)g.x, (int)g.y, 8, {gem.r, gem.g, gem.b, 110}, {gem.r, gem.g, gem.b, 0});
         EndBlendMode();
-        DrawRectangle((int)g.x - 2, (int)g.y - 2, 4, 4, OUTLINE);
         DrawRectangle((int)g.x - 1, (int)g.y - 2, 2, 4, gem);
         DrawRectangle((int)g.x - 2, (int)g.y - 1, 4, 2, gem);
         DrawRectangle((int)g.x - 1, (int)g.y - 1, 1, 1, WHITE);

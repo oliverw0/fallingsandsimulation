@@ -227,7 +227,8 @@ struct Pickup
     bool alive = true;
 };
 
-enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_PORTAL, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE };
+enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_PORTAL, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE, IT_BOAT };
+// IT_BOAT: a longship; `used` = beached scenery, otherwise F sets sail. IT_TORCH style 1 = wall sconce.
 // IT_ROPE: hangs from (x, y) down to row `data`. IT_CRATE: breakable obstacle, wood cells in [x, x+w) x [y-h, y), `data` = hits left.
 struct Interact { int type; float x, y; bool used = false; int data = 0; int style = 0; int w = 0, h = 0, cells = 0, hit = 0; };
 // How a stage shows off its special weapon (replaces the old sword-in-stone).
@@ -251,6 +252,9 @@ struct Particle
     CellMaterial toCell = CellMaterial::Empty;
     uint8_t cellFlags = 0;
 };
+
+// A light with no object of its own (lanterns, lit windows); `flame` also draws a flickering flame.
+struct Lamp { float x, y, r; Color c; bool flame = false; };
 
 struct FloatText { float x, y; std::string s; int life; Color col; };
 
@@ -328,6 +332,7 @@ struct Game
     std::vector<Particle> parts;
     std::vector<Trap> traps;
     std::vector<Interact> inter;
+    std::vector<Lamp> lamps;
     std::vector<FloatText> texts;
     std::vector<Ragdoll> rags;
     std::vector<Weapon> stoneLoot; // weapons held by sword-in-stone shrines (Interact::data indexes this)
@@ -348,8 +353,12 @@ struct Game
     int hitstop = 0;
     float uiScale = 1; // accessibility: UI size multiplier
     bool showHelp = false, reduceShake = false;
+    int duneEnd = 0;  // stage 1 opens with the Whispering Dunes: x where they give way to the Greenmarch (0 = none)
+    int sailT = 0;    // frames into the voyage out of Hearthwick (0 = not sailing)
+    bool duneCrossed = false;
 };
 extern Game G;
+inline bool inDunes() { return G.duneEnd > 0 && G.p.m.x < G.duneEnd && !G.sanctuary && !G.inVillage; }
 
 // items.cpp
 std::string weaponName(const Weapon& w);

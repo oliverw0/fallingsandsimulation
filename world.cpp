@@ -22,6 +22,7 @@ void worldInit(int w, int h)
     world.blasts.clear();
     world.debris.clear();
     world.bg.assign((size_t)w * h, Color{12, 12, 16, 255});
+    world.sky.assign((size_t)w * h, 0);
 
     static bool built = false;
     if (built)
@@ -627,6 +628,8 @@ Color cellColor(const Cell& c, int x, int y)
 
 void renderWorld(Color* px, int camX, int camY, int vw, int vh)
 {
+    // the moon hangs almost still while the land scrolls past beneath it
+    float mx = vw * 0.74f - camX * 0.03f, my = vh * 0.15f - camY * 0.015f, mr = 11;
     for (int j = 0; j < vh; j++)
     {
         int y = camY + j;
@@ -640,7 +643,26 @@ void renderWorld(Color* px, int camX, int camY, int vw, int vh)
                 Color b = world.bg.empty() ? Color{12, 12, 16, 255} : world.bg[k];
                 const Cell& c = world.cells[k];
                 if (c.material == M::Empty)
+                {
                     col = b;
+                    if (world.sky[k])
+                    {
+                        float dx = i - mx, dy = j - my, d = std::sqrt(dx * dx + dy * dy);
+                        if (d < mr) // pale disc with darker maria, lit from the right
+                        {
+                            float maria = fbm((dx + 40) * 0.22f, (dy + 40) * 0.22f, 404, 3);
+                            Color moon = lerpColor(Color{236, 234, 216, 255}, Color{168, 170, 172, 255}, clampf((maria - 0.45f) * 3, 0, 1));
+                            col = brighten(moon, (int)(-14 * clampf(-dx / mr, 0, 1)));
+                        }
+                        else if (d < mr * 5) // halo
+                        {
+                            float h = 1 - d / (mr * 5);
+                            col = lerpColor(col, Color{120, 132, 170, 255}, h * h * 0.45f);
+                        }
+                        else if (hash2(x, y, 77) > 0.9965f && hash2(x, y, world.frame / 20) > 0.25f) // twinkling stars
+                            col = Color{210, 214, 236, 255};
+                    }
+                }
                 else
                 {
                     col = cellColor(c, x, y);

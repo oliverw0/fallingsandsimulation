@@ -381,7 +381,7 @@ void drawHUD()
     if (G.nearInteract >= 0 && G.nearInteract < (int)G.inter.size() && G.state == GS_PLAY)
     {
         const Interact& it = G.inter[G.nearInteract];
-        static const char* verbs[] = {"Open chest", "Forge at the anvil", "Pray at the shrine", "Step through the portal", "", "Take the weapon", "Trade"};
+        static const char* verbs[] = {"Open chest", "Forge at the anvil", "Pray at the shrine", "Step through the portal", "", "Take the weapon", "Trade", "", "", "Board the longship and set sail"};
         float x = (it.x - G.rcx) * G.scale, y = (it.y - 46 - G.rcy) * G.scale;
         float fs = 18 * u, kw = keycapW("F", fs);
         float total = kw + 8 * u + uiTextWidth(it.type == IT_SHOP ? "Trade with the Weaponsmith" : verbs[it.type], fs, 1);
@@ -431,7 +431,7 @@ void drawHUD()
 
     // stage info, kills, flasks, armour, materials (right)
     float rx = sw - 16 * u;
-    std::string title = G.sandbox ? "Sandbox" : (G.inVillage ? "Hearthwick" : (G.sanctuary ? "Sanctuary" : STAGES[G.stage].name));
+    std::string title = G.sandbox ? "Sandbox" : (G.inVillage ? "Hearthwick" : (G.sanctuary ? "Sanctuary" : inDunes() ? "The Whispering Dunes" : STAGES[G.stage].name));
     text(title, rx - uiTextWidth(title, 24 * u, 2), 12 * u, 24 * u, C_GOLD, 2);
     float ry = 46 * u, rs = 20 * u;
     auto rightStat = [&](const char* const* icon, int rows, Color ic, const std::string& label) {
@@ -510,8 +510,9 @@ void drawHUD()
     if (G.bannerTimer > 0 && !G.sandbox && !G.sanctuary)
     {
         float a = std::min(1.0f, G.bannerTimer / 60.0f);
-        textC(STAGES[G.stage].name, sw / 2.0f, sh * 0.26f, 60 * u, {240, 210, 140, (unsigned char)(255 * a)}, 2);
-        textC(STAGES[G.stage].subtitle, sw / 2.0f, sh * 0.26f + 70 * u, 24 * u, {214, 200, 180, (unsigned char)(255 * a)});
+        bool dunes = inDunes();
+        textC(dunes ? "The Whispering Dunes" : STAGES[G.stage].name, sw / 2.0f, sh * 0.26f, 60 * u, {240, 210, 140, (unsigned char)(255 * a)}, 2);
+        textC(dunes ? "Only the wind lives here" : STAGES[G.stage].subtitle, sw / 2.0f, sh * 0.26f + 70 * u, 24 * u, {214, 200, 180, (unsigned char)(255 * a)});
     }
 
     if (G.sandbox)

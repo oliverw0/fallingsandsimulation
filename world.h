@@ -19,6 +19,7 @@ struct World
     std::vector<Blast> blasts;
     std::vector<Debris> debris;
     std::vector<Color> bg; // back wall / sky colour per cell
+    std::vector<uint8_t> sky; // 1 = open night sky behind this cell (the moon shows through)
 
     bool in(int x, int y) const { return x >= 0 && y >= 0 && x < w && y < h; }
     Cell& at(int x, int y) { return cells[(size_t)y * w + x]; }

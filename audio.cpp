@@ -21,7 +21,7 @@ struct SfxSlot
     int minGap = 0; // frames between plays (stops 30 explosions stacking)
 };
 static SfxSlot sfx[SFX_COUNT];
-static Sound music{};
+static Sound music{}, wind{};
 static bool audioOk = false;
 static int frameCounter = 0;
 
@@ -99,7 +99,7 @@ static void reverb(std::vector<float>& buf, float wet, float room)
     }
 }
 
-static Sound bake(std::vector<float>& buf, float gain)
+static Sound bake(std::vector<float>& buf, float gain, bool fadeOut = true)
 {
     float peak = 0.0001f;
     for (float v : buf) peak = std::max(peak, std::fabs(v));
@@ -108,7 +108,7 @@ static Sound bake(std::vector<float>& buf, float gain)
     short* data = (short*)MemAlloc(n * sizeof(short));
     for (int i = 0; i < n; i++)
     {
-        float fade = std::min(1.0f, (n - i) / 400.0f);
+        float fade = fadeOut ? std::min(1.0f, (n - i) / 400.0f) : 1.0f;
         data[i] = (short)(clampf(buf[i] * norm * fade, -1, 1) * 32000);
     }
     Wave w{(unsigned int)n, (unsigned int)SR, 16, 1, data};
@@ -508,6 +508,30 @@ static void build()
     }
     reverb(buf, 0.6f, 0.88f);
     music = bake(buf, 0.6f);
+
+    // wind over the dunes: rumbling low noise and a breathy band that swells with each gust, plus a
+    // faint whistle. Gusts are periodic over the buffer and the ends are cross-faded, so it loops cleanly.
+    {
+        const float len = 16.0f, xf = 1.0f;
+        std::vector<float> w((size_t)((len + xf) * SR));
+        Rng n(400);
+        Biquad low, band, whistle;
+        low.set(LP, 220, 0.7f);
+        float pink = 0;
+        for (size_t i = 0; i < w.size(); i++)
+        {
+            float t = (float)i / SR, ph = TAU * t / len;
+            float gust = 0.55f + 0.3f * std::sin(ph * 2 + 0.7f) + 0.2f * std::sin(ph * 5 + 2.1f) + 0.1f * std::sin(ph * 11);
+            if (i % 64 == 0) { band.set(BP, 380 + 520 * gust, 0.8f); whistle.set(BP, 900 + 500 * gust, 18); }
+            float wn = n();
+            pink = pink * 0.97f + wn * 0.03f;
+            w[i] = (low(wn) * 1.6f + band(wn) * 0.9f * gust + whistle(wn) * 0.35f * gust * gust + pink * 0.6f) * gust;
+        }
+        size_t N = (size_t)(len * SR), X = (size_t)(xf * SR);
+        for (size_t i = 0; i < X; i++) { float a = (float)i / X; w[i] = w[i] * a + w[N + i] * (1 - a); }
+        w.resize(N);
+        wind = bake(w, 0.55f, false);
+    }
 }
 
 void initAudio()
@@ -529,6 +553,7 @@ void closeAudio()
         for (auto& b : s.base) UnloadSound(b);
     }
     UnloadSound(music);
+    UnloadSound(wind);
     CloseAudioDevice();
 }
 
@@ -561,11 +586,15 @@ void updateAudio(bool inGame)
 {
     if (!audioOk) return;
     frameCounter++;
-    if (!IsSoundPlaying(music))
-    {
-        SetSoundVolume(music, 0.5f);
-        PlaySound(music);
-    }
+    // the Whispering Dunes have no music, only the wind; elsewhere the music returns
+    static float musicVol = 0.5f, windVol = 0;
+    bool dunes = inGame && inDunes();
+    musicVol += ((dunes ? 0.0f : 0.5f) - musicVol) * 0.01f;
+    windVol += ((dunes ? 0.75f : (inGame && (G.inVillage || G.duneEnd) ? 0.12f : 0.0f)) - windVol) * 0.01f;
+    if (!IsSoundPlaying(music)) PlaySound(music);
+    if (!IsSoundPlaying(wind)) PlaySound(wind);
+    SetSoundVolume(music, musicVol);
+    SetSoundVolume(wind, windVol);
     float pitch = inGame && !G.sanctuary ? 1.0f - G.stage * 0.05f : 1.1f; // each stage sits in its own key
     SetSoundPitch(music, pitch);
 }

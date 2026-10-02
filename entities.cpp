@@ -325,11 +325,11 @@ void hitCrateAt(int x, int y, int dmg, float kx)
 // A weapon drawn in the world (on racks, in graves...): grip at `g`, pointing along `ang`.
 void drawWorldWeapon(const Weapon& w, Vector2 g, float ang, float len)
 {
-    const Color ink = {24, 18, 28, 255}, brown = {110, 70, 40, 255};
+    const Color brown = {110, 70, 40, 255};
     Color mc = w.type == W_STAFF ? Color{170, 140, 100, 255} : METALS[w.metal].color;
     Vector2 d = {std::cos(ang), std::sin(ang)}, p = {-d.y, d.x};
     auto at = [&](float t) { return Vector2{g.x + d.x * t, g.y + d.y * t}; };
-    auto ln = [&](Vector2 a, Vector2 b, float th, Color c) { DrawLineEx(a, b, th + 2, ink); DrawLineEx(a, b, th, c); };
+    auto ln = [&](Vector2 a, Vector2 b, float th, Color c) { DrawLineEx(a, b, th, c); };
     switch (w.type)
     {
     case W_SPEAR:
@@ -339,7 +339,7 @@ void drawWorldWeapon(const Weapon& w, Vector2 g, float ang, float len)
     case W_AXE:
     case W_MACE:
         ln(at(-2), at(len), 1.5f, brown);
-        if (w.type == W_MACE) { DrawCircleV(at(len + 1), 4, ink); DrawCircleV(at(len + 1), 3, mc); }
+        if (w.type == W_MACE) { DrawCircleV(at(len + 1), 3, mc); }
         else ln({at(len - 1).x - p.x * 3, at(len - 1).y - p.y * 3}, {at(len - 1).x + p.x * 3, at(len - 1).y + p.y * 3}, 3, mc);
         break;
     case W_CROSSBOW:
@@ -1910,7 +1910,7 @@ static void updateInteract()
     for (int i = 0; i < (int)G.inter.size(); i++)
     {
         Interact& it = G.inter[i];
-        if ((it.type == IT_CHEST && it.used) || it.type == IT_TORCH || it.type == IT_ROPE || it.type == IT_CRATE) continue;
+        if ((it.type == IT_CHEST && it.used) || (it.type == IT_BOAT && it.used) || it.type == IT_TORCH || it.type == IT_ROPE || it.type == IT_CRATE) continue;
         float d = std::hypot(it.x - pm.cx(), it.y - 10 - pm.cy());
         if (d < bd) { bd = d; G.nearInteract = i; }
     }
@@ -1949,6 +1949,11 @@ static void updateInteract()
     case IT_SHRINE:
         if (it.used) message("The shrine is silent.");
         else G.state = GS_SHRINE;
+        break;
+    case IT_BOAT: // cast off: the longship carries you out of the harbour
+        G.sailT = 1;
+        playSfx(SFX_SPLASH, 0.7f, 0.7f);
+        message("You cast off. The longship slips out into the dark...");
         break;
     case IT_PORTAL:
         if (!G.portalOpen) message("The portal is sealed. Defeat the guardian.");
@@ -2033,11 +2038,159 @@ const char* sandboxBrushName()
 
 // ================================================================ main update
 
+static void updateCamera()
+{
+    Mob& pm = G.p.m;
+    float tx = pm.cx() - G.vw / 2.0f, ty = pm.cy() - G.vh / 2.0f;
+    G.camX += (tx - G.camX) * 0.12f;
+    G.camY += (ty - G.camY) * 0.12f;
+    if (world.w <= G.vw) G.camX = (world.w - G.vw) / 2.0f;
+    else G.camX = clampf(G.camX, 0, (float)(world.w - G.vw));
+    if (world.h <= G.vh) G.camY = (world.h - G.vh) / 2.0f;
+    else G.camY = clampf(G.camY, 0, (float)(world.h - G.vh));
+    syncRenderCamera();
+    G.shake *= 0.88f;
+}
+
+// ---------------------------------------------------------------- the Whispering Dunes: tumbleweeds and blown sand
+
+struct Tumble { float x, y, vx, vy, rot; int r; };
+static std::vector<Tumble> tumbles;
+
+static float windGust() { return 0.6f + 0.5f * std::sin(G.frame * 0.004f) + 0.25f * std::sin(G.frame * 0.017f); }
+
+static void updateDunes()
+{
+    if (!G.duneEnd || G.sanctuary) { tumbles.clear(); return; }
+    float gust = windGust();
+    if (tumbles.size() < 3 && G.camX < G.duneEnd && chance(140))
+    {
+        Tumble t{G.camX - 10, G.camY + G.vh * frange(0.15f, 0.45f), frange(0.5f, 1.0f), 0, 0, irange(3, 5)};
+        for (int k = 0; k < 200 && isSolid((int)t.x, (int)t.y + t.r); k++) t.y -= 1;
+        tumbles.push_back(t);
+    }
+    for (auto& t : tumbles)
+    {
+        t.vx += (gust * 1.4f - t.vx) * 0.02f;
+        t.vy = std::min(t.vy + 0.12f, 3.0f);
+        float nx = t.x + t.vx, ny = t.y + t.vy;
+        if (isSolid((int)nx, (int)ny + t.r))
+        {
+            int k = 0;
+            while (k < 5 && isSolid((int)nx, (int)ny + t.r)) { ny -= 1; k++; } // roll up the slope
+            if (k >= 5) { nx = t.x; t.vx *= -0.3f; }
+            t.vy = chance(20) ? -frange(1.2f, 2.4f) : -std::fabs(t.vy) * 0.25f; // bounce, and now and then a hop
+        }
+        t.x = nx;
+        t.y = ny;
+        t.rot += t.vx / t.r;
+    }
+    tumbles.erase(std::remove_if(tumbles.begin(), tumbles.end(), [](const Tumble& t) {
+        return t.x > G.duneEnd + 60 || t.x > G.camX + G.vw + 30 || t.x < G.camX - 80 || t.y > world.h;
+    }), tumbles.end());
+    if (!inDunes()) return;
+    for (int k = 0; k < 2; k++) // sand streaming off the crests
+    {
+        int x = (int)G.camX + irand(G.vw), y = (int)G.camY;
+        while (y < G.camY + G.vh && !isSolid(x, y)) y++;
+        if (y >= G.camY + G.vh || world.mat(x, y) != M::Sand || !chance(2)) continue;
+        Color c = {(unsigned char)irange(196, 236), (unsigned char)irange(168, 206), 120, (unsigned char)irange(90, 170)};
+        spawnParticle((float)x, y - frange(0.5f, 3), gust * frange(1.2f, 2.2f), frange(-0.25f, 0.05f), irange(40, 90), c, 0.004f);
+    }
+}
+
+static void drawTumbleweeds(int camX, int camY)
+{
+    for (auto& t : tumbles)
+    {
+        float cx = t.x - camX, cy = t.y - camY;
+        for (int k = 0; k < 14; k++) // a ball of tangled stems: chords across a wobbly circle
+        {
+            float a1 = t.rot + k * 2.4f, a2 = a1 + 1.9f + hash2(k, t.r, 5);
+            float r1 = t.r * (0.75f + 0.3f * hash2(k, 1, t.r)), r2 = t.r * (0.75f + 0.3f * hash2(k, 2, t.r));
+            DrawLineEx({cx + std::cos(a1) * r1, cy + std::sin(a1) * r1}, {cx + std::cos(a2) * r2, cy + std::sin(a2) * r2}, 1,
+                       k % 3 ? Color{142, 112, 70, 255} : Color{100, 76, 48, 255});
+        }
+    }
+}
+
+// A Norse longship: clinker hull, a row of shields, dragon prow, and a striped sail (`sail` 0 furled .. 1 set).
+static void drawLongship(float x, float y, float sail)
+{
+    const Color ink = {50, 34, 22, 255}, wood = {112, 74, 42, 255}, woodD = {74, 48, 28, 255}, woodL = {150, 104, 62, 255}; // ink: tarred seams, not an outline
+    const int L = 30;
+    for (int dx = -L - 1; dx <= L + 1; dx++)
+    {
+        float u = std::fabs((float)dx) / L;
+        int top = (int)(y - 9 - u * u * u * 7), bot = (int)(y - u * u * 7);
+        for (int yy = top - 1; yy <= bot + 1; yy++)
+        {
+            bool edge = yy < top || yy > bot || std::abs(dx) > L;
+            Color c = edge ? ink : ((yy - top) % 3 == 2 ? woodD : (yy == top ? woodL : wood)); // overlapping strakes
+            DrawRectangle((int)x + dx, yy, 1, 1, c);
+        }
+    }
+    auto stroke = [&](float x0, float y0, float x1, float y1, float th, Color c) { DrawLineEx({x0, y0}, {x1, y1}, th, c); };
+    stroke(x + L, y - 15, x + L + 3, y - 25, 2, wood); // the dragon's neck, and its head looking out to sea
+    DrawRectangle((int)x + L + 1, (int)y - 29, 7, 4, ink);
+    DrawRectangle((int)x + L + 2, (int)y - 28, 5, 2, woodL);
+    DrawRectangle((int)x + L + 5, (int)y - 28, 1, 1, {220, 60, 40, 255});
+    stroke(x - L, y - 15, x - L - 2, y - 22, 2, wood); // the stern curls back over itself
+    stroke(x - L - 2, y - 22, x - L + 1, y - 24, 1.5f, wood);
+    float mx = x - 2;
+    stroke(mx, y - 9, mx, y - 46, 1.5f, woodD); // mast and yard
+    stroke(mx - 14, y - 44, mx + 14, y - 44, 1, woodD);
+    if (sail > 0.02f)
+    {
+        int sh = (int)(26 * sail);
+        for (int yy = 0; yy < sh; yy++)
+            for (int dx = -13; dx <= 13; dx++)
+            {
+                float belly = std::sin(3.14159f * yy / 26.0f) * 2 * sail; // filled with wind
+                Color c = ((dx + 13) / 5) % 2 ? Color{232, 222, 196, 255} : Color{168, 38, 40, 255};
+                if (std::abs(dx) == 13 || yy == sh - 1) c = brighten(c, -60);
+                DrawRectangle((int)(mx + dx + belly), (int)y - 43 + yy, 1, 1, c);
+            }
+    }
+    else
+    {
+        DrawRectangle((int)mx - 13, (int)y - 44, 27, 3, ink);
+        DrawRectangle((int)mx - 12, (int)y - 43, 25, 1, {200, 180, 150, 255});
+    }
+    static const Color shields[4] = {{176, 44, 40, 255}, {222, 184, 70, 255}, {44, 70, 140, 255}, {226, 220, 200, 255}};
+    for (int k = 0; k < 7; k++) // shields hung along the gunwale
+    {
+        float sx = x - L + 9 + k * 7.3f, sy = y - 8;
+        DrawCircleV({sx, sy}, 3.4f, ink);
+        DrawCircleV({sx, sy}, 2.6f, shields[k % 4]);
+        DrawRectangle((int)sx, (int)sy, 1, 1, {140, 140, 150, 255});
+    }
+}
+
 void updateGame()
 {
     if (G.hitstop > 0) { G.hitstop--; return; } // freeze frames sell the impact
     G.frame++;
     Mob& pm = G.p.m;
+
+    if (G.sailT > 0) // aboard the longship: no control, just the voyage out (and a fade to black)
+    {
+        G.sailT++;
+        for (auto& it : G.inter)
+            if (it.type == IT_BOAT && !it.used)
+            {
+                it.x += std::min(1.4f, G.sailT * 0.012f);
+                pm.x = it.x - 4 - pm.w / 2.0f;
+                pm.y = it.y - 8 - pm.h;
+            }
+        pm.vx = pm.vy = 0;
+        pm.facing = 1;
+        simulate((int)G.camX - 100, (int)G.camY - 100, (int)G.camX + G.vw + 100, (int)G.camY + G.vh + 100);
+        updateParticles();
+        updateCamera();
+        if (G.sailT > 180) { G.sailT = 0; travelOnward(); }
+        return;
+    }
 
     if (G.sandbox) sandboxTools();
     updatePlayer();
@@ -2082,6 +2235,8 @@ void updateGame()
     }
     updateParticles();
     updateRagdolls();
+    updateDunes();
+    if (G.duneEnd && !G.duneCrossed && pm.x > G.duneEnd) { G.duneCrossed = true; G.bannerTimer = 240; } // the Greenmarch, at last
 
     for (auto& t : G.texts) { t.life--; t.y -= 0.3f; }
     G.texts.erase(std::remove_if(G.texts.begin(), G.texts.end(), [](const FloatText& t) { return t.life <= 0; }), G.texts.end());
@@ -2097,16 +2252,7 @@ void updateGame()
     }
     if (G.winTimer > 0 && --G.winTimer == 0) { bankRun(); G.state = GS_WIN; }
 
-    // camera
-    float tx = pm.cx() - G.vw / 2.0f, ty = pm.cy() - G.vh / 2.0f;
-    G.camX += (tx - G.camX) * 0.12f;
-    G.camY += (ty - G.camY) * 0.12f;
-    if (world.w <= G.vw) G.camX = (world.w - G.vw) / 2.0f;
-    else G.camX = clampf(G.camX, 0, (float)(world.w - G.vw));
-    if (world.h <= G.vh) G.camY = (world.h - G.vh) / 2.0f;
-    else G.camY = clampf(G.camY, 0, (float)(world.h - G.vh));
-    syncRenderCamera();
-    G.shake *= 0.88f;
+    updateCamera();
 }
 
 // ================================================================ drawing (render-texture space)
@@ -2151,7 +2297,6 @@ void drawEntities(int camX, int camY)
         {
             static const Color stripe[3] = {{180, 40, 40, 255}, {50, 70, 170, 255}, {50, 130, 60, 255}};
             drawSpriteNative(SPR_MERCHANT, x + 4, y - 7, true);
-            DrawRectangle((int)x - 17, (int)y - 9, 34, 9, {24, 18, 28, 255});
             DrawRectangle((int)x - 16, (int)y - 8, 32, 7, {130, 88, 50, 255});
             DrawRectangle((int)x - 16, (int)y - 8, 32, 2, {160, 112, 66, 255});
             for (int px2 : {-16, 15}) DrawRectangle((int)x + px2, (int)y - 34, 2, 26, {90, 58, 32, 255});
@@ -2166,9 +2311,8 @@ void drawEntities(int camX, int camY)
         case IT_STONE:
         {
             const Weapon* w = it.used ? nullptr : &G.stoneLoot[it.data];
-            const Color ink = {24, 18, 28, 255}, wood = {120, 80, 46, 255}, woodD = {80, 52, 30, 255}, stone = {120, 116, 124, 255};
+            const Color ink = {56, 40, 30, 255}, wood = {120, 80, 46, 255}, woodD = {80, 52, 30, 255}, stone = {120, 116, 124, 255};
             auto box = [&](float x0, float y0, float x1, float y1, Color c) {
-                DrawRectangle((int)x0 - 1, (int)y0 - 1, (int)(x1 - x0) + 2, (int)(y1 - y0) + 2, ink);
                 DrawRectangle((int)x0, (int)y0, (int)(x1 - x0), (int)(y1 - y0), c);
             };
             Vector2 wc = {x, y - 16}; // where the glow centres
@@ -2256,6 +2400,12 @@ void drawEntities(int camX, int camY)
                 EndBlendMode();
             }
             break;
+        case IT_BOAT:
+        {
+            float bob = it.used ? 0 : std::sin(G.frame * 0.04f) * 1.0f;
+            drawLongship(x, y + bob, it.used ? 0 : clampf(G.sailT / 50.0f, 0, 1));
+            break;
+        }
         case IT_PORTAL:
             for (int k = 0; k < 48; k++)
             {
@@ -2270,6 +2420,16 @@ void drawEntities(int camX, int camY)
         }
     }
 
+    for (auto& l : G.lamps) // wall torches: the flame flickers, the light itself comes from the lighting pass
+    {
+        if (!l.flame) continue;
+        float x = l.x - camX, y = l.y - camY, fl = hash2((int)l.x, G.frame / 4, 9);
+        DrawRectangle((int)x - 1, (int)y - (fl > 0.5f), 3, 4, {255, 120, 30, 255});
+        DrawRectangle((int)x - (fl > 0.7f ? 1 : 0), (int)y + 1, 2, 2, {255, 230, 120, 255});
+        if (fl > 0.92f) spawnParticle(l.x + 0.5f, l.y - 1, frange(-0.2f, 0.2f), -0.5f, 24, {255, 170, 60, 255}, -0.005f);
+    }
+    drawTumbleweeds(camX, camY);
+
     for (auto& pu : G.pickups)
     {
         float x = pu.b.x - camX, y = pu.b.y - camY + std::sin((G.frame + pu.age) * 0.08f) * 0.8f;
@@ -2281,7 +2441,7 @@ void drawEntities(int camX, int camY)
         case PU_COIN:
         {
             float sp = std::fabs(std::sin((G.frame + pu.age) * 0.12f));
-            DrawEllipse((int)x + 4, (int)y + 4, 2.6f * sp + 1.6f, 3.6f, {24, 18, 28, 255});
+            DrawEllipse((int)x + 4, (int)y + 4, 2.6f * sp + 1.0f, 3.0f, {160, 118, 34, 255});
             DrawEllipse((int)x + 4, (int)y + 4, 2.6f * sp + 0.6f, 2.6f, {240, 196, 60, 255});
             if (sp > 0.5f) DrawRectangle((int)x + 3, (int)y + 2, 1, 1, {255, 246, 190, 255});
             break;

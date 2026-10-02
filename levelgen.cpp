@@ -347,6 +347,25 @@ static void placeTree(int x, int fy)
     }
 }
 
+static const Color LAMP_WARM = {255, 168, 84, 255};
+
+// A lantern on a short chain (painted behind), and the light it gives.
+static void hangLantern(int x, int top, int len)
+{
+    for (int y = top; y < top + len; y++) bgPut(x, y, {60, 60, 64, 255});
+    for (int y = top + len; y < top + len + 4; y++)
+        for (int xx = x - 1; xx <= x + 1; xx++) bgPut(xx, y, xx == x ? Color{255, 220, 140, 255} : Color{200, 140, 60, 255});
+    G.lamps.push_back({(float)x, (float)(top + len + 2), 72, LAMP_WARM});
+}
+
+// An iron bracket on the wall holding a burning torch (the flame is drawn live).
+static void addSconce(int x, int y, int dir)
+{
+    for (int k = 0; k < 4; k++) bgPut(x - dir * k, y + 2 + k / 2, {56, 56, 62, 255});
+    for (int yy = y; yy < y + 4; yy++) bgPut(x, yy, {92, 60, 34, 255});
+    G.lamps.push_back({(float)x, (float)y - 2, 78, LAMP_WARM, true});
+}
+
 static void placeMineSupport(int x, int fy)
 {
     int cy = fy - 2;
@@ -357,10 +376,7 @@ static void placeMineSupport(int x, int fy)
         for (int k = -15; k <= -12; k++) { bgPut(x + k, y, shadeC(wood, k == -15 ? 0.6f : 0.8f)); bgPut(x - k, y, shadeC(wood, k == -12 ? 0.6f : 0.8f)); }
     for (int xx = x - 17; xx <= x + 17; xx++)
         for (int y = cy + 1; y <= cy + 4; y++) bgPut(xx, y, shadeC(wood, y == cy + 4 ? 0.55f : 0.85f));
-    // a hanging lantern
-    for (int y = cy + 5; y < cy + 10; y++) bgPut(x, y, {60, 60, 64, 255});
-    for (int y = cy + 10; y < cy + 14; y++)
-        for (int xx = x - 1; xx <= x + 1; xx++) bgPut(xx, y, xx == x ? Color{255, 210, 120, 255} : Color{200, 140, 60, 255});
+    hangLantern(x, cy + 5, 5);
 }
 
 static void placePillar(int x, int fy)
@@ -409,8 +425,10 @@ static void placeHanging(int x, int cy, int kind)
 
 static void buildBackground(const StageDef& d, bool skies)
 {
-    int minSurf = H;
-    if (skies) for (int v : surf) minSurf = std::min(minSurf, v);
+    std::vector<int> localSurf(W, H); // mountains sit behind the nearby ground, not the highest hill in the level
+    if (skies)
+        for (int x = 0; x < W; x++)
+            for (int k = std::max(0, x - 160); k < std::min(W, x + 160); k += 4) localSurf[x] = std::min(localSurf[x], surf[k]);
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
         {
@@ -420,14 +438,17 @@ static void buildBackground(const StageDef& d, bool skies)
             c = brighten(c, (int)((t - 0.5f) * 26));
             if (skies && y < surf[x] + 6)
             {
-                float k = clampf((float)y / (minSurf + 10), 0, 1);
-                Color sky = lerpColor(Color{14, 18, 40, 255}, Color{150, 86, 92, 255}, k * k);
-                float mh = minSurf - 10 - fbm(x * 0.004f, 1.7f, seed + 60, 3) * 90;
-                float mh2 = minSurf + 10 - fbm(x * 0.009f, 3.1f, seed + 61, 3) * 60;
-                if (y > mh2) sky = Color{24, 26, 38, 255};
-                else if (y > mh) sky = Color{40, 40, 60, 255};
-                else if (hash2(x, y, seed) > 0.997f) sky = Color{220, 220, 240, 255};
-                if (y > surf[x] - 2) sky = lerpColor(sky, c, (y - surf[x] + 2) / 8.0f);
+                int ls = localSurf[x];
+                float k = clampf((float)y / (ls + 10), 0, 1);
+                Color sky = lerpColor(Color{4, 6, 16, 255}, Color{30, 38, 68, 255}, k * k); // night, paling to the horizon
+                float mh = ls - 10 - fbm(x * 0.004f, 1.7f, seed + 60, 3) * 90;
+                float mh2 = ls + 10 - fbm(x * 0.009f, 3.1f, seed + 61, 3) * 60;
+                bool open = false;
+                if (y > mh2) sky = Color{12, 13, 22, 255};
+                else if (y > mh) sky = lerpColor(Color{22, 25, 42, 255}, Color{30, 34, 54, 255}, hash2(x / 3, y / 5, seed) * 0.4f);
+                else open = true;
+                if (y > surf[x] - 2) { sky = lerpColor(sky, c, (y - surf[x] + 2) / 8.0f); open = false; }
+                world.sky[(size_t)y * W + x] = open;
                 c = sky;
             }
             else
@@ -446,6 +467,10 @@ static void resetLevelState()
     G.parts.clear();
     G.traps.clear();
     G.inter.clear();
+    G.lamps.clear();
+    G.duneEnd = 0;
+    G.sailT = 0;
+    G.duneCrossed = false;
     G.texts.clear();
     G.rags.clear();
     G.msgs.clear();
@@ -573,6 +598,7 @@ static void placeWatchtower(int x)
         bgPut(x + 3 + t, y, {70, 46, 26, 255});
         bgPut(x + 23 - t, y, {70, 46, 26, 255});
     }
+    hangLantern(x + 13, top + 1, 6);
     lookouts.push_back({(float)x + 20, (float)deck});
 }
 
@@ -669,6 +695,7 @@ static void placeHouse(int x, int w)
         for (int y = wallTop - roof - 6; y < wallTop - 1; y++)
             for (int xx = cx; xx < cx + 5; xx++) place(xx, y, M::Brick);
     }
+    if (upstairs) hangLantern(x + w / 2, wallTop + 1, std::max(3, loft - wallTop - 18));
     if (chance(2)) paintCobweb(x + 3, wallTop, 1); // up in the rafters
     G.inter.push_back({IT_TORCH, (float)x + 10, (float)g});
     if (chance(3)) return; // no cellar under this one
@@ -1085,7 +1112,7 @@ static bool allRock(int cx, int cy, int r)
 static bool placeSealedPocket()
 {
     int pr = irange(24, 28); // room to stand
-    Chamber p{irange(60, W - 340), 0, pr + 4, pr};
+    Chamber p{irange(G.duneEnd + 60, W - 340), 0, pr + 4, pr};
     p.floor = irange(surf[p.x] + 120, H - 30);
     int cy = p.floor - pr / 2;
     if (!allRock(p.x, cy, pr + 8)) return false;
@@ -1128,6 +1155,7 @@ static void placeMine(int mx)
             world.at(x, y) = Cell{};
             if (x == mx - 6 || x == mx + 6 || (y - g) % 20 < 2) bgPut(x, y, shadeC(timber, (y - g) % 20 == 1 ? 0.7f : 1.0f));
         }
+    for (int y = g + 22, sd = 1; y < bottom - 16; y += 30, sd = -sd) addSconce(mx + sd * 5, y, sd); // torches down the shaft
     for (int x = mx - 7; x <= mx + 7; x++) { place(x, g, M::Platform); place(x, g + 1, M::Platform); } // plank cover: S drops through
     for (int y = g - 42; y < g; y++) // headframe legs leaning in
         for (int k = 0; k < 3; k++)
@@ -1155,7 +1183,7 @@ static void placeMine(int mx)
         for (int k = irange(2, 3); k > 0; k--)
         {
             Chamber c{prev.x + side * irange(85, 125), 0, irange(28, 44), irange(28, 40)};
-            if (c.x < 50 || c.x > W - 320) break;
+            if (c.x < G.duneEnd + 50 || c.x > W - 320) break;
             c.floor = std::max(surf[c.x] + 110, std::min(H - 40, prev.floor + irange(-25, 45)));
             int r = tunnelRadius();
             carveRamp(prev.x + side * prev.rx * 0.7f, (float)(prev.floor - r - 1), c.x - side * c.rx * 0.7f, (float)(c.floor - r - 1), r);
@@ -1173,7 +1201,7 @@ static void placeMine(int mx)
             while (wy > c.floor - c.ry - 4 && world.at(wx, wy - 1).material == M::Empty) wy--;
             paintCobweb(wx, wy, -sd);
         }
-        if (i == 0) continue; // the landing under the rope stays clear
+        if (i == 0) { addSconce(c.x + 18, c.floor - 14, -1); addSconce(c.x - 18, c.floor - 14, 1); continue; } // the landing under the rope stays clear
         int lx = c.x + irange(-c.rx / 3, c.rx / 3);
         if (chance(4)) addChest(lx, c.floor);
         else if (chance(2))
@@ -1221,16 +1249,103 @@ static void paintArchery(int x, int fy)
     }
 }
 
+// ---------------------------------------------------------------- the Whispering Dunes
+
+static void paintCactus(int x, int fy)
+{
+    const Color base = {64, 104, 58, 255}, rib = {44, 74, 42, 255}, lit = {96, 140, 80, 255}, spine = {196, 192, 150, 255};
+    auto stalk = [&](int x0, int y0, int y1, int w) { // a ribbed column from y0 (top) to y1, rounded at the top
+        for (int y = y0; y <= y1; y++)
+            for (int k = 0; k < w; k++)
+            {
+                if (y == y0 && (k == 0 || k == w - 1)) continue;
+                Color c = k == w - 1 ? lit : (k == 0 ? rib : ((k + y / 3) % 2 ? base : shadeC(base, 0.85f)));
+                if (hash2(x0 + k, y, seed + 41) > 0.93f) c = spine;
+                bgPut(x0 + k, y, c);
+            }
+    };
+    int h = irange(16, 30);
+    stalk(x - 2, fy - h, fy + 1, 5);
+    for (int sd : {-1, 1})
+    {
+        if (chance(3)) continue;
+        int ay = fy - irange(h / 3, h * 2 / 3), reach = irange(3, 5), up = irange(5, 10);
+        for (int k = 1; k <= reach; k++)
+            for (int yy = ay; yy < ay + 3; yy++) bgPut(x + sd * (2 + k), yy, yy == ay + 2 ? rib : base);
+        int ax = sd > 0 ? x + 2 + reach : x - 4 - reach;
+        stalk(ax, ay - up, ay + 2, 3);
+    }
+}
+
+static void paintDeadBush(int x, int fy)
+{
+    const Color twig = {110, 84, 56, 255};
+    for (int b = 0; b < 5; b++)
+    {
+        float a = -PI / 2 + frange(-1.0f, 1.0f), len = frange(3, 7);
+        for (int k = 0; k < len; k++) bgPut(x + (int)std::lround(std::cos(a) * k), fy - 1 + (int)std::lround(std::sin(a) * k), shadeC(twig, 0.8f + 0.1f * (k % 2)));
+    }
+}
+
+// The bones of a giant, half swallowed by the sand: a skull, a spine and a cage of ribs.
+static void paintGiantBones(int x, int fy)
+{
+    const Color bone = {196, 190, 166, 255}, dark = {130, 124, 108, 255};
+    auto put = [&](int px, int py, Color c) { if (world.in(px, py) && world.at(px, py).material == M::Empty) bgPut(px, py, c); };
+    for (int k = 0; k < 90; k++) // spine, sagging into the dune
+        for (int t = 0; t < 3; t++) put(x + k, fy - 3 + (int)(std::sin(k * 0.035f) * 6) + t, k % 5 == 0 ? dark : bone);
+    for (int r = 0; r < 7; r++) // ribs arch up and over
+    {
+        int rx = x + 14 + r * 10, rh = 34 - std::abs(r - 2) * 4, base = fy - 2 + (int)(std::sin((rx - x) * 0.035f) * 6);
+        for (float a = 0; a < PI; a += 0.02f)
+        {
+            int px2 = rx - (int)(std::cos(a) * 8) - (int)(a * 3), py = base - (int)(std::sin(a) * rh);
+            put(px2, py, bone);
+            put(px2 + 1, py, a > PI / 2 ? dark : bone);
+        }
+    }
+    for (int dy = -12; dy <= 0; dy++) // the skull, eye socket to the sky
+        for (int dx = -16; dx <= 0; dx++)
+        {
+            float u = (dx + 8) / 9.0f, v = (dy + 6) / 7.0f;
+            if (u * u + v * v > 1) continue;
+            bool socket = (dx + 6) * (dx + 6) + (dy + 7) * (dy + 7) < 6;
+            put(x + dx, fy - 2 + dy, socket ? Color{20, 18, 22, 255} : (dy > -3 ? dark : bone));
+        }
+}
+
+static void decorateDunes(int D)
+{
+    G.inter.push_back({IT_BOAT, 66, (float)surf[66] + 2, true}); // the longship you came in on, run up on the beach
+    for (int x = 160; x < D - 20; x += irange(40, 110))
+    {
+        int fy;
+        if (!findFloor(x, 10, fy)) continue;
+        if (chance(3)) paintDeadBush(x, fy);
+        else paintCactus(x, fy);
+    }
+    int gx = irange(D / 2 - 80, D / 2 + 40), gy;
+    if (findFloor(gx + 40, 10, gy)) paintGiantBones(gx, gy);
+    if (chance(3)) // very rarely, someone's lost chest half-buried in the sand
+    {
+        int cx = irange(260, D - 120), cy;
+        if (findFloor(cx, 10, cy)) addChest(cx, cy + 3);
+    }
+}
+
 void generateStage(int s)
 {
     const StageDef& d = STAGES[s];
     resetLevelState();
-    W = 1200; H = 640;
+    // the first stage opens on the Whispering Dunes: a quiet walk up from the beach before the Greenmarch
+    const int D = d.kind == SK_PLAINS && s == 0 ? 760 : 0;
+    W = 1200 + D; H = 640;
     worldInit(W, H);
     seed = irand(1 << 30);
     air.assign((size_t)W * H, 0);
     path.clear();
     surf.assign(W, 0);
+    G.duneEnd = D;
     bool castle = d.kind == SK_CASTLE;
     LevelEnds ends{};
     int arenaX = -1, arenaFloor = 0;
@@ -1244,13 +1359,21 @@ void generateStage(int s)
     bool plains = d.kind == SK_PLAINS;
     if (d.surface)
         for (int x = 0; x < W; x++) surf[x] = 120 + (int)(fbm(x * 0.004f, 0.5f, seed + 5, 3) * 40) - 20; // gentle rolling hills
+    for (int x = 0; x < D + 80; x++) // long dunes with small ripples, sloping down to the sea at the far left
+    {
+        float dune = 150 - (fbm(x * 0.006f, 9.1f, seed + 15, 3) - 0.5f) * 80 - std::sin(x * 0.02f + seed) * 4;
+        float beach = clampf((130 - x) / 110.0f, 0, 1);
+        dune += (214 - dune) * beach * beach * (3 - 2 * beach);
+        float t = clampf((x - D) / 80.0f, 0, 1);
+        surf[x] = (int)(dune + (surf[x] - dune) * t * t * (3 - 2 * t));
+    }
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
         {
             // big open caverns from low-frequency noise, smaller pockets from a finer layer
             float n = fbm(x * 0.0075f, y * 0.012f, seed, 4);
             float n2 = fbm(x * 0.022f, y * 0.032f, seed + 99, 3);
-            bool cave = plains ? (y > surf[x] + 75 && (n > 0.64f || n2 > 0.77f)) : (n > 0.585f || n2 > 0.715f);
+            bool cave = plains ? (x > D + 60 && y > surf[x] + 75 && (n > 0.64f || n2 > 0.77f)) : (n > 0.585f || n2 > 0.715f);
             air[(size_t)y * W + x] = cave ? 1 : 0;
             if (d.surface && y < surf[x]) air[(size_t)y * W + x] = 1;
         }
@@ -1334,8 +1457,12 @@ void generateStage(int s)
             if (air[(size_t)y * W + x]) continue;
             float n = fbm(x * 0.025f, y * 0.035f, seed + 7, 3);
             M m = n > 0.62f ? d.alt : (n < 0.36f ? d.alt2 : d.base);
+            if (x < D + 20 - fbm(y * 0.05f, 4.4f, seed, 2) * 40 && y < surf[x] + 12 + (int)(n * 10)) m = M::Sand; // the dunes
             place(x, y, m);
         }
+    for (int x = 4; x < 120 && D; x++) // the sea, lapping the beach
+        for (int y = 190; y < surf[x]; y++)
+            if (world.at(x, y).material == M::Empty) place(x, y, M::Water);
     if (d.kind == SK_CRYPT) // crypts and citadel: every cave is lined with masonry
     {
         std::vector<uint8_t> near(air);
@@ -1370,7 +1497,7 @@ void generateStage(int s)
         for (int k = irange(1, 2); k > 0; k--) plan.push_back(B_TOWER);
         for (int k = irange(1, 2); k > 0; k--) plan.push_back(B_PALISADE);
         for (int i = (int)plan.size() - 1; i > 0; i--) std::swap(plan[i], plan[irand(i + 1)]);
-        int bx = irange(80, 110), mineAt = -1;
+        int bx = D + irange(80, 110), mineAt = -1;
         for (int b : plan)
         {
             int w = b == B_HOUSE ? irange(56, 110) : 0;
@@ -1426,7 +1553,7 @@ void generateStage(int s)
     // structures and hazards on floors along the level
     int enemyKinds = 0;
     for (auto& e : d.enemies) if (e.w) enemyKinds++;
-    auto spots = findSpots(400, 120, W - 120, 16, 26);
+    auto spots = findSpots(400, D + 120, W - 120, 16, 26);
     size_t si = 0;
     if (castle) // no traps or clutter in the entrance hall
         spots.erase(std::remove_if(spots.begin(), spots.end(), [](const Spot& p) { return p.x < 240 && p.y < 110; }), spots.end());
@@ -1454,10 +1581,10 @@ void generateStage(int s)
             placeHanging(x, y + 1, d.hang);
         }
     if (d.kind == SK_CRYPT) for (int i = 0; i < 12 && next(sp); i++) paintCircle(sp.x, sp.y - 2, 3, M::Bone, true);
-    if (d.surface) for (int x = 30; x < W - 320; x += irange(24, 70)) { int fy; if (std::abs(x - mineX) > 34 && findFloor(x, 4, fy) && fy < surf[x] + 4) placeTree(x, fy); }
+    if (d.surface) for (int x = D + 30; x < W - 320; x += irange(24, 70)) { int fy; if (std::abs(x - mineX) > 34 && findFloor(x, 4, fy) && fy < surf[x] + 4) placeTree(x, fy); }
 
     // liquids pool on floors, gas pockets float anywhere
-    for (auto& l : findSpots(d.liquidCount * 3 / 2, 60, W - 60, 6, 10))
+    for (auto& l : findSpots(d.liquidCount * 3 / 2, D + 60, W - 60, 6, 10))
     {
         int r = irange(5, 11);
         paintCircle(l.x, l.y - r / 2, r, chance(3) ? d.liquid2 : d.liquid1, true);
@@ -1473,8 +1600,10 @@ void generateStage(int s)
     if (d.kind == SK_PLAINS) // carved last, so no tunnel cuts into them
         for (int t = 0, n = 0; t < 600 && n < 2; t++) n += placeSealedPocket();
 
+    if (D) decorateDunes(D);
+
     // torches mark the road; easy to lose among the side caves, but always there
-    for (int x = 60; !castle && x < W - 60; x += irange(90, 130))
+    for (int x = D + 60; !castle && x < W - 60; x += irange(90, 130))
     {
         int y = pathFloor[x];
         if (!isSolid(x, y) || world.at(x, y - 1).material != M::Empty || world.at(x, y - 12).material != M::Empty) continue;
@@ -1483,9 +1612,9 @@ void generateStage(int s)
 
     // start and exit
     int fy;
-    int sx = castle ? ends.sx : 24;
+    int sx = castle ? ends.sx : (D ? 116 : 24);
     if (castle) fy = ends.sy;
-    else if (!findFloor(sx, (int)path[6].y, fy)) fy = (int)path[6].y + 8;
+    else if (!findFloor(sx, D ? 10 : (int)path[6].y, fy)) fy = (int)path[6].y + 8;
     clearRect(sx - 8, fy - 26, sx + 8, fy - 1);
     placePlayer(sx, fy);
 
@@ -1510,7 +1639,7 @@ void generateStage(int s)
     }
 
     // creatures and chests
-    spots = findSpots(300, 160, W - 80, 16, 30);
+    spots = findSpots(300, D + 160, W - 80, 16, 30);
     int placed = 0;
     for (size_t i = 0; i < spots.size() && placed < d.enemyCount * 6 / 10; i++)
     {
@@ -1552,7 +1681,7 @@ void generateStage(int s)
         std::vector<int> ranges; // archery butts out in the fields; the first has the stage's crossbow
         for (int t = 0; t < 300 && ranges.size() < 3; t++)
         {
-            int x = irange(140, W - 340), fy2;
+            int x = irange(D + 140, W - 340), fy2;
             if (inFortZone(x - 26) || inFortZone(x + 20) || !findFloor(x, 10, fy2) || fy2 > surf[x] + 4) continue;
             bool near = false;
             for (int o : ranges) near = near || std::abs(o - x) < 80;
@@ -1580,6 +1709,7 @@ void generateStage(int s)
     G.stage = s;
     G.bannerTimer = 240;
     if (d.boss >= 0) message("A guardian bars the way to the next portal...");
+    if (D) message("You run aground on a moonlit shore. Somewhere ahead, past the dunes, lies the Greenmarch.");
 }
 
 void generateSanctuary()
@@ -1628,7 +1758,7 @@ void generateSanctuary()
     message("A sanctuary. Your wounds close. Forge at the anvil, pray at the shrine.");
 }
 
-// Hearthwick: the village between runs. Spend banked coins at the stalls, then leave by the gate.
+// Hearthwick: the village between runs. Spend banked coins at the stalls, then sail from the harbour.
 void generateVillage()
 {
     resetLevelState();
@@ -1637,49 +1767,80 @@ void generateVillage()
     worldInit(W, H);
     seed = irand(1 << 30);
     surf.assign(W, 0);
-    for (int x = 0; x < W; x++) surf[x] = 228 + (int)(fbm(x * 0.01f, 2.0f, seed, 2) * 6);
+    const int quay = W - 210; // the land ends here; past it is the harbour
+    for (int x = 0; x < W; x++)
+    {
+        surf[x] = 228 + (int)(fbm(x * 0.01f, 2.0f, seed, 2) * 6);
+        if (x > quay) surf[x] = 232 + (int)(clampf((x - quay) / 16.0f, 0, 1) * 40); // the sea bed shelves away
+    }
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
         {
             if (x < 4 || y < 4 || x >= W - 4 || y >= H - 4) place(x, y, M::Bedrock);
-            else if (y >= surf[x]) place(x, y, y < surf[x] + 2 ? M::Grass : (y < surf[x] + 14 ? M::Dirt : M::Stone));
+            else if (y >= surf[x]) place(x, y, x > quay ? (y < surf[x] + 4 ? M::Sand : M::Stone) : (y < surf[x] + 2 ? M::Grass : (y < surf[x] + 14 ? M::Dirt : M::Stone)));
+            else if (x > quay && y >= 236) place(x, y, M::Water);
         }
     StageDef bgd = STAGES[0];
     buildBackground(bgd, true);
-    // timber-framed cottages on the back wall
-    for (int hx = 70; hx < W - 120; hx += irange(110, 150))
+    // longhouses on the back wall: plank walls, a curved turf roof, carved dragon heads on the gables
+    for (int hx = 60; hx < quay - 90; hx += irange(120, 160))
     {
-        int w = irange(46, 64), h = irange(34, 44), base = surf[hx];
-        Color plaster = {214, 200, 170, 255}, beam = {86, 56, 34, 255}, thatch = {176, 140, 70, 255};
+        int w = irange(60, 80), h = irange(26, 32), base = surf[hx + w / 2];
+        const Color plank = {78, 54, 36, 255}, plankD = {54, 38, 26, 255}, turf = {58, 84, 40, 255}, carve = {120, 84, 50, 255};
         for (int y = base - h; y < base; y++)
             for (int x = hx; x < hx + w; x++)
-            {
-                bool frame = x == hx || x == hx + w - 1 || y == base - h || (x - hx) % 16 == 0 || y == base - h / 2;
-                bgPut(x, y, frame ? beam : shadeC(plaster, 0.75f + 0.1f * hash2(x, y, seed)));
-            }
-        for (int k = 0; k < 2; k++) // glowing windows
+                bgPut(x, y, (x - hx) % 4 == 0 ? plankD : shadeC(plank, 0.85f + 0.2f * hash2(x, y / 6, seed)));
+        for (int y = base - 18; y < base; y++) // door, with a light inside
+            for (int x = hx + w / 2 - 5; x < hx + w / 2 + 5; x++)
+                bgPut(x, y, (x == hx + w / 2 - 5 || x == hx + w / 2 + 4 || y == base - 18) ? carve : Color{150, 96, 52, 255});
+        G.lamps.push_back({(float)(hx + w / 2), (float)(base - 8), 40, LAMP_WARM});
+        for (int k = 0; k < 2; k++) // shuttered windows, glowing
         {
-            int wx = hx + 8 + k * (w - 22);
-            for (int y = base - h + 8; y < base - h + 16; y++)
-                for (int x = wx; x < wx + 7; x++) bgPut(x, y, (x == wx + 3 || y == base - h + 12) ? beam : Color{255, 196, 100, 255});
+            int wx = hx + 9 + k * (w - 24);
+            for (int y = base - h + 8; y < base - h + 14; y++)
+                for (int x = wx; x < wx + 6; x++) bgPut(x, y, (x == wx || x == wx + 5) ? plankD : Color{255, 186, 96, 255});
+            G.lamps.push_back({(float)wx + 3, (float)(base - h + 11), 26, LAMP_WARM});
         }
-        for (int y = base - 14; y < base; y++) // door
-            for (int x = hx + w / 2 - 4; x < hx + w / 2 + 4; x++) bgPut(x, y, shadeC(beam, 1.2f));
-        for (int r = 0; r < 22; r++) // thatched roof
-            for (int x = hx - 6 + r; x < hx + w + 6 - r; x++)
-                bgPut(x, base - h - r, shadeC(thatch, 0.75f + 0.25f * hash2(x, base - h - r, seed + 3)));
+        int rh = 16; // the roof bows like an upturned hull, thick with turf
+        for (int x = hx - 8; x < hx + w + 8; x++)
+        {
+            float u = (x - hx - w / 2.0f) / (w / 2.0f + 8);
+            int top = base - h - (int)(rh * (1 - u * u));
+            for (int y = top; y < base - h + 2; y++)
+                bgPut(x, y, y < top + 2 ? shadeC(turf, 1.25f) : shadeC(turf, 0.65f + 0.35f * hash2(x, y, seed + 3)));
+        }
+        for (int sd : {-1, 1}) // crossed gable boards ending in dragon heads
+        {
+            int gx = sd < 0 ? hx - 4 : hx + w + 3, gy = base - h - 2;
+            for (int k = 0; k < 9; k++) bgPut(gx + sd * (k / 2), gy - k, carve);
+            bgPut(gx + sd * 5, gy - 9, carve);
+            bgPut(gx + sd * 6, gy - 8, carve);
+        }
     }
-    for (int x = 30; x < W - 30; x += irange(60, 120)) placeTree(x, surf[x]);
+    for (int x = 30; x < quay - 40; x += irange(60, 120)) placeTree(x, surf[x]);
+    // the pier: planks on posts out over the water, the longship moored at its end
+    int deck = surf[quay];
+    for (int x = quay - 10; x < W - 40; x++)
+    {
+        place(x, deck, M::Wood);
+        place(x, deck + 1, M::Wood);
+        world.at(x, deck).shade = (x % 6 == 0) ? 20 : (uint8_t)irange(150, 220);
+        if ((x - quay) % 24 == 0)
+            for (int y = deck + 2; y < surf[x]; y++)
+                for (int k = 0; k < 3; k++) bgPut(x + k, y, {70, 48, 30, 255});
+    }
+    G.inter.push_back({IT_BOAT, (float)(W - 84), (float)(deck + 9)});
+    G.inter.push_back({IT_TORCH, (float)(quay - 6), (float)deck});
+    G.inter.push_back({IT_TORCH, (float)(W - 44), (float)deck});
 
     placePlayer(40, surf[40]);
-    for (int i = 0; i < 3; i++) G.inter.push_back({IT_SHOP, 200.0f + i * 150, (float)surf[200 + i * 150], false, i});
-    for (int x = 130; x < W - 80; x += 150) G.inter.push_back({IT_TORCH, (float)x, (float)surf[x]});
-    G.inter.push_back({IT_PORTAL, (float)(W - 50), (float)surf[W - 50]});
+    for (int i = 0; i < 3; i++) G.inter.push_back({IT_SHOP, 160.0f + i * 140, (float)surf[160 + i * 140], false, i});
+    for (int x = 100; x < quay - 40; x += 140) G.inter.push_back({IT_TORCH, (float)x, (float)surf[x]});
     G.portalOpen = true;
     G.sanctuary = false;
     G.inVillage = true;
     G.bannerTimer = 0;
-    message("Hearthwick. You have " + std::to_string(META.bank) + " coins to spend. Leave through the gate when ready.");
+    message("Hearthwick. You have " + std::to_string(META.bank) + " coins to spend. Board the longship at the pier when ready.");
 }
 
 void generateSandbox()
