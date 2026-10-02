@@ -448,6 +448,7 @@ void damageMob(Mob& m, float dmg, Element el, float kx, float ky, int flags)
     if (isP)
     {
         mult *= 1 - armourDef(G.p.armour);
+        mult *= std::max(0.5f, 1 - 0.1f * G.p.perks[PK_HIDE]);
         if (G.p.armour >= 0 && el != EL_PHYS && METALS[G.p.armour].el == el)
         {
             mult *= 0.2f;
@@ -1065,7 +1066,7 @@ static void updatePlayer()
     }
     if (P.climb) { jumpPressed = false; P.jumpBuf = 0; }
 
-    float speed = 0.85f * (m.chill > 0 ? 0.5f : 1.0f) * (P.prone ? 0.3f : (P.crouch ? 0.45f : 1.0f));
+    float speed = 0.85f * (1 + 0.12f * P.perks[PK_SWIFT]) * (m.chill > 0 ? 0.5f : 1.0f) * (P.prone ? 0.3f : (P.crouch ? 0.45f : 1.0f));
     float accel = m.onGround ? 0.28f : 0.14f;
     if (P.hook == 2) accel = 0.12f;
     if (dir != 0 || m.onGround) m.vx += clampf(dir * speed - m.vx, -accel, accel);
@@ -1119,7 +1120,7 @@ static void updatePlayer()
         else
             m.vy = std::min(m.vy, 0.8f);
     }
-    if (m.onGround) P.stamina = std::min(100.0f, P.stamina + 2.0f);
+    if (m.onGround) P.stamina = std::min(100.0f, P.stamina + 2.0f * (1 + 0.5f * P.perks[PK_WIND]));
 
     // dodge roll (Shift): quick burst with invulnerability
     if (IsKeyPressed(KEY_LEFT_SHIFT) && P.rollT == 0 && P.rollCd == 0 && P.stamina >= 15 && !m.inLiquid && !P.crouch && !P.climb)
@@ -1701,12 +1702,17 @@ static void killMob(Mob& m)
     dropLoot(m.cx(), m.cy(), m.boss);
     if (m.boss)
     {
-        G.portalOpen = true;
-        G.bossId = 0;
         G.shake = 14;
         message(std::string(d.name) + " has fallen!");
         if (m.type == E_LICH) G.winTimer = 200;
-        else message("The way forward is open.");
+        for (auto& h : G.havens) // its haven's gate grinds open
+            if (h.locked && h.bossId == m.id)
+            {
+                h.locked = false;
+                setGate(h.x0, h.x0 + HAVEN_WALL - 1, h.floor - HAVEN_DOOR, h.floor - 1, false);
+                playSfx(SFX_PORTAL, 0.7f, 0.6f);
+                message("Somewhere ahead, a gate grinds open. The way on is clear.");
+            }
     }
 }
 
@@ -1948,41 +1954,23 @@ static void updateInteract()
     case IT_SHOP: G.shopId = it.data; G.state = GS_SHOP; break;
     case IT_SHRINE:
         if (it.used) message("The shrine is silent.");
-        else G.state = GS_SHRINE;
+        else { G.shrineAt = G.nearInteract; G.state = GS_SHRINE; }
         break;
     case IT_BOAT: // cast off: the longship carries you out of the harbour
         G.sailT = 1;
         playSfx(SFX_SPLASH, 0.7f, 0.7f);
         message("You cast off. The longship slips out into the dark...");
         break;
-    case IT_PORTAL:
-        if (!G.portalOpen) message("The portal is sealed. Defeat the guardian.");
-        else { playSfx(SFX_PORTAL, 0.8f); travelOnward(); }
-        break;
     }
 }
 
+// Sail out of Hearthwick on a fresh run with the chosen loadout.
 void travelOnward()
 {
-    if (G.sandbox) return;
-    if (G.inVillage) // set out on a fresh run with the chosen loadout
-    {
-        newGameKit(false);
-        G.stage = 0;
-        G.loadTarget = LOAD_STAGE;
-        G.state = GS_LOADING;
-        return;
-    }
-    if (G.sanctuary)
-    {
-        G.stage++;
-        G.loadTarget = LOAD_STAGE;
-    }
-    else
-    {
-        if (G.stage >= STAGE_COUNT - 1) { bankRun(); G.state = GS_WIN; return; }
-        G.loadTarget = LOAD_SANCTUARY;
-    }
+    if (G.sandbox || !G.inVillage) return;
+    newGameKit(false);
+    G.stage = 0;
+    G.loadTarget = LOAD_STAGE;
     G.state = GS_LOADING;
 }
 
@@ -1992,7 +1980,7 @@ void returnToRoad()
     Mob& m = G.p.m;
     float bd = 1e9f, tx = -1, ty = 0;
     for (auto& it : G.inter)
-        if (it.type == IT_TORCH)
+        if (it.type == IT_TORCH && it.x > G.playX0 + HAVEN_WALL) // never back behind a gate you came through
         {
             float d = std::hypot(it.x - m.cx(), it.y - m.cy());
             if (d < bd) { bd = d; tx = it.x; ty = it.y; }
@@ -2061,7 +2049,7 @@ static float windGust() { return 0.6f + 0.5f * std::sin(G.frame * 0.004f) + 0.25
 
 static void updateDunes()
 {
-    if (!G.duneEnd || G.sanctuary) { tumbles.clear(); return; }
+    if (!G.duneEnd) { tumbles.clear(); return; }
     float gust = windGust();
     if (tumbles.size() < 3 && G.camX < G.duneEnd && chance(140))
     {
@@ -2167,6 +2155,57 @@ static void drawLongship(float x, float y, float sail)
     }
 }
 
+// ---------------------------------------------------------------- havens
+
+void shiftEntities(float dx, float dy)
+{
+    Player& P = G.p;
+    P.m.x += dx; P.m.y += dy;
+    P.hx += dx; P.hy += dy;
+    for (int i = 0; i < 7; i++) { P.cape[i].x += dx; P.cape[i].y += dy; P.capePrev[i].x += dx; P.capePrev[i].y += dy; }
+    for (auto& p : G.projs) { p.x += dx; p.y += dy; }
+    for (auto& q : G.parts) { q.x += dx; q.y += dy; }
+    for (auto& t : G.texts) { t.x += dx; t.y += dy; }
+    for (auto& r : G.rags)
+        for (int i = 0; i < 9; i++) { r.p[i].x += dx; r.p[i].y += dy; r.pp[i].x += dx; r.pp[i].y += dy; }
+    tumbles.clear();
+    G.camX += dx; G.camY += dy;
+    syncRenderCamera();
+}
+
+// Walking into a haven drops its gate behind you: you're healed, the shrine is stocked for the depths
+// ahead, the far gate opens, and the world behind you is cut away while the one ahead grows.
+static void updateHavens()
+{
+    Mob& pm = G.p.m;
+    G.sanctuary = false;
+    for (auto& h : G.havens)
+    {
+        bool inside = pm.cx() > h.x0 + HAVEN_WALL && pm.cx() < h.x1 - HAVEN_WALL && pm.cy() > h.top && pm.cy() < h.floor;
+        if (inside) G.sanctuary = true;
+        if (h.sealed && !h.announced && pm.cx() > h.x1 + 6)
+        {
+            h.announced = true;
+            G.bannerTimer = 240;
+            if (STAGES[G.stage].boss >= 0) message("A guardian bars the way on, somewhere in these depths...");
+        }
+        if (h.sealed || h.locked || !inside || pm.cx() < h.x0 + 48 || !pm.alive) continue;
+        h.sealed = true;
+        setGate(h.x0, h.x0 + HAVEN_WALL - 1, h.floor - HAVEN_DOOR, h.floor - 1, true);
+        playSfx(SFX_CLANG, 1.0f, 0.45f);
+        G.shake = 9;
+        pm.hp = pm.maxHp;
+        G.stage = h.stage + 1;
+        rollShrine(G.shrineOffer);
+        message(std::string(h.name) + ". The gate crashes down behind you; your wounds close. Forge, then pray at the shrine to open the way on.");
+        G.playX0 = h.x0;
+        advanceWorld(h); // rebuilds G.havens: stop iterating
+        G.mobs.erase(std::remove_if(G.mobs.begin(), G.mobs.end(), [](const Mob& m) { return m.cx() < G.playX0 + HAVEN_WALL; }), G.mobs.end());
+        G.projs.clear();
+        return;
+    }
+}
+
 void updateGame()
 {
     if (G.hitstop > 0) { G.hitstop--; return; } // freeze frames sell the impact
@@ -2209,7 +2248,8 @@ void updateGame()
     for (auto& m : G.mobs)
     {
         if (!m.alive) continue;
-        if (!m.boss && (m.cx() < ax0 || m.cx() > ax1 || m.cy() < ay0 || m.cy() > ay1)) continue;
+        float slack = m.boss ? 400 : 0; // guardians keep watch a little further out, but not across the whole world
+        if (m.cx() < ax0 - slack || m.cx() > ax1 + slack || m.cy() < ay0 - slack || m.cy() > ay1 + slack) continue;
         updateStatus(m);
         updateEnemy(m);
         if (m.hp <= 0) killMob(m);
@@ -2222,6 +2262,7 @@ void updateGame()
     updatePickups();
     updateTraps();
     updateInteract();
+    if (!G.sandbox && !G.inVillage) updateHavens();
 
     simulate((int)G.camX - 100, (int)G.camY - 100, (int)G.camX + G.vw + 100, (int)G.camY + G.vh + 100);
 
@@ -2406,17 +2447,6 @@ void drawEntities(int camX, int camY)
             drawLongship(x, y + bob, it.used ? 0 : clampf(G.sailT / 50.0f, 0, 1));
             break;
         }
-        case IT_PORTAL:
-            for (int k = 0; k < 48; k++)
-            {
-                float a = k / 48.0f * 6.2832f + G.frame * 0.04f;
-                float r = 1.0f - 0.15f * std::sin(G.frame * 0.1f + k);
-                Color c = G.portalOpen ? ColorFromHSV(260 + 40 * std::sin(k * 0.5f + G.frame * 0.05f), 0.7f, 1.0f) : Color{90, 90, 96, 255};
-                DrawRectangle((int)(x + std::cos(a) * 11 * r), (int)(y - 21 + std::sin(a) * 20 * r), 2, 2, c);
-            }
-            if (G.portalOpen)
-                DrawEllipse((int)x, (int)y - 21, 8, 17, {60, 20, 90, 200});
-            break;
         }
     }
 

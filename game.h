@@ -169,6 +169,20 @@ struct Mob
     float cy() const { return y + h * 0.5f; }
 };
 
+// Perks: gifts from a haven's shrine that last the rest of the run (they stack).
+enum PerkId { PK_HEARTY, PK_SWIFT, PK_HIDE, PK_FURY, PK_WIND, PK_MEAD, PERK_COUNT };
+struct PerkDef { const char* name; const char* desc; Color col; };
+extern const PerkDef PERKS[PERK_COUNT];
+
+// A shrine offers one of each: an upgrade for the weapon in hand, a perk, and a spell.
+enum BoonKind { BOON_WEAPON, BOON_PERK, BOON_SPELL };
+enum WeaponUpgrade { WU_HONE, WU_RUNE };
+struct Boon { int kind = BOON_SPELL, id = 0, fx = 0; }; // weapon: id = WeaponUpgrade, fx = the rune's effect bit
+void rollShrine(Boon out[3]);
+std::string boonTitle(const Boon& b);
+std::string boonDesc(const Boon& b);
+void grantBoon(const Boon& b);
+
 struct Player
 {
     Mob m;
@@ -179,6 +193,7 @@ struct Player
     int pending[RES_COUNT] = {};
     int armour = -1; // metal index, -1 = padded gambeson
     int potions = 2;
+    int perks[PERK_COUNT] = {};
     float stamina = 100;
     int attackCd = 0, swingT = 0, swingDir = 1, recoil = 0;
     float aim = 0;
@@ -227,7 +242,7 @@ struct Pickup
     bool alive = true;
 };
 
-enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_PORTAL, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE, IT_BOAT };
+enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE, IT_BOAT };
 // IT_BOAT: a longship; `used` = beached scenery, otherwise F sets sail. IT_TORCH style 1 = wall sconce.
 // IT_ROPE: hangs from (x, y) down to row `data`. IT_CRATE: breakable obstacle, wood cells in [x, x+w) x [y-h, y), `data` = hits left.
 struct Interact { int type; float x, y; bool used = false; int data = 0; int style = 0; int w = 0, h = 0, cells = 0, hit = 0; };
@@ -255,6 +270,18 @@ struct Particle
 
 // A light with no object of its own (lanterns, lit windows); `flame` also draws a flickering flame.
 struct Lamp { float x, y, r; Color c; bool flame = false; };
+
+// A safe area between two biomes. You walk in through `x0`, the gate drops behind you, and the far
+// gate at `x1` opens onto the next biome. A boss's haven stays barred until the boss falls.
+const int HAVEN_WALL = 8, HAVEN_DOOR = 46; // gates fill the doorway through each end wall
+struct Haven
+{
+    int stage = 0;           // the biome it leads out of
+    int x0 = 0, x1 = 0, top = 0, floor = 0;
+    bool sealed = false, locked = false, announced = false;
+    int bossId = 0;
+    const char* name = "";
+};
 
 struct FloatText { float x, y; std::string s; int life; Color col; };
 
@@ -297,7 +324,7 @@ extern const int STAGE_COUNT;
 // ================================================================ game
 
 enum GameState { GS_TITLE, GS_LOADING, GS_PLAY, GS_INVENTORY, GS_ANVIL, GS_SHRINE, GS_PAUSE, GS_DEAD, GS_WIN, GS_SHOP };
-enum LoadTarget { LOAD_STAGE, LOAD_SANCTUARY, LOAD_SANDBOX, LOAD_VILLAGE };
+enum LoadTarget { LOAD_STAGE, LOAD_SANDBOX, LOAD_VILLAGE };
 
 // ================================================================ meta progression (meta.cpp)
 
@@ -322,7 +349,8 @@ void applyLoadout();
 struct Game
 {
     GameState state = GS_TITLE;
-    bool sandbox = false, sanctuary = false, inVillage = false, banked = false;
+    bool sandbox = false, inVillage = false, banked = false;
+    bool sanctuary = false; // standing inside a haven
     int shopId = 0;
     int stage = 0;
     Player p;
@@ -333,6 +361,7 @@ struct Game
     std::vector<Trap> traps;
     std::vector<Interact> inter;
     std::vector<Lamp> lamps;
+    std::vector<Haven> havens;
     std::vector<FloatText> texts;
     std::vector<Ragdoll> rags;
     std::vector<Weapon> stoneLoot; // weapons held by sword-in-stone shrines (Interact::data indexes this)
@@ -341,10 +370,9 @@ struct Game
     int rcx = 0, rcy = 0; // render camera (whole pixels)
     int scale = 3, vw = 0, vh = 0;
     int frame = 0, nextId = 1;
-    bool portalOpen = true;
-    int bossId = 0;
     int winTimer = 0, deadTimer = 0, bannerTimer = 0;
-    int shrineChoice[3] = {0, 0, 0};
+    Boon shrineOffer[3];
+    int shrineAt = -1; // the shrine being prayed at (index into inter)
     SpellCard heldSpell;
     int invSel = 0;
     int nearInteract = -1;
@@ -353,6 +381,7 @@ struct Game
     int hitstop = 0;
     float uiScale = 1; // accessibility: UI size multiplier
     bool showHelp = false, reduceShake = false;
+    int playX0 = 0;   // the gate you last came through: nothing behind it is reachable any more
     int duneEnd = 0;  // stage 1 opens with the Whispering Dunes: x where they give way to the Greenmarch (0 = none)
     int sailT = 0;    // frames into the voyage out of Hearthwick (0 = not sailing)
     bool duneCrossed = false;
@@ -408,7 +437,8 @@ Vector2 mouseWorld();
 void syncRenderCamera();
 void travelOnward();
 void returnToRoad();
-int roadFloorAt(int x); // -1 when the level has no single road (castle, village...)
+int roadFloorAt(int x); // -1 where there's no single road (castle, village...)
+void shiftEntities(float dx, float dy); // the world was re-cut: move everything that lives in world coordinates
 const char* sandboxBrushName();
 
 // rig.cpp (animation)
@@ -427,8 +457,9 @@ void drawSpriteBig(const Sprite& s, float x, float bottom, bool flip, Color tint
 void drawSpriteNative(const Sprite& s, float x, float bottom, bool flip);
 
 // levelgen.cpp
-void generateStage(int s);
-void generateSanctuary();
+void startRun();      // the first biomes of a new run, stitched together
+void advanceWorld(Haven& h); // h just sealed: trim the world behind it and grow the next biome ahead
+void setGate(int x0, int x1, int y0, int y1, bool closed);
 void generateSandbox();
 void generateVillage();
 void dumpStages(const char* dir);

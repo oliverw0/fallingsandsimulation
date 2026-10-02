@@ -1,6 +1,6 @@
-bank 140
-runs 6
-deepest 2
+bank 338
+runs 7
+deepest 4
 owned 0
 equip 0
 owned 2

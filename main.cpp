@@ -85,11 +85,11 @@ static void pointLight(float x, float y, float R, Color c, float I)
     if (x + R < lox || y + R < loy || x - R > lox + lw * LS || y - R > loy + lh * LS) return;
     lightId++;
     float cr = c.r / 255.0f * I, cg = c.g / 255.0f * I, cb = c.b / 255.0f * I;
-    int rays = std::max(48, (int)(R * 4.2f));
+    int rays = std::max(48, (int)(R * 3.2f)); // enough that neighbouring rays never skip a light texel
     for (int k = 0; k < rays; k++)
     {
         float a = k * 6.2832f / rays, dx = std::cos(a), dy = std::sin(a), t = 1;
-        for (float d = 0; d < R; d += 1)
+        for (float d = 0; d < R; d += 1.5f)
         {
             int wx = (int)std::floor(x + dx * d), wy = (int)std::floor(y + dy * d);
             if (opaque(wx, wy) && (t *= 0.55f) < 0.04f) break;
@@ -127,10 +127,8 @@ static void buildLight(int cx, int cy)
     loy = cy - ((cy % LS) + LS) % LS;
     size_t n = (size_t)lw * lh;
 
-    bool outdoors = G.inVillage || (!G.sanctuary && !G.sandbox && STAGES[G.stage].surface);
-    float amb[3] = {0.13f, 0.12f, 0.15f}; // deep underground
-    if (outdoors) amb[0] = 0.09f, amb[1] = 0.09f, amb[2] = 0.13f;
-    if (G.sanctuary) amb[0] = 0.30f, amb[1] = 0.28f, amb[2] = 0.32f;
+    bool outdoors = !G.sandbox; // moonlight reaches wherever there's open sky above, in any biome
+    float amb[3] = {0.11f, 0.11f, 0.14f};
     if (G.sandbox) amb[0] = amb[1] = amb[2] = 0.85f;
 
     // moonlight: open sky down to the first opaque cell in each column, then a short fall-off into the ground
@@ -184,7 +182,6 @@ static void buildLight(int cx, int cy)
     {
         float fl = 0.88f + 0.12f * hash2((int)it.x, G.frame / 4, 9);
         if (it.type == IT_TORCH) pointLight(it.x, it.y - 15, 90, warm, fl);
-        else if (it.type == IT_PORTAL && G.portalOpen) pointLight(it.x, it.y - 21, 64, {170, 110, 255, 255}, 0.8f);
         else if (it.type == IT_SHRINE && !it.used) pointLight(it.x, it.y - 34, 56, {200, 190, 255, 255}, 0.7f);
         else if (it.type == IT_STONE && !it.used) pointLight(it.x, it.y - 16, 44, G.stoneLoot[it.data].glow, 0.7f);
     }
@@ -365,8 +362,7 @@ int main(int argc, char** argv)
         else if (G.state == GS_LOADING)
         {
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), {10, 8, 14, 255});
-            const char* where = G.loadTarget == LOAD_VILLAGE ? "Returning to Hearthwick..." : G.loadTarget == LOAD_SANCTUARY ? "Finding sanctuary..." :
-                                G.loadTarget == LOAD_SANDBOX ? "Shaping the sandbox..." : G.stage == 0 ? "Sailing for distant shores..." : "Descending...";
+            const char* where = G.loadTarget == LOAD_VILLAGE ? "Returning to Hearthwick..." : G.loadTarget == LOAD_SANDBOX ? "Shaping the sandbox..." : G.stage == 0 ? "Sailing for distant shores..." : "Descending...";
             centered(where, GetScreenHeight() * 0.45f, 40 * GetScreenHeight() / 768.0f, {220, 200, 160, 255});
         }
         else
@@ -388,7 +384,7 @@ int main(int argc, char** argv)
             }
             case GS_DEAD:
                 drawOverlay("YOU HAVE FALLEN",
-                            std::string("Slain in ") + (G.sanctuary ? "a sanctuary" : STAGES[G.stage].name) + " with " + std::to_string(G.p.kills) + " foes vanquished.  " +
+                            std::string("Slain in ") + (G.sanctuary ? "a haven" : STAGES[G.stage].name) + " with " + std::to_string(G.p.kills) + " foes vanquished.  " +
                                 std::to_string(G.p.coins) + " coins banked (" + std::to_string(META.bank) + " total)",
                             "Enter  return to Hearthwick", {220, 60, 60, 255});
                 break;
@@ -404,8 +400,7 @@ int main(int argc, char** argv)
 
         if (G.state == GS_LOADING) // the loading frame is on screen; now do the slow work
         {
-            if (G.loadTarget == LOAD_STAGE) generateStage(G.stage);
-            else if (G.loadTarget == LOAD_SANCTUARY) generateSanctuary();
+            if (G.loadTarget == LOAD_STAGE) startRun();
             else if (G.loadTarget == LOAD_VILLAGE) generateVillage();
             else generateSandbox();
             G.state = GS_PLAY;

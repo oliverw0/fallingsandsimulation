@@ -35,6 +35,13 @@ void initUI()
     haveFonts = true;
 }
 
+static const char* havenName()
+{
+    for (auto& h : G.havens)
+        if (G.p.m.cx() > h.x0 && G.p.m.cx() < h.x1) return h.name;
+    return "Haven";
+}
+
 static const Font& fontOf(int style) { return style == 2 ? fTitle : (style == 1 ? fBold : fBody); }
 
 float uiTextWidth(const std::string& s, float size, int style)
@@ -381,13 +388,13 @@ void drawHUD()
     if (G.nearInteract >= 0 && G.nearInteract < (int)G.inter.size() && G.state == GS_PLAY)
     {
         const Interact& it = G.inter[G.nearInteract];
-        static const char* verbs[] = {"Open chest", "Forge at the anvil", "Pray at the shrine", "Step through the portal", "", "Take the weapon", "Trade", "", "", "Board the longship and set sail"};
+        static const char* verbs[] = {"Open chest", "Forge at the anvil", "Pray at the shrine", "", "Take the weapon", "Trade", "", "", "Board the longship and set sail"};
         float x = (it.x - G.rcx) * G.scale, y = (it.y - 46 - G.rcy) * G.scale;
         float fs = 18 * u, kw = keycapW("F", fs);
         float total = kw + 8 * u + uiTextWidth(it.type == IT_SHOP ? "Trade with the Weaponsmith" : verbs[it.type], fs, 1);
         DrawRectangleRounded({x - total / 2 - 8 * u, y - 6 * u, total + 16 * u, fs * 1.3f + 12 * u}, 0.3f, 4, {10, 8, 14, 190});
         keycap("F", x - total / 2, y, fs);
-        std::string verb = it.type == IT_SHOP ? std::string("Trade with the ") + SHOP_NAMES[it.data % 3] : (it.type == IT_PORTAL && G.inVillage ? "Set out on a new run" : verbs[it.type]);
+        std::string verb = it.type == IT_SHOP ? std::string("Trade with the ") + SHOP_NAMES[it.data % 3] : verbs[it.type];
         text(verb, x - total / 2 + kw + 8 * u, y + 2 * u, fs, C_GOLD, 1);
     }
 
@@ -431,7 +438,7 @@ void drawHUD()
 
     // stage info, kills, flasks, armour, materials (right)
     float rx = sw - 16 * u;
-    std::string title = G.sandbox ? "Sandbox" : (G.inVillage ? "Hearthwick" : (G.sanctuary ? "Sanctuary" : inDunes() ? "The Whispering Dunes" : STAGES[G.stage].name));
+    std::string title = G.sandbox ? "Sandbox" : (G.inVillage ? "Hearthwick" : (G.sanctuary ? havenName() : inDunes() ? "The Whispering Dunes" : STAGES[G.stage].name));
     text(title, rx - uiTextWidth(title, 24 * u, 2), 12 * u, 24 * u, C_GOLD, 2);
     float ry = 46 * u, rs = 20 * u;
     auto rightStat = [&](const char* const* icon, int rows, Color ic, const std::string& label) {
@@ -498,9 +505,8 @@ void drawHUD()
         my -= 24 * u;
     }
 
-    if (G.bossId)
-        for (auto& m : G.mobs)
-            if (m.id == G.bossId && m.aggro)
+    for (auto& m : G.mobs)
+            if (m.boss && m.aggro)
             {
                 float w = 560 * u;
                 textC(ENEMIES[m.type].name, sw / 2.0f, 10 * u, 26 * u, {226, 140, 255, 255}, 2);
@@ -935,25 +941,39 @@ void updateDrawAnvil()
 
 // ---------------------------------------------------------------- shrine
 
+// The shrine's three gifts: one for the weapon in hand, one for you, one for your staff. Taking one
+// opens the haven's far gate.
 void updateDrawShrine()
 {
     float u = U();
     int sw = GetScreenWidth(), sh = GetScreenHeight();
     DrawRectangle(0, 0, sw, sh, {0, 0, 0, 160});
     textC("The shrine offers a single gift", sw / 2.0f, sh / 2.0f - 220 * u, 32 * u, C_GOLD, 2);
+    static const char* kinds[3] = {"For your weapon", "For you", "A spell"};
     float cw = 270 * u, chh = 320 * u, gap = 30 * u;
     float x0 = sw / 2.0f - (3 * cw + 2 * gap) / 2;
     for (int i = 0; i < 3; i++)
     {
-        int s = G.shrineChoice[i];
-        const SpellDef& d = SPELLS[s];
+        const Boon& b = G.shrineOffer[i];
+        Color col = b.kind == BOON_SPELL ? SPELLS[b.id].col : (b.kind == BOON_PERK ? PERKS[b.id].col : Color{214, 190, 120, 255});
         Rectangle r = {x0 + i * (cw + gap), sh / 2.0f - 160 * u, cw, chh};
         panel(r);
-        if (hovered(r)) DrawRectangleRoundedLinesEx(r, 0.04f, 6, 3, d.col);
-        drawSpellIcon(s, r.x + cw / 2 - 44 * u, r.y + 24 * u, 88 * u, false, makeCard(s).uses);
-        textC(d.name, r.x + cw / 2, r.y + 126 * u, 22 * u, d.col, 2);
-        std::string desc = d.desc, line;
-        float ty = r.y + 164 * u;
+        if (hovered(r)) DrawRectangleRoundedLinesEx(r, 0.04f, 6, 3, col);
+        textC(kinds[b.kind], r.x + cw / 2, r.y + 12 * u, 15 * u, DIM, 1);
+        float ix = r.x + cw / 2 - 44 * u, iy = r.y + 36 * u, is = 88 * u;
+        if (b.kind == BOON_SPELL) drawSpellIcon(b.id, ix, iy, is, false, makeCard(b.id).uses);
+        else if (b.kind == BOON_WEAPON && !G.p.hotbar.empty()) drawItemIcon(G.p.hotbar[G.p.sel], ix, iy, is);
+        else // a rune-stone glyph for the perks
+        {
+            DrawRectangleRounded({ix + is * 0.2f, iy, is * 0.6f, is}, 0.4f, 6, {58, 56, 64, 255});
+            float cx = ix + is / 2, t = 5 * u;
+            DrawLineEx({cx, iy + is * 0.15f}, {cx, iy + is * 0.85f}, t, col);
+            DrawLineEx({cx, iy + is * 0.45f}, {cx - is * 0.18f, iy + is * 0.25f}, t, col);
+            DrawLineEx({cx, iy + is * 0.45f}, {cx + is * 0.18f, iy + is * 0.25f}, t, col);
+        }
+        textC(boonTitle(b), r.x + cw / 2, r.y + 138 * u, 22 * u, col, 2);
+        std::string desc = boonDesc(b), line;
+        float ty = r.y + 176 * u;
         size_t pos = 0;
         while (pos < desc.size())
         {
@@ -972,18 +992,32 @@ void updateDrawShrine()
             pos = sp + 1;
         }
         if (!line.empty()) textC(line, r.x + cw / 2, ty, 16 * u, INK);
-        textC("Mana " + std::to_string(d.mana) + (d.uses ? "    " + std::to_string(d.uses) + " charges" : ""), r.x + cw / 2, r.y + chh - 40 * u, 16 * u, {120, 170, 255, 255}, 1);
+        if (b.kind == BOON_SPELL)
+        {
+            const SpellDef& d = SPELLS[b.id];
+            textC("Mana " + std::to_string(d.mana) + (d.uses ? "    " + std::to_string(d.uses) + " charges" : ""), r.x + cw / 2, r.y + chh - 40 * u, 16 * u, {120, 170, 255, 255}, 1);
+        }
         if (clicked(r))
         {
-            G.p.bag.push_back(makeCard(s));
+            std::string title = boonTitle(b); // named before it's granted (a rune already carved reads as a whetstone)
+            grantBoon(b);
             playSfx(SFX_PICKUP, 0.8f, 0.7f);
-            for (auto& it : G.inter)
-                if (it.type == IT_SHRINE) it.used = true;
-            message(std::string("The shrine grants you ") + d.name + ". (Tab to equip)");
+            if (G.shrineAt >= 0 && G.shrineAt < (int)G.inter.size())
+            {
+                Interact& sh = G.inter[G.shrineAt];
+                sh.used = true;
+                for (auto& h : G.havens) // the haven's far gate grinds open
+                    if (sh.x > h.x0 && sh.x < h.x1)
+                    {
+                        setGate(h.x1 - HAVEN_WALL + 1, h.x1, h.floor - HAVEN_DOOR, h.floor - 1, false);
+                        playSfx(SFX_PORTAL, 0.7f, 0.6f);
+                    }
+            }
+            message("The shrine grants you " + title + (b.kind == BOON_SPELL ? ". (Tab to equip)" : ".") + " The far gate grinds open.");
             G.state = GS_PLAY;
         }
     }
-    textC("Esc to decide later", sw / 2.0f, sh / 2.0f + 180 * u, 16 * u, DIM);
+    textC("Esc to decide later  (the way on stays shut until you choose)", sw / 2.0f, sh / 2.0f + 180 * u, 16 * u, DIM);
 }
 
 // ---------------------------------------------------------------- village shops

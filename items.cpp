@@ -301,7 +301,7 @@ Weapon fryingPan()
     return w;
 }
 
-float weaponDamage(const Weapon& w) { return WTYPES[w.type].dmg * METALS[w.metal].dmg * w.dmgMul * 0.85f; } // steel trails magic a little
+float weaponDamage(const Weapon& w) { return WTYPES[w.type].dmg * METALS[w.metal].dmg * w.dmgMul * 0.85f * (1 + 0.15f * G.p.perks[PK_FURY]); } // steel trails magic a little
 int weaponCooldown(const Weapon& w) { return (int)(WTYPES[w.type].cooldown * ((w.fx & UF_QUICK) ? 0.6f : 1.0f)); }
 
 void recipeCost(int type, int metal, int out[RES_COUNT])
@@ -493,4 +493,95 @@ void castSelfTest()
     G.projs.clear();
     G.msgs.clear();
     std::printf("cast self-test passed\n");
+}
+
+// ================================================================ shrine gifts
+
+const PerkDef PERKS[PERK_COUNT] = {
+    {"Troll's Blood", "+25 maximum health, and the wounds close at once", {200, 60, 60, 255}},
+    {"Sleipnir's Stride", "You move 12% faster", {120, 200, 255, 255}},
+    {"Bear Hide", "You take 10% less damage from everything", {170, 120, 70, 255}},
+    {"Berserker's Fury", "Your weapons hit 15% harder", {255, 120, 40, 255}},
+    {"Hugin's Breath", "Stamina comes back half again as fast", {180, 230, 160, 255}},
+    {"Mead of the Hall", "One more healing flask, filled", {230, 190, 80, 255}},
+};
+
+// Runes a shrine can carve into a weapon, and what each one does.
+struct Rune { int fx; const char* name; };
+static const Rune RUNES[] = {
+    {UF_BURN, "Kenaz"}, {UF_CHILL, "Isa"}, {UF_CHAIN, "Thurisaz"}, {UF_POISON, "Hagalaz"},
+    {UF_BLEED, "Tiwaz"}, {UF_LEECH, "Laguz"}, {UF_QUICK, "Raidho"}, {UF_KNOCK, "Uruz"},
+};
+
+static Weapon* heldWeapon() { return G.p.hotbar.empty() ? nullptr : &G.p.hotbar[G.p.sel]; }
+
+void rollShrine(Boon out[3])
+{
+    out[0].kind = BOON_WEAPON;
+    out[0].id = chance(2) ? WU_HONE : WU_RUNE;
+    out[0].fx = RUNES[irand((int)(sizeof(RUNES) / sizeof(RUNES[0])))].fx;
+    out[1].kind = BOON_PERK;
+    out[1].id = irand(PERK_COUNT);
+    out[2].kind = BOON_SPELL;
+    out[2].id = randomSpell(G.stage);
+}
+
+// What a weapon gift does to the weapon you're holding right now: a staff is bound rather than honed,
+// and a rune it already bears becomes a whetstone instead.
+static int weaponGift(const Boon& b, const Weapon* w)
+{
+    if (!w || w->type == W_STAFF) return -1;
+    if (b.id == WU_RUNE && !(w->fx & b.fx)) return WU_RUNE;
+    return WU_HONE;
+}
+
+static const char* runeName(int fx)
+{
+    for (auto& r : RUNES)
+        if (r.fx == fx) return r.name;
+    return "";
+}
+
+std::string boonTitle(const Boon& b)
+{
+    if (b.kind == BOON_SPELL) return SPELLS[b.id].name;
+    if (b.kind == BOON_PERK) return PERKS[b.id].name;
+    const Weapon* w = heldWeapon();
+    int g = weaponGift(b, w);
+    if (!w) return "An Empty Hand";
+    if (g < 0) return "Seidr Binding";
+    if (g == WU_RUNE) return std::string(runeName(b.fx)) + " Rune";
+    return "Dwarven Whetstone";
+}
+
+std::string boonDesc(const Boon& b)
+{
+    if (b.kind == BOON_SPELL) return SPELLS[b.id].desc;
+    if (b.kind == BOON_PERK) return PERKS[b.id].desc;
+    const Weapon* w = heldWeapon();
+    int g = weaponGift(b, w);
+    if (!w) return "Hold a weapon to have it blessed";
+    std::string on = " (" + weaponName(*w) + ")";
+    if (g < 0) return "Your staff gains a spell slot and 40 mana" + on;
+    if (g == WU_RUNE) return std::string("Carved into your weapon: ") + fxDescription(b.fx) + on;
+    return "Your weapon hits 25% harder" + on;
+}
+
+void grantBoon(const Boon& b)
+{
+    Player& P = G.p;
+    if (b.kind == BOON_SPELL) { P.bag.push_back(makeCard(b.id)); return; }
+    if (b.kind == BOON_PERK)
+    {
+        P.perks[b.id]++;
+        if (b.id == PK_HEARTY) { P.m.maxHp += 25; P.m.hp = P.m.maxHp; }
+        if (b.id == PK_MEAD) P.potions++;
+        return;
+    }
+    Weapon* w = heldWeapon();
+    int g = weaponGift(b, w);
+    if (!w) return;
+    if (g < 0) { w->staff.slots.push_back(SpellCard{}); w->staff.manaMax += 40; w->staff.mana = w->staff.manaMax; }
+    else if (g == WU_RUNE) w->fx |= b.fx;
+    else w->dmgMul *= 1.25f;
 }
