@@ -864,10 +864,23 @@ static const BigSprite& mobArt(const Mob& m)
     return bigOf(enemySprite(m), m.type == E_WOLF ? coats[(m.id * 7) % 5] : WHITE, m.boss ? SC_FINE2 : SC_FINE);
 }
 
-static void bolt(Vector2 at, float ang, float len);
+static const RigSpec* rigFor(int type);
+static void drawMobRig(const Mob& m, const RigSpec& R, int camX, int camY);
 
 void drawMobAnimated(const Mob& m, int camX, int camY)
 {
+    if (const RigSpec* R = rigFor(m.type)) // drawn limb by limb on its rig
+    {
+        drawMobRig(m, *R, camX, camY);
+        if (m.hp < m.maxHp && !m.boss)
+        {
+            int bw = std::max(m.w, 10);
+            int bx = (int)(std::floor(m.x) + m.w * 0.5f - camX - bw / 2.0f), by = (int)(std::floor(m.y) - camY - 7);
+            DrawRectangle(bx - 1, by - 1, bw + 2, 4, {10, 6, 10, 200});
+            DrawRectangle(bx, by, (int)(bw * std::max(0.0f, m.hp / m.maxHp)), 2, {230, 40, 40, 255});
+        }
+        return;
+    }
     const BigSprite& b = mobArt(m);
     const EnemyDef& d = ENEMIES[m.type];
     bool flying = d.ai == AI_FLY || d.ai == AI_FLYCAST || d.ai == AI_BOSS_LICH;
@@ -919,8 +932,6 @@ void drawMobAnimated(const Mob& m, int camX, int camY)
     coatMob = (m.wet || m.oily || m.bloody || m.burn) ? &m : nullptr;
     drawBig(b, ax, ay, m.facing < 0, sxs, sys, lean, flash, m.type == E_WRAITH ? 0.75f : 1.0f);
     coatMob = nullptr;
-    for (int k = 0; k < m.nWounds; k++)
-        if (m.woundK[k] == WK_BOLT) bolt({ax + m.woundX[k] * m.facing, ay + m.woundY[k]}, m.facing > 0 ? m.woundA[k] : PI - m.woundA[k], 6);
 
     if (m.hp < m.maxHp && !m.boss)
     {
@@ -1069,10 +1080,115 @@ void drawRagdolls(int camX, int camY)
     }
 }
 
-// ---------------------------------------------------------------- corpses
-// A creature dies as itself: its own sprite, now a dead weight that falls, tumbles and comes to rest. A
-// sword or an axe may cut it in two, a blast tears it into pieces; every cut spurts like a punctured
-// waterskin until it runs dry, and stab wounds and stuck bolts go on seeping.
+// ---------------------------------------------------------------- limb rigs
+// Creatures are drawn as parts (painted by tools/art_hd.py into sprites_hd.h) hung on a skeleton of joints.
+// Alive, rigPose lays the joints out every frame - walking, swinging, recoiling. Dead, the same joints
+// become a Verlet ragdoll: points joined by sticks (one per limb, plus braces holding shoulders and hips
+// to the torso), knees, elbows and the neck kept within limits, every point colliding with the world. So
+// a corpse falls in a heap with its arms and legs flopping, and a hard enough blow breaks sticks - limbs
+// come off, spurting. Angles: 0 points down, positive turns towards the way the creature faces, PI is up.
+
+enum { J_NECK, J_PELVIS, J_HEADB, J_HEADT, J_SHF, J_ELF, J_HAF, J_SHN, J_ELN, J_HAN, J_HIPF, J_KNF, J_FTF, J_HIPN, J_KNN, J_FTN, J_WB, J_WT };
+static_assert(J_WT + 1 == RJ_COUNT, "joint count");
+enum { G_HEAD = 1, G_ARMF = 2, G_ARMN = 4, G_LEGF = 8, G_LEGN = 16, G_WAIST = 32, G_WEAPON = 64, G_MIN = 128 }; // what a cut can sever; G_MIN: a brace that only pushes apart
+
+namespace Tune // every ragdoll tunable, in one place
+{
+const float UNIT = 0.5f;                  // world units per sprite pixel
+const float GRAV = 0.2f, DAMP = 0.99f;    // per frame
+const float FRICTION = 0.55f;
+const float GROUND_DAMP = 0.82f;          // while anything touches the ground, all of it slows (or it rolls for ever)
+const int TIMEOUT = 360;
+const int DRIFT_WINDOW = 10; const float DRIFT_MIN = 0.3f; // (10 frames: a whole number of any 2- or 5-frame contact jitter)                  // frames after the last shove when it sleeps anyway
+const int ITERS = 6;                      // constraint passes per step
+const float SETTLE_SPEED = 0.05f;         // slower than this (units/frame) for SETTLE_FRAMES and it sleeps
+const int SETTLE_FRAMES = 60, MAX_ACTIVE = 12, MAX_CORPSES = 40;
+const float FOLD_MIN = 0.55f;             // a limb can't fold tighter than this share of its length, nor the head onto the chest
+const float JET = 2.6f, JET_FADE = 0.993f, SEEP_FADE = 0.997f;
+}
+
+static const RigSpec* rigFor(int type)
+{
+    switch (type)
+    {
+    case E_GOBLIN: return &RIG_GOBLIN;
+    case E_BOMBER: return &RIG_BOMBER;
+    case E_SKELETON: return &RIG_SKELETON;
+    case E_ARCHER: return &RIG_ARCHER;
+    case E_BAT: return &RIG_BAT;
+    case E_CULTIST: return &RIG_CULTIST;
+    case E_KNIGHT: return &RIG_KNIGHT;
+    case E_IMP: return &RIG_IMP;
+    case E_WRAITH: return &RIG_WRAITH;
+    case E_GOLEM: return &RIG_GOLEM;
+    case E_WOLF: return &RIG_WOLF;
+    case E_REDCAP: return &RIG_REDCAP;
+    case E_DRAUGR: return &RIG_DRAUGR;
+    case E_TROLL: return &RIG_TROLL;
+    case E_BANSHEE: return &RIG_BANSHEE;
+    case E_KELPIE: return &RIG_KELPIE;
+    case E_GUARD: return &RIG_GUARD;
+    case E_RISEN: return &RIG_RISEN;
+    case E_BLACKKNIGHT: return &RIG_BLACKKNIGHT;
+    case E_LICH: return &RIG_LICH;
+    default: return nullptr; // the slime keeps its single wobbling sprite
+    }
+}
+
+static float boneLen(const RigPart& p) { return p.spr ? std::hypot(p.ex - p.px, p.ey - p.py) * Tune::UNIT : 0; }
+static Vector2 dirA(float a) { return {std::sin(a), std::cos(a)}; }
+static Vector2 scl(Vector2 a, float k) { return {a.x * k, a.y * k}; }
+static Vector2 lerpV(Vector2 a, Vector2 b, float t) { return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t}; }
+static bool weaponNear(const RigSpec& R) { return !R.part[RS_SHIELD].spr; } // with a shield on the near arm, the weapon's in the far hand
+
+// The limb segments a wound can sit on, per kind of rig (pairs of joints).
+static const uint8_t SEGS[][2] = {{J_NECK, J_PELVIS}, {J_HEADB, J_HEADT}, {J_SHF, J_ELF}, {J_ELF, J_HAF}, {J_SHN, J_ELN}, {J_ELN, J_HAN},
+                                  {J_HIPF, J_KNF}, {J_KNF, J_FTF}, {J_HIPN, J_KNN}, {J_KNN, J_FTN}};
+static int segCount(const RigSpec& R) { return R.kind == RK_BAT ? 1 : (R.part[RS_THIGH].spr ? 10 : 6); }
+
+// ---- textures: each part, and a white silhouette of it for the flash when struck
+struct PartTex { Texture2D tex, white; };
+static const PartTex& partTex(const HDSprite* s)
+{
+    static std::map<const HDSprite*, PartTex> cache;
+    auto it = cache.find(s);
+    if (it != cache.end()) return it->second;
+    Image a = GenImageColor(s->w, s->h, BLANK), b = GenImageColor(s->w, s->h, BLANK);
+    for (int y = 0; y < s->h; y++)
+        for (int x = 0; x < s->w; x++)
+        {
+            char ch = s->rows[y][x];
+            if (ch == '.') continue;
+            ((Color*)a.data)[y * s->w + x] = s->pal[std::strchr(HD_ALPHABET, ch) - HD_ALPHABET];
+            ((Color*)b.data)[y * s->w + x] = WHITE;
+        }
+    PartTex t{LoadTextureFromImage(a), LoadTextureFromImage(b)};
+    UnloadImage(a);
+    UnloadImage(b);
+    return cache[s] = t;
+}
+
+// One part, hung from joint `a` with its bone pointing at `b` (both in render-texture units).
+static void drawPart(const RigPart& rp, Vector2 a, Vector2 b, int facing, Color tint, bool white)
+{
+    if (!rp.spr) return;
+    const PartTex& t = partTex(rp.spr);
+    const float w = (float)rp.spr->w, h = (float)rp.spr->h, U = Tune::UNIT;
+    float px = facing < 0 ? w - rp.px : rp.px, ex = facing < 0 ? w - rp.ex : rp.ex;
+    float a0 = std::atan2(rp.ey - rp.py, ex - px), aw = std::atan2(b.y - a.y, b.x - a.x);
+    if (std::fabs(b.x - a.x) + std::fabs(b.y - a.y) < 1e-4f) aw = a0;
+    DrawTexturePro(white ? t.white : t.tex, {0, 0, facing < 0 ? -w : w, h}, {a.x, a.y, w * U, h * U}, {px * U, rp.py * U}, (aw - a0) * RAD2DEG, tint);
+}
+
+// A part fixed to another at an angle (a shield on the forearm, a wing on the shoulders): its bone runs from
+// `at` along the local angle `ang` (in the creature's own facing-right frame).
+static void drawAttached(const RigPart& rp, Vector2 at, float ang, int facing, Color tint, bool white)
+{
+    Vector2 d = dirA(ang);
+    drawPart(rp, at, {at.x + d.x * facing * boneLen(rp), at.y + d.y * boneLen(rp)}, facing, tint, white);
+}
+
+static float localAng(Vector2 a, Vector2 b, int facing) { return std::atan2((b.x - a.x) * facing, b.y - a.y); } // a segment's angle, facing-right frame
 
 static void bolt(Vector2 at, float ang, float len) // a crossbow bolt stuck in, its shaft and fletching out
 {
@@ -1082,228 +1198,495 @@ static void bolt(Vector2 at, float ang, float len) // a crossbow bolt stuck in, 
     DrawRectangle((int)at.x, (int)at.y, 1, 1, {150, 150, 158, 255});
 }
 
-static Vector2 rot(Vector2 v, float a) { float c = std::cos(a), s = std::sin(a); return {v.x * c - v.y * s, v.x * s + v.y * c}; }
-
-void clearCorpses()
+// Draws a posed skeleton, back to front. `flap` swings bat and imp wings.
+static void drawRig(const RigSpec& R, const Vector2* J, int f, Color tint, bool white, float flap)
 {
-    for (auto& c : G.corpses) if (c.tex.id) UnloadTexture(c.tex);
-    G.corpses.clear();
+    const RigPart* P = R.part;
+    Color far = mul(tint, 0.68f);
+    far.a = tint.a;
+    if (R.kind == RK_BAT)
+    {
+        drawPart(P[RS_UARM], J[J_SHF], J[J_ELF], f, far, white);
+        drawPart(P[RS_TORSO], J[J_NECK], J[J_PELVIS], f, tint, white);
+        drawPart(P[RS_UARM], J[J_SHN], J[J_ELN], f, tint, white);
+        return;
+    }
+    if (R.kind == RK_QUAD)
+    {
+        drawPart(P[RS_THIGH], J[J_HIPF], J[J_KNF], f, far, white); drawPart(P[RS_SHIN], J[J_KNF], J[J_FTF], f, far, white);
+        drawPart(P[RS_UARM], J[J_SHF], J[J_ELF], f, far, white); drawPart(P[RS_FARM], J[J_ELF], J[J_HAF], f, far, white);
+        drawPart(P[RS_TAIL], J[J_WB], J[J_WT], f, tint, white);
+        drawPart(P[RS_TORSO], J[J_NECK], J[J_PELVIS], f, tint, white);
+        drawPart(P[RS_HEAD], J[J_HEADB], J[J_HEADT], f, tint, white);
+        drawPart(P[RS_THIGH], J[J_HIPN], J[J_KNN], f, tint, white); drawPart(P[RS_SHIN], J[J_KNN], J[J_FTN], f, tint, white);
+        drawPart(P[RS_UARM], J[J_SHN], J[J_ELN], f, tint, white); drawPart(P[RS_FARM], J[J_ELN], J[J_HAN], f, tint, white);
+        return;
+    }
+    bool wn = weaponNear(R);
+    float torso = localAng(J[J_PELVIS], J[J_NECK], f); // PI when upright
+    if (P[RS_WING].spr) drawAttached(P[RS_WING], J[J_SHF], torso - PI - 2.0f + flap * 0.8f, f, far, white);
+    if (!wn) drawPart(P[RS_WEAPON], J[J_WB], J[J_WT], f, far, white);
+    drawPart(P[RS_UARM], J[J_SHF], J[J_ELF], f, far, white);
+    drawPart(P[RS_FARM], J[J_ELF], J[J_HAF], f, far, white);
+    drawPart(P[RS_THIGH], J[J_HIPF], J[J_KNF], f, far, white);
+    drawPart(P[RS_SHIN], J[J_KNF], J[J_FTF], f, far, white);
+    drawPart(P[RS_TORSO], J[J_NECK], J[J_PELVIS], f, tint, white);
+    drawPart(P[RS_HEAD], J[J_HEADB], J[J_HEADT], f, tint, white);
+    drawPart(P[RS_THIGH], J[J_HIPN], J[J_KNN], f, tint, white);
+    drawPart(P[RS_SHIN], J[J_KNN], J[J_FTN], f, tint, white);
+    if (wn) drawPart(P[RS_WEAPON], J[J_WB], J[J_WT], f, tint, white);
+    drawPart(P[RS_UARM], J[J_SHN], J[J_ELN], f, tint, white);
+    drawPart(P[RS_FARM], J[J_ELN], J[J_HAN], f, tint, white);
+    if (P[RS_SHIELD].spr) drawAttached(P[RS_SHIELD], J[J_HAN], localAng(J[J_ELN], J[J_HAN], f) + R.sgrip, f, tint, white);
+    if (P[RS_WING].spr) drawAttached(P[RS_WING], J[J_SHN], torso - PI - 1.7f + flap * 0.8f, f, tint, white);
+}
+
+// Lays a living creature's joints out in world units.
+static void rigPose(const Mob& m, const RigSpec& R, Vector2* J)
+{
+    const EnemyDef& d = ENEMIES[m.type];
+    const RigPart* P = R.part;
+    bool flying = d.ai == AI_FLY || d.ai == AI_FLYCAST || d.ai == AI_BOSS_LICH;
+    const float f = (float)m.facing, t = m.anim * PI, mv = clampf(std::fabs(m.vx) / 0.6f, 0, 1);
+    const float idle = std::sin(G.frame * 0.06f + m.id);
+    Vector2 L[RJ_COUNT] = {};
+    float lean = clampf(m.vx * f * 0.3f, -0.2f, 0.35f), lunge = 0, nod = idle * 0.04f, recoil = 0, k = 0;
+    if (m.atkPhase == 1) { k = 1 - clampf(m.atkT / 15.0f, 0, 1); lunge = -(1 + 2 * k); lean -= 0.25f * k; }
+    else if (m.atkPhase == 2) { k = 1; lunge = 3.0f; lean += 0.3f; }
+    else if (m.atkPhase == 3) lean += 0.1f;
+    if (m.hitT > 0) // struck: snapped back the way the blow went
+    {
+        float e = m.hitT / 14.0f;
+        e *= e;
+        lean = clampf(lean + m.hitDir * f * 0.6f * e, -0.8f, 0.8f);
+        nod += m.hitDir * f * 0.5f * e;
+        recoil = m.hitDir * 2.5f * e;
+    }
+    float bob = flying ? std::sin(G.frame * 0.12f + m.id) * 2.0f : 0;
+    float rootX = m.cx() + lunge * f + recoil, rootY = m.y + m.h;
+
+    if (R.kind == RK_BAT)
+    {
+        float bl = boneLen(P[RS_TORSO]), wl = boneLen(P[RS_UARM]), fl = std::sin(G.frame * 0.5f + m.id);
+        rootY = m.cy() + bob;
+        L[J_NECK] = {0, -bl / 2};
+        L[J_PELVIS] = {0, bl / 2};
+        L[J_SHF] = L[J_SHN] = add(L[J_NECK], {0, 1.2f});
+        L[J_ELF] = add(L[J_SHF], scl(dirA(-2.0f + fl), wl));
+        L[J_ELN] = add(L[J_SHN], scl(dirA(-2.4f + fl), wl));
+    }
+    else if (R.kind == RK_QUAD)
+    {
+        float B = boneLen(P[RS_TORSO]), fu = boneLen(P[RS_UARM]), fl = boneLen(P[RS_FARM]), ru = boneLen(P[RS_THIGH]), rl = boneLen(P[RS_SHIN]);
+        float g = std::sin(t) * 0.6f * mv, kn = 0.15f + 0.6f * std::max(0.0f, std::cos(t)) * mv, kf = 0.15f + 0.6f * std::max(0.0f, -std::cos(t)) * mv;
+        float crouch = m.atkPhase == 1 ? 2 * k : 0, reach = m.atkPhase == 2 ? 0.7f : 0;
+        auto hgt = [](float a, float b, float x, float y) { return a * std::cos(x) + b * std::cos(x - y); };
+        float hf = std::max(hgt(fu, fl, g + reach, -kn), hgt(fu, fl, -g + reach, -kf)), hr = std::max(hgt(ru, rl, -g, kn), hgt(ru, rl, g, kf));
+        L[J_NECK] = {B / 2, -hf + crouch};
+        L[J_PELVIS] = {-B / 2, -hr + crouch * 0.5f};
+        L[J_SHN] = add(L[J_NECK], {-0.8f, 0}); L[J_SHF] = add(L[J_NECK], {-1.4f, 0});
+        L[J_HIPN] = add(L[J_PELVIS], {0.8f, 0}); L[J_HIPF] = add(L[J_PELVIS], {0.3f, 0});
+        L[J_ELN] = add(L[J_SHN], scl(dirA(g + reach), fu)); L[J_HAN] = add(L[J_ELN], scl(dirA(g + reach + kn), fl)); // front knees bend back
+        L[J_ELF] = add(L[J_SHF], scl(dirA(-g + reach), fu)); L[J_HAF] = add(L[J_ELF], scl(dirA(-g + reach + kf), fl));
+        L[J_KNN] = add(L[J_HIPN], scl(dirA(-g), ru)); L[J_FTN] = add(L[J_KNN], scl(dirA(-g - kn), rl)); // hocks bend forward
+        L[J_KNF] = add(L[J_HIPF], scl(dirA(g), ru)); L[J_FTF] = add(L[J_KNF], scl(dirA(g - kf), rl));
+        L[J_HEADB] = add(L[J_NECK], {0.8f, -0.8f});
+        L[J_HEADT] = add(L[J_HEADB], scl(dirA(m.atkPhase >= 1 ? 1.65f : 1.95f + 0.05f * idle), boneLen(P[RS_HEAD])));
+        L[J_WB] = add(L[J_PELVIS], {-0.6f, -0.8f});
+        L[J_WT] = add(L[J_WB], scl(dirA(-2.1f + 0.3f * std::sin(t * 2 + G.frame * 0.05f)), boneLen(P[RS_TAIL])));
+    }
+    else
+    {
+        float th = boneLen(P[RS_THIGH]), sh = boneLen(P[RS_SHIN]), to = boneLen(P[RS_TORSO]), hd = boneLen(P[RS_HEAD]);
+        float ua = boneLen(P[RS_UARM]), fa = boneLen(P[RS_FARM]), wl = boneLen(P[RS_WEAPON]);
+        float sw = 0.55f * std::sin(t) * mv;
+        float tN = sw, tF = -sw, kN = 0.12f + 0.9f * std::max(0.0f, std::cos(t)) * mv, kF = 0.12f + 0.9f * std::max(0.0f, -std::cos(t)) * mv;
+        if (!m.onGround && !m.inLiquid && !flying) { tN = 0.6f; kN = 1.1f; tF = 0.15f; kF = 0.5f; } // airborne: knees up
+        if (flying) { tN = 0.25f + 0.1f * idle; kN = 0.5f; tF = 0.05f; kF = 0.35f; }
+        auto legH = [&](float a, float b) { return th * std::cos(a) + sh * std::cos(a - b); };
+        Vector2 pel;
+        if (R.kind == RK_GHOST) pel = {0, -((P[RS_TORSO].spr->h - P[RS_TORSO].ey) * Tune::UNIT - 1) + bob - 1};
+        else pel = {0, -std::max(legH(tN, kN), legH(tF, kF)) - std::fabs(std::sin(t)) * 0.5f * mv + (flying ? bob - 2 : 0) + (m.onGround && mv < 0.1f ? 0.2f * idle : 0)};
+        L[J_PELVIS] = pel;
+        L[J_NECK] = add(pel, scl(dirA(PI - lean), to));
+        L[J_HEADB] = add(L[J_NECK], scl(dirA(PI - lean), 0.6f));
+        L[J_HEADT] = add(L[J_HEADB], scl(dirA(PI - lean * 0.4f - nod), hd));
+        Vector2 sho = lerpV(L[J_NECK], pel, R.shoulder);
+        float spS = R.sw * Tune::UNIT, spH = R.hw * Tune::UNIT; // a full figure, turned side-on: shoulders and hips spread across it
+        L[J_SHN] = add(sho, {spS, 0});
+        L[J_SHF] = add(sho, {-spS, 0});
+        L[J_HIPN] = add(pel, {spH, 0});
+        L[J_HIPF] = add(pel, {-spH, 0});
+        L[J_KNN] = add(L[J_HIPN], scl(dirA(tN), th)); L[J_FTN] = add(L[J_KNN], scl(dirA(tN - kN), sh));
+        L[J_KNF] = add(L[J_HIPF], scl(dirA(tF), th)); L[J_FTF] = add(L[J_KNF], scl(dirA(tF - kF), sh));
+        // arms: swinging with the stride, unless they're busy
+        float aN = -sw * 0.8f + idle * 0.04f, fN = aN + 0.35f, aF = sw * 0.8f, fF = aF + 0.35f;
+        static const float HOLD[6][2] = {{0, 0}, {0.35f, 1.0f}, {0.5f, 0.9f}, {1.35f, 1.55f}, {0.4f, 1.0f}, {0.2f, 0.7f}};
+        int wc = R.weapon;
+        float wa = HOLD[wc][0], wf = HOLD[wc][1], grip = R.grip;
+        bool busy = wc != RW_NONE;
+        if (m.atkPhase)
+        {
+            busy = true;
+            if (wc == RW_POLE) // a thrust: drawn back, then driven straight out
+            {
+                float w0 = m.atkPhase == 1 ? k : 1;
+                wa = m.atkPhase == 1 ? -0.2f * k + 0.5f * (1 - k) : (m.atkPhase == 2 ? 1.45f : 0.9f);
+                wf = m.atkPhase == 1 ? 1.3f : (m.atkPhase == 2 ? 1.55f : 1.0f);
+                grip = grip + (0.05f - grip) * w0;
+            }
+            else if (m.atkPhase == 1) { wa = wa + (-2.4f - wa) * k; wf = wf + (-1.6f - wf) * k; } // raised up and back
+            else if (m.atkPhase == 2) { wa = 1.5f; wf = 1.9f; }                                  // brought down
+            else { wa = 1.0f; wf = 0.8f; }                                                        // following through
+            if (wc == RW_NONE) wc = RW_BLADE; // claws and fists swing like blades
+        }
+        else if (m.attackT > 0) // shooting, casting, throwing
+        {
+            busy = true;
+            if (wc == RW_BOW) { wa = 1.5f; wf = 1.57f; }
+            else if (wc == RW_THROW) { if (m.attackT > 8) { wa = -2.4f; wf = -1.9f; } else { wa = 1.6f; wf = 1.9f; } }
+            else if (wc == RW_STAFF || wc == RW_NONE) { wa = 2.2f; wf = 2.6f; }
+            else if (m.attackT > 8) { wa = -2.2f; wf = -1.5f; }
+            else { wa = 1.5f; wf = 1.8f; }
+        }
+        bool wn = weaponNear(R);
+        if (busy) { if (wn) { aN = wa; fN = wf; } else { aF = wa; fF = wf; } }
+        if (!wn) { aN = 0.1f + 0.04f * idle; fN = 0.65f; } // the shield held up close before the body
+        if (wc == RW_BOW && m.attackT > 0) { aF = 1.3f; fF = -0.3f; } // the other hand draws the string
+        if (R.kind == RK_GHOST && !busy) { aN = 0.6f + 0.1f * idle; fN = 1.1f; aF = 0.4f - 0.1f * idle; fF = 0.9f; } // reaching
+        L[J_ELN] = add(L[J_SHN], scl(dirA(aN), ua)); L[J_HAN] = add(L[J_ELN], scl(dirA(fN), fa));
+        L[J_ELF] = add(L[J_SHF], scl(dirA(aF), ua)); L[J_HAF] = add(L[J_ELF], scl(dirA(fF), fa));
+        Vector2 hand = wn ? L[J_HAN] : L[J_HAF];
+        float wang = (wn ? fN : fF) + grip;
+        L[J_WB] = add(hand, scl(dirA(wang), 0.5f));
+        L[J_WT] = add(hand, scl(dirA(wang), wl));
+    }
+    for (int i = 0; i < RJ_COUNT; i++) J[i] = {rootX + L[i].x * f, rootY + L[i].y};
+}
+
+static Color coatTint(const Mob& m)
+{
+    Color c = WHITE;
+    if (m.bloody) c = {255, 160, 150, 255};
+    if (m.oily) c = {160, 150, 120, 255};
+    if (m.wet) c = {190, 210, 255, 255};
+    if (m.chill > 0) c = {180, 220, 255, 255};
+    if (m.poison > 0) c = {170, 230, 150, 255};
+    if (m.burn > 0) c = {255, 190, 150, 255};
+    if (m.type == E_BLACKKNIGHT && m.state == 2 && (G.frame / 3) % 2) c = {255, 90, 90, 255};
+    if (m.type == E_WRAITH || m.type == E_BANSHEE) c.a = 200;
+    return c;
+}
+
+static void drawMobRig(const Mob& m, const RigSpec& R, int camX, int camY)
+{
+    Vector2 J[RJ_COUNT];
+    rigPose(m, R, J);
+    for (auto& j : J) { j.x -= camX; j.y -= camY; }
+    drawRig(R, J, m.facing, coatTint(m), m.hurtFlash > 0, std::sin(G.frame * 0.45f + m.id));
+    int segs = segCount(R);
+    for (int k = 0; k < m.nWounds; k++)
+        if (m.woundK[k] == WK_BOLT && m.woundS[k] < segs)
+        {
+            Vector2 a = J[SEGS[m.woundS[k]][0]], b = J[SEGS[m.woundS[k]][1]];
+            bolt(lerpV(a, b, m.woundT[k]), std::atan2(b.y - a.y, b.x - a.x) + m.woundA[k], 6);
+        }
+}
+
+bool rigLocate(const Mob& m, Vector2 at, float ang, uint8_t& seg, float& t, float& rel)
+{
+    const RigSpec* R = rigFor(m.type);
+    if (!R) return false;
+    Vector2 J[RJ_COUNT];
+    rigPose(m, *R, J);
+    float best = 1e9f;
+    for (int s = 0; s < segCount(*R); s++)
+    {
+        Vector2 a = J[SEGS[s][0]], b = J[SEGS[s][1]], ab = {b.x - a.x, b.y - a.y};
+        float l2 = ab.x * ab.x + ab.y * ab.y + 1e-4f, u = clampf(((at.x - a.x) * ab.x + (at.y - a.y) * ab.y) / l2, 0.1f, 0.9f);
+        float dx = a.x + ab.x * u - at.x, dy = a.y + ab.y * u - at.y, d = dx * dx + dy * dy;
+        if (d < best) { best = d; seg = (uint8_t)s; t = u; rel = ang - std::atan2(ab.y, ab.x); }
+    }
+    return true;
+}
+
+Vector2 rigWoundPos(const Mob& m, int k)
+{
+    const RigSpec* R = rigFor(m.type);
+    if (!R || m.woundS[k] >= segCount(*R)) return {m.cx(), m.cy()};
+    Vector2 J[RJ_COUNT];
+    rigPose(m, *R, J);
+    return lerpV(J[SEGS[m.woundS[k]][0]], J[SEGS[m.woundS[k]][1]], m.woundT[k]);
+}
+
+// ---------------------------------------------------------------- corpses: the rig as a ragdoll
+
+void clearCorpses() { G.corpses.clear(); }
+
+static void addStick(Corpse& c, int a, int b, int grp)
+{
+    if (c.ns >= RST_MAX) return;
+    c.sa[c.ns] = (uint8_t)a; c.sb[c.ns] = (uint8_t)b; c.sg[c.ns] = (uint8_t)grp;
+    c.sl[c.ns] = std::hypot(c.p[b].x - c.p[a].x, c.p[b].y - c.p[a].y);
+    c.used |= (1u << a) | (1u << b);
+    c.ns++;
+}
+
+// A brace across a joint that only stops the limb folding flat: no closer than FOLD_MIN of the two bones.
+static void addFold(Corpse& c, int a, int mid, int b, int grp, float frac = Tune::FOLD_MIN)
+{
+    addStick(c, a, b, grp | G_MIN);
+    c.sl[c.ns - 1] = frac * (std::hypot(c.p[mid].x - c.p[a].x, c.p[mid].y - c.p[a].y) + std::hypot(c.p[b].x - c.p[mid].x, c.p[b].y - c.p[mid].y));
+}
+
+static void addWound(Corpse& c, int a, int b, float t, float ang, int kind, float pressure)
+{
+    if (c.nw >= RCW_MAX) return;
+    c.w[c.nw++] = {(uint8_t)a, (uint8_t)b, t, ang, kind, pressure};
+}
+
+// Breaks the sticks of `grp`, and leaves both ends of the cut spurting.
+static void sever(Corpse& c, int grp)
+{
+    if (c.cut & grp) return;
+    c.cut |= grp;
+    const RigSpec& R = *c.rig;
+    const float pr = 1.0f;
+    switch (grp)
+    {
+    case G_HEAD: addWound(c, J_NECK, J_PELVIS, 0, PI, WK_CUT, pr); addWound(c, J_HEADB, J_HEADT, 0, PI, WK_CUT, pr * 0.7f); break;
+    case G_ARMF: addWound(c, J_SHF, J_ELF, 0, PI, WK_CUT, pr * 0.7f); addWound(c, J_NECK, J_PELVIS, R.shoulder, -PI / 2, WK_CUT, pr * 0.8f); break;
+    case G_ARMN: addWound(c, J_SHN, J_ELN, 0, PI, WK_CUT, pr * 0.7f); addWound(c, J_NECK, J_PELVIS, R.shoulder, PI / 2, WK_CUT, pr * 0.8f); break;
+    case G_LEGF: addWound(c, J_HIPF, J_KNF, 0, PI, WK_CUT, pr * 0.7f); addWound(c, J_PELVIS, J_NECK, 0, PI, WK_CUT, pr * 0.8f); break;
+    case G_LEGN: addWound(c, J_HIPN, J_KNN, 0, PI, WK_CUT, pr * 0.7f); addWound(c, J_PELVIS, J_NECK, 0, PI, WK_CUT, pr * 0.8f); break;
+    case G_WAIST: addWound(c, J_PELVIS, J_NECK, 0, PI, WK_CUT, pr); addWound(c, J_HIPN, J_KNN, 0, PI, WK_CUT, pr * 0.8f); break;
+    default: break;
+    }
 }
 
 void spawnCorpse(const Mob& m)
 {
-    bool ethereal = m.type == E_SLIME || m.type == E_WRAITH || m.type == E_BANSHEE;
-    if (ethereal || !IsWindowReady()) { burstSprite(m); return; }
-    const BigSprite& b = mobArt(m);
+    const RigSpec* R = rigFor(m.type);
+    if (!R || m.type == E_WRAITH || m.type == E_BANSHEE) { burstSprite(m); return; } // ghosts and slimes come apart in pixels
     const EnemyDef& d = ENEMIES[m.type];
-    const float u = b.unit, W = b.w * u, H = b.h * u, bx = m.cx(), by = m.y + m.h;
-    auto pos = [&](int k) { return Vector2{(k % b.w + 0.5f) * u - W / 2, (k / b.w + 0.5f) * u - H}; }; // from the feet, as it faced
-    std::vector<Color> px(b.px.size());
-    for (int j = 0; j < b.h; j++)
-        for (int i = 0; i < b.w; i++) px[j * b.w + i] = b.px[j * b.w + (m.facing < 0 ? b.w - 1 - i : i)];
-    std::vector<std::vector<int>> pieces(1);
-    for (int k = 0; k < (int)px.size(); k++) if (px[k].a > 100) pieces[0].push_back(k);
-    if (pieces[0].size() < 8) { burstSprite(m); return; }
-
-    // the cuts: a line through the body (a point on it, and its direction)
-    struct Cut { Vector2 p, d; };
-    std::vector<Cut> cuts;
-    float a = m.lastAng;
-    if ((m.lastHit == HK_SLASH && chance(3)) || (m.lastHit == HK_CHOP && chance(2)))
+    Corpse c;
+    c.rig = R;
+    c.facing = m.facing;
+    c.gore = d.gore;
+    rigPose(m, *R, c.p);
+    const RigPart* P = R->part;
+    // the sticks: one per limb, braces holding shoulders and hips to the torso, the weapon fixed in the hand
+    addStick(c, J_NECK, J_PELVIS, 0);
+    if (R->kind == RK_BAT)
     {
-        float ca = m.lastHit == HK_SLASH ? a + frange(-0.35f, 0.35f) : a + PI / 2 + frange(-0.3f, 0.3f); // a slash goes through the waist, a chop splits it
-        cuts.push_back({{frange(-W, W) * 0.12f, -H * frange(0.4f, 0.62f)}, {std::cos(ca), std::sin(ca)}});
+        addStick(c, J_SHF, J_ELF, 0); addStick(c, J_SHF, J_NECK, G_ARMF); addStick(c, J_SHF, J_PELVIS, G_ARMF);
+        addStick(c, J_SHN, J_ELN, 0); addStick(c, J_SHN, J_NECK, G_ARMN); addStick(c, J_SHN, J_PELVIS, G_ARMN);
     }
-    if (m.lastHit == HK_BLAST)
-        for (int k = irange(2, 4); k > 0; k--) { float ca = frand() * 2 * PI; cuts.push_back({{frange(-W, W) * 0.3f, -H * frange(0.2f, 0.8f)}, {std::cos(ca), std::sin(ca)}}); }
-    std::vector<std::vector<Wound>> cutWounds(1);
-    for (auto& c : cuts)
+    else
     {
-        std::vector<std::vector<int>> next;
-        std::vector<std::vector<Wound>> nextW;
-        for (size_t p = 0; p < pieces.size(); p++)
+        addStick(c, J_HEADB, J_HEADT, 0); addStick(c, J_HEADB, J_NECK, G_HEAD);
+        addStick(c, J_SHF, J_ELF, 0); addStick(c, J_ELF, J_HAF, 0); addStick(c, J_SHF, J_NECK, G_ARMF); addStick(c, J_SHF, J_PELVIS, G_ARMF);
+        addStick(c, J_SHN, J_ELN, 0); addStick(c, J_ELN, J_HAN, 0); addStick(c, J_SHN, J_NECK, G_ARMN); addStick(c, J_SHN, J_PELVIS, G_ARMN);
+        if (P[RS_THIGH].spr)
         {
-            std::vector<int> side[2];
-            for (int k : pieces[p]) { Vector2 v = pos(k); side[c.d.x * (v.y - c.p.y) - c.d.y * (v.x - c.p.x) > 0].push_back(k); }
-            if (side[0].size() < 12 || side[1].size() < 12) { next.push_back(pieces[p]); nextW.push_back(cutWounds[p]); continue; }
-            for (int s = 0; s < 2; s++) // each half gets a wound where it was cut, spurting away from itself
-            {
-                Vector2 sum = {0, 0};
-                int n = 0;
-                for (int k : side[s])
-                {
-                    Vector2 v = pos(k);
-                    if (std::fabs(c.d.x * (v.y - c.p.y) - c.d.y * (v.x - c.p.x)) < u * 1.6f) { sum.x += v.x; sum.y += v.y; n++; }
-                }
-                std::vector<Wound> w = cutWounds[p];
-                if (n) w.push_back({sum.x / n, sum.y / n, std::atan2(c.d.x, -c.d.y) + (s ? PI : 0), WK_CUT, 1.0f}); // (the side's normal, pointing at the line)
-                next.push_back(side[s]);
-                nextW.push_back(w);
-            }
+            int legF = R->kind == RK_QUAD ? G_LEGF : G_LEGF | G_WAIST, legN = R->kind == RK_QUAD ? G_LEGN : G_LEGN | G_WAIST;
+            addStick(c, J_HIPF, J_KNF, 0); addStick(c, J_KNF, J_FTF, 0); addStick(c, J_HIPF, J_NECK, legF); addStick(c, J_HIPF, J_PELVIS, legF);
+            addStick(c, J_HIPN, J_KNN, 0); addStick(c, J_KNN, J_FTN, 0); addStick(c, J_HIPN, J_NECK, legN); addStick(c, J_HIPN, J_PELVIS, legN);
+            if (R->kind != RK_QUAD) addStick(c, J_HIPF, J_HIPN, G_LEGF | G_LEGN);
         }
-        pieces = next;
-        cutWounds = nextW;
+        addFold(c, J_SHF, J_ELF, J_HAF, G_ARMF);
+        addFold(c, J_SHN, J_ELN, J_HAN, G_ARMN);
+        if (P[RS_THIGH].spr)
+        {
+            addFold(c, J_HIPF, J_KNF, J_FTF, R->kind == RK_QUAD ? G_LEGF : G_LEGF | G_WAIST);
+            addFold(c, J_HIPN, J_KNN, J_FTN, R->kind == RK_QUAD ? G_LEGN : G_LEGN | G_WAIST);
+        }
+        if (R->kind != RK_QUAD) addFold(c, J_PELVIS, J_NECK, J_HEADT, G_HEAD, 0.85f); // the head can't loll onto the chest
+        if (R->kind == RK_QUAD && P[RS_TAIL].spr) { addStick(c, J_WB, J_WT, 0); addStick(c, J_WB, J_PELVIS, G_WEAPON); addStick(c, J_WB, J_NECK, G_WEAPON); }
+        else if (P[RS_WEAPON].spr)
+        {
+            bool wn = weaponNear(*R);
+            int hand = wn ? J_HAN : J_HAF, elbow = wn ? J_ELN : J_ELF;
+            addStick(c, J_WB, J_WT, 0); addStick(c, J_WB, hand, G_WEAPON); addStick(c, J_WT, elbow, G_WEAPON); addStick(c, J_WB, elbow, G_WEAPON);
+        }
     }
-
-    for (size_t p = 0; p < pieces.size(); p++)
+    // how it goes down: carried on by its own momentum, and by the blow that killed it
+    Vector2 v0 = {m.vx * 0.8f, std::min(m.vy, 0.0f)}, dir = {std::cos(m.lastAng), std::sin(m.lastAng)};
+    Vector2 vel[RJ_COUNT];
+    for (int i = 0; i < RJ_COUNT; i++) vel[i] = v0;
+    auto push = [&](float k, float up, float spread) {
+        for (int i = 0; i < RJ_COUNT; i++)
+        {
+            float s = 1 + frange(-spread, spread);
+            vel[i].x += dir.x * k * s;
+            vel[i].y += dir.y * k * s - up * s;
+        }
+    };
+    bool limbs = R->kind == RK_BIPED || R->kind == RK_QUAD;
+    switch (m.lastHit)
     {
-        const std::vector<int>& pc = pieces[p];
-        if (pc.size() < 10) // a scrap: just gore
+    case HK_BLUNT: push(4.0f, 2.5f, 0.15f); vel[J_NECK].x += dir.x * 1.5f; break; // a hammer sends the body flying
+    case HK_BLAST:
+        push(1.5f + m.lastK * 0.3f, 1.5f, 0.45f);
+        if (limbs)
         {
-            for (int k : pc) if (chance(2)) { Vector2 v = pos(k); spawnParticle(bx + v.x, by + v.y, frange(-1.5f, 1.5f), frange(-2.5f, -0.5f), irange(30, 60), px[k], 0.15f); }
-            continue;
+            static const int GROUPS[] = {G_HEAD, G_ARMF, G_ARMN, G_LEGF, G_LEGN, G_WAIST};
+            for (int n = irange(2, 4); n > 0; n--) sever(c, GROUPS[irand(R->kind == RK_QUAD ? 5 : 6)]);
         }
-        int i0 = b.w, j0 = b.h, i1 = 0, j1 = 0;
-        Vector2 c = {0, 0};
-        for (int k : pc) { i0 = std::min(i0, k % b.w); i1 = std::max(i1, k % b.w); j0 = std::min(j0, k / b.w); j1 = std::max(j1, k / b.w); Vector2 v = pos(k); c.x += v.x; c.y += v.y; }
-        c.x /= pc.size(); c.y /= pc.size();
-        Corpse cp;
-        cp.unit = u;
-        cp.gore = d.gore;
-        int tw = i1 - i0 + 1, th = j1 - j0 + 1;
-        std::vector<uint8_t> in((size_t)tw * th, 0);
-        Image img = GenImageColor(tw, th, BLANK);
-        float I = 0;
-        for (int k : pc)
-        {
-            int i = k % b.w - i0, j = k / b.w - j0;
-            in[(size_t)j * tw + i] = 1;
-            ((Color*)img.data)[j * tw + i] = px[k];
-            Vector2 v = pos(k);
-            I += (v.x - c.x) * (v.x - c.x) + (v.y - c.y) * (v.y - c.y);
-        }
-        cp.I = std::max(1.0f, I / pc.size());
-        cp.tex = LoadTextureFromImage(img);
-        UnloadImage(img);
-        cp.ox = i0 * u - W / 2 - c.x;
-        cp.oy = j0 * u - H - c.y;
-        std::vector<Vector2> edge; // its outline: pixels with open space beside them
-        for (int j = 0; j < th; j++)
-            for (int i = 0; i < tw; i++)
-            {
-                if (!in[(size_t)j * tw + i]) continue;
-                bool e = i == 0 || j == 0 || i == tw - 1 || j == th - 1 || !in[(size_t)j * tw + i - 1] || !in[(size_t)j * tw + i + 1] || !in[(size_t)(j - 1) * tw + i] || !in[(size_t)(j + 1) * tw + i];
-                if (e) edge.push_back({cp.ox + (i + 0.5f) * u, cp.oy + (j + 0.5f) * u});
-            }
-        size_t step = std::max<size_t>(1, edge.size() / 40);
-        for (size_t k = 0; k < edge.size(); k += step) cp.pts.push_back(edge[k]);
-        for (auto w : cutWounds[p]) { w.x -= c.x; w.y -= c.y; cp.wounds.push_back(w); }
-        for (int k = 0; k < m.nWounds; k++) // stab wounds and bolts go with whichever piece holds them
-        {
-            Vector2 wv = {m.woundX[k] * m.facing, m.woundY[k]}, best = {0, 0};
-            float bd = 1e9f;
-            int owner = -1;
-            for (size_t q = 0; q < pieces.size(); q++)
-                for (int kk : pieces[q]) { Vector2 v = pos(kk); float dd = (v.x - wv.x) * (v.x - wv.x) + (v.y - wv.y) * (v.y - wv.y); if (dd < bd) { bd = dd; owner = (int)q; best = v; } }
-            if (owner == (int)p) cp.wounds.push_back({best.x - c.x, best.y - c.y, m.facing > 0 ? m.woundA[k] : PI - m.woundA[k], m.woundK[k], 0.6f});
-        }
-        if (cp.wounds.empty() && d.gore == CellMaterial::Blood) cp.wounds.push_back({0, -H * 0.6f - c.y, -PI / 2, WK_PIERCE, 0.45f}); // it bleeds out a while anyway
-
-        // how it goes down
-        RigidBody& rb = cp.b;
-        rb.x = bx + c.x; rb.y = by + c.y;
-        rb.vx = m.vx * 0.8f + frange(-0.3f, 0.3f);
-        rb.vy = std::min(m.vy, 0.0f) - frange(0.3f, 1.0f);
-        rb.va = (rb.vx >= 0 ? 1 : -1) * frange(0.02f, 0.05f); // it topples
-        auto overlaps = [&](float dx) { // a sprite bigger than its body may reach into a wall or a roof: start it clear
-            for (auto& q : cp.pts) { Vector2 r = rot(q, rb.ang); if (isSolid((int)std::floor(rb.x + dx + r.x), (int)std::floor(rb.y + r.y))) return true; }
-            return false;
-        };
-        auto clear = [&]() {
-            if (!overlaps(0)) return true;
-            for (int k = 1; k <= 12; k++)
-            {
-                if (!overlaps((float)k)) { rb.x += k; return true; }
-                if (!overlaps((float)-k)) { rb.x -= k; return true; }
-            }
-            return false;
-        };
-        if (!clear() && pieces.size() == 1) // no room to stand: it's already down, lying on the floor
-        {
-            rb.ang = (rb.vx >= 0 ? 1 : -1) * PI / 2;
-            float lo = -1e9f;
-            for (auto& q : cp.pts) lo = std::max(lo, rot(q, rb.ang).y);
-            rb.y = by - lo - 0.6f;
-            rb.va = 0;
-            clear();
-        }
-        Vector2 dir = {std::cos(a), std::sin(a)};
-        if (m.lastHit == HK_BLUNT) // a hammer's blow sends the body flying
-        {
-            rb.vx = dir.x * 4.5f + m.vx * 0.3f; rb.vy = std::min(dir.y * 4.0f, 0.0f) - 3.0f; rb.va = (dir.x >= 0 ? 1 : -1) * frange(0.15f, 0.3f);
-        }
-        else if (m.lastHit == HK_BLAST)
-        {
-            float l = std::sqrt(c.x * c.x + (c.y + H * 0.5f) * (c.y + H * 0.5f)) + 0.5f, f = (1.5f + m.lastK * 0.3f) * frange(0.7f, 1.4f);
-            Vector2 out = {dir.x + c.x / l * 0.8f, dir.y + (c.y + H * 0.5f) / l * 0.8f};
-            rb.vx = out.x * f; rb.vy = out.y * f - f * 0.5f; rb.va = frange(-0.4f, 0.4f);
-        }
-        else if (!cuts.empty() && pieces.size() > 1) // cut through: the halves part along the blow
-        {
-            Vector2 n = {-cuts[0].d.y, cuts[0].d.x};
-            float s = (c.x - cuts[0].p.x) * n.x + (c.y - cuts[0].p.y) * n.y > 0 ? 1.0f : -1.0f;
-            rb.vx += dir.x * 1.2f + n.x * s * 0.7f; rb.vy += n.y * s * 0.7f - 0.6f; rb.va = s * frange(0.05f, 0.12f);
-        }
-        G.corpses.push_back(std::move(cp));
+        break;
+    case HK_SLASH:
+        push(1.0f, 0.5f, 0.1f);
+        if (limbs && chance(3)) sever(c, R->kind == RK_BIPED && !chance(4) && P[RS_THIGH].spr ? G_WAIST : G_HEAD); // cut through the middle, or the neck
+        break;
+    case HK_CHOP:
+        push(1.2f, 0.6f, 0.1f);
+        if (limbs && chance(2)) { int r = irand(3); sever(c, r == 0 ? G_HEAD : r == 1 ? (chance(2) ? G_ARMN : G_ARMF) : (chance(2) ? G_LEGN : G_LEGF)); }
+        break;
+    case HK_PIERCE: case HK_BOLT: push(1.0f, 0.4f, 0.2f); break;
+    default: vel[J_NECK].x += (m.vx >= 0 ? 1 : -1) * 0.6f; break; // it topples
     }
-    while (G.corpses.size() > 40) // the oldest of the dead are cleared away
+    if (limbs && P[RS_WEAPON].spr && R->kind == RK_BIPED && !chance(3)) sever(c, G_WEAPON); // the weapon falls from its hand
+    for (int i = 0; i < RJ_COUNT; i++) c.pp[i] = {c.p[i].x - vel[i].x, c.p[i].y - vel[i].y};
+    // its wounds: stabs and bolts carried over from life, and a seep if nothing else bleeds
+    for (int k = 0; k < m.nWounds; k++)
+        if (m.woundS[k] < segCount(*R)) addWound(c, SEGS[m.woundS[k]][0], SEGS[m.woundS[k]][1], m.woundT[k], m.woundA[k], m.woundK[k], 0.6f);
+    if (c.nw == 0 && d.gore == CellMaterial::Blood) addWound(c, J_NECK, J_PELVIS, 0.3f, PI / 2, WK_PIERCE, 0.45f);
+    // whatever reached into a wall as it died starts clear of it
+    for (int i = 0; i < RJ_COUNT; i++)
+        if ((c.used >> i) & 1)
+            for (int tries = 0; tries < 6 && isSolid((int)std::floor(c.p[i].x), (int)std::floor(c.p[i].y)); tries++) { c.p[i].y -= 1; c.pp[i].y -= 1; }
+    G.corpses.push_back(c);
+    if ((int)G.corpses.size() > Tune::MAX_CORPSES) G.corpses.erase(G.corpses.begin()); // the oldest of the dead are cleared away
+}
+
+// Out of the rock the shortest way; `respond` also bounces and rubs off its speed.
+static bool collidePoint(Vector2& p, Vector2& pp, bool respond)
+{
+    int x = (int)std::floor(p.x), y = (int)std::floor(p.y);
+    if (!isSolid(x, y)) return false;
+    Vector2 v = {p.x - pp.x, p.y - pp.y}, was = p;
+    bool up = false;
+    for (int d = 1; d <= 4; d++)
     {
-        if (G.corpses.front().tex.id) UnloadTexture(G.corpses.front().tex);
-        G.corpses.erase(G.corpses.begin());
+        if (!isSolid(x, y - d)) { p.y = (float)(y - d + 1) - 0.01f; up = true; break; }
+        if (!isSolid(x - d, y)) { p.x = (float)(x - d + 1) - 0.01f; break; }
+        if (!isSolid(x + d, y)) { p.x = (float)(x + d) + 0.01f; break; }
+        if (!isSolid(x, y + d)) { p.y = (float)(y + d) + 0.01f; break; }
+    }
+    if (!respond) { pp.x += p.x - was.x; pp.y += p.y - was.y; return true; } // a push-out moves it, it doesn't fling it
+    if (up) { pp.y = p.y; pp.x = p.x - v.x * (1 - Tune::FRICTION); } // landing: no bounce, and it rubs along the ground
+    else if (p.x != was.x) pp.x = p.x;
+    else pp.y = p.y;
+    return true;
+}
+
+static void stepCorpse(Corpse& c)
+{
+    Vector2 start[RJ_COUNT];
+    for (int i = 0; i < RJ_COUNT; i++)
+    {
+        start[i] = c.p[i];
+        if (!((c.used >> i) & 1)) continue;
+        Vector2 v = {(c.p[i].x - c.pp[i].x) * Tune::DAMP, (c.p[i].y - c.pp[i].y) * Tune::DAMP};
+        c.pp[i] = c.p[i];
+        c.p[i] = {c.p[i].x + v.x, c.p[i].y + v.y + Tune::GRAV};
+    }
+    for (int it = 0; it < Tune::ITERS; it++)
+    {
+        for (int s = 0; s < c.ns; s++)
+        {
+            if (c.sg[s] & c.cut) continue;
+            Vector2& a = c.p[c.sa[s]];
+            Vector2& b = c.p[c.sb[s]];
+            float dx = b.x - a.x, dy = b.y - a.y, dd = std::sqrt(dx * dx + dy * dy);
+            if (dd < 1e-4f || ((c.sg[s] & G_MIN) && dd >= c.sl[s])) continue;
+            float k = (dd - c.sl[s]) / dd * 0.5f;
+            a.x += dx * k; a.y += dy * k;
+            b.x -= dx * k; b.y -= dy * k;
+        }
+        bool touched = false;
+        for (int i = 0; i < RJ_COUNT; i++)
+            if ((c.used >> i) & 1) touched = collidePoint(c.p[i], c.pp[i], it == Tune::ITERS - 1) || touched;
+        if (touched && it == Tune::ITERS - 1)
+            for (int i = 0; i < RJ_COUNT; i++)
+                if ((c.used >> i) & 1) { c.pp[i].x = c.p[i].x - (c.p[i].x - c.pp[i].x) * Tune::GROUND_DAMP; c.pp[i].y = c.p[i].y - (c.p[i].y - c.pp[i].y) * Tune::GROUND_DAMP; }
+    }
+    float moved = 0; // how far it really went this step (gravity pressing it into the floor doesn't count)
+    for (int i = 0; i < RJ_COUNT; i++)
+        if ((c.used >> i) & 1) moved = std::max(moved, std::fabs(c.p[i].x - start[i].x) + std::fabs(c.p[i].y - start[i].y));
+    c.rest = moved < Tune::SETTLE_SPEED ? c.rest + 1 : 0;
+    if (++c.awakeT > Tune::TIMEOUT) c.rest = Tune::SETTLE_FRAMES + 1; // (or a timeout)
+    if (c.awakeT % Tune::DRIFT_WINDOW == 0) // a body that ends up where it was a moment ago has stopped, whatever its joints are twitching at
+    {
+        float drift = 0;
+        for (int i = 0; i < RJ_COUNT; i++)
+            if ((c.used >> i) & 1) drift = std::max(drift, std::fabs(c.p[i].x - c.snap[i].x) + std::fabs(c.p[i].y - c.snap[i].y));
+        if (c.awakeT > Tune::DRIFT_WINDOW && drift < Tune::DRIFT_MIN) c.rest = Tune::SETTLE_FRAMES + 1;
+        for (int i = 0; i < RJ_COUNT; i++) c.snap[i] = c.p[i];
+    }
+}
+
+static void bleedCorpse(Corpse& c)
+{
+    if (c.gore == CellMaterial::Empty) return;
+    for (int k = 0; k < c.nw; k++)
+    {
+        CorpseWound& w = c.w[k];
+        if (w.pressure < 0.03f) continue;
+        Vector2 a = c.p[w.a], b = c.p[w.b], ab = {b.x - a.x, b.y - a.y};
+        float l = std::sqrt(ab.x * ab.x + ab.y * ab.y) + 1e-4f;
+        Vector2 at = lerpV(a, b, w.t), v = {c.p[w.a].x - c.pp[w.a].x, c.p[w.a].y - c.pp[w.a].y};
+        float ang = std::atan2(ab.y / l, ab.x / l) + w.ang;
+        int n;
+        float sp;
+        if (w.kind == WK_CUT) // a jet, wavering, weaker as it empties, pushing back on the body
+        {
+            n = w.pressure > 0.35f ? 2 : 1;
+            sp = w.pressure * Tune::JET;
+            ang += std::sin(c.life * 0.9f + k) * 0.25f;
+            w.pressure *= Tune::JET_FADE;
+            if (c.rest < Tune::SETTLE_FRAMES) { c.pp[w.a].x += std::cos(ang) * w.pressure * 0.01f; c.pp[w.a].y += std::sin(ang) * w.pressure * 0.01f; }
+        }
+        else // seeping
+        {
+            n = frand() < w.pressure * 0.35f ? 1 : 0;
+            sp = 0.25f;
+            w.pressure *= Tune::SEEP_FADE;
+        }
+        for (int i = 0; i < n && G.parts.size() < 4800; i++)
+        {
+            Cell cell;
+            cell.material = c.gore;
+            cell.shade = (uint8_t)xr();
+            Particle q{at.x, at.y, v.x + std::cos(ang) * (sp + frange(0, 0.5f)) + frange(-0.15f, 0.15f), v.y + std::sin(ang) * (sp + frange(0, 0.5f)), 200, cellColor(cell, 0, 0), 0.15f};
+            q.toCell = c.gore;
+            G.parts.push_back(q);
+        }
     }
 }
 
 void updateCorpses()
 {
-    for (auto& c : G.corpses)
+    int active = 0;
+    for (int i = (int)G.corpses.size() - 1; i >= 0; i--) // newest first: past MAX_ACTIVE the oldest are frozen
     {
-        RigidBody& b = c.b;
-        if (std::fabs(b.x - G.camX - G.vw / 2) > G.vw + 300 || std::fabs(b.y - G.camY - G.vh / 2) > G.vh + 300) continue;
+        Corpse& c = G.corpses[i];
+        Vector2 m = c.p[J_PELVIS];
+        if (std::fabs(m.x - G.camX - G.vw / 2) > G.vw + 300 || std::fabs(m.y - G.camY - G.vh / 2) > G.vh + 300) continue;
         c.life++;
-        if (b.rest > 40)
+        if (c.rest > Tune::SETTLE_FRAMES)
         {
-            if ((G.frame + c.life) % 10 == 0) // asleep: is the ground still under it?
+            if ((G.frame + i) % 15 == 0) // asleep: has the ground gone from under it?
             {
                 bool held = false;
-                for (auto& p : c.pts) { Vector2 r = rot(p, b.ang); held = held || isSolid((int)std::floor(b.x + r.x), (int)std::floor(b.y + r.y + 1.2f)); }
-                if (!held) b.rest = 0;
+                for (int j = 0; j < RJ_COUNT && !held; j++)
+                    held = ((c.used >> j) & 1) && isSolid((int)std::floor(c.p[j].x), (int)std::floor(c.p[j].y + 1.5f));
+                if (!held) { c.rest = 0; c.awakeT = 0; }
             }
         }
-        else rigidStep(b, c.pts, c.I, false);
-        if (c.gore == CellMaterial::Empty) continue;
-        for (auto& w : c.wounds)
-        {
-            if (w.pressure < 0.03f) continue;
-            Vector2 at = rot({w.x, w.y}, b.ang);
-            at.x += b.x; at.y += b.y;
-            float ang = w.ang + b.ang;
-            int n = 0;
-            float sp = 0;
-            if (w.kind == WK_CUT) // a jet, wavering, weaker as it empties
-            {
-                n = w.pressure > 0.35f ? 2 : 1;
-                sp = w.pressure * 2.6f;
-                ang += std::sin(c.life * 0.9f + w.x) * 0.25f;
-                w.pressure *= 0.993f;
-                b.vx -= std::cos(ang) * w.pressure * 0.004f; // and it pushes back a little
-                b.vy -= std::sin(ang) * w.pressure * 0.004f;
-            }
-            else
-            {
-                n = frand() < w.pressure * 0.35f ? 1 : 0; // seeping
-                sp = 0.25f;
-                w.pressure *= 0.997f;
-            }
-            for (int k = 0; k < n && G.parts.size() < 4800; k++)
-            {
-                Cell cell;
-                cell.material = c.gore;
-                cell.shade = (uint8_t)xr();
-                Particle q{at.x, at.y, b.vx + std::cos(ang) * (sp + frange(0, 0.5f)) + frange(-0.15f, 0.15f), b.vy + std::sin(ang) * (sp + frange(0, 0.5f)), 200, cellColor(cell, 0, 0), 0.15f};
-                q.toCell = c.gore;
-                G.parts.push_back(q);
-            }
-        }
+        else if (++active > Tune::MAX_ACTIVE) c.rest = Tune::SETTLE_FRAMES + 1;
+        else stepCorpse(c);
+        bleedCorpse(c);
     }
 }
 
@@ -1311,16 +1694,39 @@ void drawCorpses(int camX, int camY)
 {
     for (auto& c : G.corpses)
     {
-        float x = c.b.x - camX, y = c.b.y - camY;
-        if (x < -60 || y < -60 || x > G.vw + 60 || y > G.vh + 60) continue;
-        DrawTexturePro(c.tex, {0, 0, (float)c.tex.width, (float)c.tex.height}, {x, y, c.tex.width * c.unit, c.tex.height * c.unit}, {-c.ox, -c.oy}, c.b.ang * RAD2DEG, WHITE);
-        for (auto& w : c.wounds)
-            if (w.kind == WK_BOLT)
+        Vector2 m = c.p[J_PELVIS];
+        if (m.x - camX < -80 || m.y - camY < -80 || m.x - camX > G.vw + 80 || m.y - camY > G.vh + 80) continue;
+        Vector2 J[RJ_COUNT];
+        for (int i = 0; i < RJ_COUNT; i++) J[i] = {c.p[i].x - camX, c.p[i].y - camY};
+        drawRig(*c.rig, J, c.facing, WHITE, false, -0.6f);
+        for (int k = 0; k < c.nw; k++)
+            if (c.w[k].kind == WK_BOLT)
             {
-                Vector2 at = rot({w.x, w.y}, c.b.ang);
-                bolt({x + at.x, y + at.y}, w.ang + c.b.ang, 6);
+                Vector2 a = J[c.w[k].a], b = J[c.w[k].b];
+                bolt(lerpV(a, b, c.w[k].t), std::atan2(b.y - a.y, b.x - a.x) + c.w[k].ang, 6);
             }
     }
+}
+
+Vector2 corpseCentre(const Corpse& c) { return lerpV(c.p[J_NECK], c.p[J_PELVIS], 0.5f); }
+
+// A shove: every point gets some of it, those near `at` the most.
+void corpseKick(Corpse& c, Vector2 at, Vector2 v)
+{
+    for (int i = 0; i < RJ_COUNT; i++)
+    {
+        float d = std::hypot(c.p[i].x - at.x, c.p[i].y - at.y), k = 0.5f + 0.5f * clampf(1 - d / 12.0f, 0, 1);
+        c.pp[i].x -= v.x * k;
+        c.pp[i].y -= v.y * k;
+    }
+    c.rest = 0;
+    c.awakeT = 0;
+}
+
+void shiftCorpses(float dx, float dy)
+{
+    for (auto& c : G.corpses)
+        for (int i = 0; i < RJ_COUNT; i++) { c.p[i].x += dx; c.p[i].y += dy; c.pp[i].x += dx; c.pp[i].y += dy; }
 }
 
 void ragdollForPlayer()

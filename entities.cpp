@@ -517,16 +517,19 @@ void damageMob(Mob& m, float dmg, Element el, float kx, float ky, int flags)
         m.lastHit = (uint8_t)hk; m.lastAng = nextAng; m.lastK = nextK;
         if ((hk == HK_PIERCE || hk == HK_BOLT) && at.x > -1e8f) // the wound stays: it bleeds, and a bolt sticks
         {
-            if (m.nWounds == 4)
+            uint8_t s;
+            float t, rel;
+            if (rigLocate(m, at, nextAng, s, t, rel))
             {
-                for (int k = 0; k < 3; k++) { m.woundX[k] = m.woundX[k + 1]; m.woundY[k] = m.woundY[k + 1]; m.woundA[k] = m.woundA[k + 1]; m.woundK[k] = m.woundK[k + 1]; }
-                m.nWounds = 3;
+                if (m.nWounds == 4)
+                {
+                    for (int k = 0; k < 3; k++) { m.woundS[k] = m.woundS[k + 1]; m.woundT[k] = m.woundT[k + 1]; m.woundA[k] = m.woundA[k + 1]; m.woundK[k] = m.woundK[k + 1]; }
+                    m.nWounds = 3;
+                }
+                int k = m.nWounds++;
+                m.woundS[k] = s; m.woundT[k] = t; m.woundA[k] = rel;
+                m.woundK[k] = hk == HK_BOLT ? WK_BOLT : WK_PIERCE;
             }
-            int k = m.nWounds++;
-            m.woundX[k] = clampf((at.x - m.cx()) * m.facing, -m.w * 0.5f + 1, m.w * 0.5f - 1);
-            m.woundY[k] = clampf(at.y - (m.y + m.h), -m.h + 2.0f, -2.0f);
-            m.woundA[k] = m.facing > 0 ? nextAng : PI - nextAng;
-            m.woundK[k] = hk == HK_BOLT ? WK_BOLT : WK_PIERCE;
         }
     }
     if (flags & DMG_HIT)
@@ -642,13 +645,13 @@ void explode(float x, float y, int r, float dmg, Element el, bool friendly, int 
 {
     explodeCells((int)x, (int)y, r, power);
     pushRagdolls(x, y, r * 2.2f, r * 0.35f);
-    for (auto& c : G.corpses)
+    for (auto& c : G.corpses) // the dead are thrown
     {
-        float dx = c.b.x - x, dy = c.b.y - y, d = std::sqrt(dx * dx + dy * dy), R = r * 2.5f + 10;
+        Vector2 cc = corpseCentre(c);
+        float dx = cc.x - x, dy = cc.y - y, d = std::sqrt(dx * dx + dy * dy), R = r * 2.5f + 10;
         if (d > R) continue;
         float k = r * 0.35f * (1 - d / R), nx = d > 0.1f ? dx / d : 0, ny = d > 0.1f ? dy / d : -1;
-        c.b.vx += nx * k; c.b.vy += ny * k - k * 0.6f; c.b.va += frange(-0.08f, 0.08f) * k;
-        c.b.rest = 0;
+        corpseKick(c, {x, y}, {nx * k, ny * k - k * 0.6f});
     }
     playAt(SFX_EXPLODE, x, y, std::min(1.0f, 0.35f + r / 14.0f), r > 10 ? 0.8f : 1.1f);
     G.shake = std::min(14.0f, G.shake + r * 0.6f);
@@ -1209,7 +1212,10 @@ static void updateStatus(Mob& m)
     if (!isP && ENEMIES[m.type].gore == M::Blood)
         for (int k = 0; k < m.nWounds; k++) // stab wounds and stuck bolts drip
             if ((G.frame + k * 7 + m.id) % 11 == 0 && chance(2))
-                spawnCellParticle(m.cx() + m.woundX[k] * m.facing, m.y + m.h + m.woundY[k], m.vx * 0.5f + frange(-0.2f, 0.2f), frange(-0.2f, 0.3f), M::Blood, 0);
+            {
+                Vector2 w = rigWoundPos(m, k);
+                spawnCellParticle(w.x, w.y, m.vx * 0.5f + frange(-0.2f, 0.2f), frange(-0.2f, 0.3f), M::Blood, 0);
+            }
 
     int lava = 0, acid = 0, fire = 0, water = 0, miasma = 0, oil = 0, blood = 0;
     int x0 = (int)m.x, y0 = (int)m.y, x1 = (int)(m.x + m.w), y1 = (int)(m.y + m.h), sc = world.scale;
@@ -1409,10 +1415,10 @@ static void meleeStrike(const Weapon& w, bool impact)
     }
     for (auto& c : G.corpses) // the dead: knocked about
     {
-        if (!inShape(c.b.x, c.b.y, 4)) continue;
+        Vector2 cc = corpseCentre(c);
+        if (!inShape(cc.x, cc.y, 6)) continue;
         float k = (heavy ? 2.4f : 1.4f) * (fin ? 1.3f : 1.0f);
-        c.b.vx += std::cos(aim) * k; c.b.vy += std::min(0.0f, std::sin(aim)) * k - k * 0.5f; c.b.va += frange(-0.1f, 0.1f) * k;
-        c.b.rest = 0;
+        corpseKick(c, {ox + std::cos(aim) * R * 0.7f, oy + std::sin(aim) * R * 0.7f}, {std::cos(aim) * k, std::min(0.0f, std::sin(aim)) * k - k * 0.5f});
     }
     for (auto& it : G.inter) // loose crates and barrels: knocked flying
     {
@@ -3186,7 +3192,7 @@ void shiftEntities(float dx, float dy)
     for (auto& t : G.texts) { t.x += dx; t.y += dy; }
     for (auto& r : G.rags)
         for (int i = 0; i < 9; i++) { r.p[i].x += dx; r.p[i].y += dy; r.pp[i].x += dx; r.pp[i].y += dy; }
-    for (auto& c : G.corpses) { c.b.x += dx; c.b.y += dy; }
+    shiftCorpses(dx, dy);
     tumbles.clear();
     G.camX += dx; G.camY += dy;
     syncRenderCamera();

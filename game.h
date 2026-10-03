@@ -175,10 +175,10 @@ struct Mob
     // the last direct blow (HitKind), its direction and force: how the body goes when it dies
     uint8_t lastHit = 0, nWounds = 0;
     float lastAng = 0, lastK = 0;
-    // stab and bolt wounds, in sprite space (x from the middle, flipped by facing; y up from the feet), and the
-    // angle the blow came in at: they bleed, and a bolt stays stuck in the body
-    float woundX[4] = {}, woundY[4] = {}, woundA[4] = {};
-    uint8_t woundK[4] = {};
+    // stab and bolt wounds, on a limb of its rig (segment woundS, woundT along it, the blow's angle woundA off
+    // the limb's): they bleed, and a bolt stays stuck in the body, moving with the limb
+    float woundT[4] = {}, woundA[4] = {};
+    uint8_t woundS[4] = {}, woundK[4] = {};
     float cx() const { return x + w * 0.5f; }
     float cy() const { return y + h * 0.5f; }
 };
@@ -327,18 +327,26 @@ struct RigidBody { float x = 0, y = 0, vx = 0, vy = 0, ang = 0, va = 0; int rest
 // `square` snaps it level when it settles nearly so. Returns whether it's touching anything.
 bool rigidStep(RigidBody& b, const std::vector<Vector2>& pts, float I, bool square);
 
-// A dead body, or a piece of one: the creature's own sprite pixels as a rigid body, bleeding from its wounds.
-struct Wound { float x, y, ang; int kind; float pressure; }; // about the centre, in the body's own frame
+// A dead body: the creature's limb rig (rig.cpp) as a Verlet ragdoll - joints as points, limbs as sticks.
+// Fixed arrays: nothing is allocated while it falls.
+struct RigSpec;
+const int RJ_COUNT = 18, RST_MAX = 32, RCW_MAX = 10;
+struct CorpseWound { uint8_t a, b; float t, ang; int kind; float pressure; }; // on joints a->b at t, pointing `ang` off that line
 struct Corpse
 {
-    RigidBody b;
-    Texture2D tex{};
-    float unit = 1, ox = 0, oy = 0; // units per pixel; the texture's top-left from the centre
-    std::vector<Vector2> pts;
-    float I = 1;
-    std::vector<Wound> wounds;
+    const RigSpec* rig = nullptr;
+    int facing = 1;
+    Vector2 p[RJ_COUNT] = {}, pp[RJ_COUNT] = {}; // points now, and a frame ago
+    Vector2 snap[RJ_COUNT] = {};                 // where they were a few frames back (to tell when it's stopped)
+    uint8_t sa[RST_MAX] = {}, sb[RST_MAX] = {}, sg[RST_MAX] = {}; // sticks: ends, and what cutting it severs
+    float sl[RST_MAX] = {};
+    int ns = 0;
+    uint32_t used = 0; // joints in use
+    uint8_t cut = 0;   // severed groups
+    CorpseWound w[RCW_MAX] = {};
+    int nw = 0;
     CellMaterial gore = CellMaterial::Blood;
-    int life = 0;
+    int life = 0, rest = 0, awakeT = 0; // frames alive; frames still; frames since last woken
 };
 
 // Verlet ragdoll: 9 joints joined by sticks, colours picked from the creature.
@@ -524,6 +532,11 @@ void pushRagdolls(float x, float y, float radius, float force);
 void updateRagdolls();
 void drawRagdolls(int camX, int camY);
 void spawnCorpse(const Mob& m);
+bool rigLocate(const Mob& m, Vector2 at, float ang, uint8_t& seg, float& t, float& rel); // which limb a blow at `at` struck
+Vector2 rigWoundPos(const Mob& m, int k);
+Vector2 corpseCentre(const Corpse& c);
+void corpseKick(Corpse& c, Vector2 at, Vector2 v);
+void shiftCorpses(float dx, float dy);
 void updateCorpses();
 void drawCorpses(int camX, int camY);
 void clearCorpses();
