@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cmath>
 #include "world.h"
 
 // ================================================================ elements
@@ -132,6 +133,7 @@ enum EnemyType {
     E_GOBLIN, E_BOMBER, E_SKELETON, E_ARCHER, E_BAT, E_SLIME, E_CULTIST, E_KNIGHT,
     E_IMP, E_WRAITH, E_GOLEM,
     E_WOLF, E_REDCAP, E_DRAUGR, E_TROLL, E_BANSHEE, E_KELPIE, E_GUARD, // Norse & Scottish folklore
+    E_RISEN, // the dead levy on the field before Dunmoor
     E_BLACKKNIGHT, E_LICH, ENEMY_COUNT
 };
 enum AIType { AI_WALK, AI_RANGED, AI_FLY, AI_HOP, AI_BOMB, AI_FLYCAST, AI_BOSS_KNIGHT, AI_BOSS_LICH };
@@ -161,28 +163,39 @@ struct Mob
     int wall = 0, facing = 1;
     float hp = 100, maxHp = 100, dmg = 0;
     int burn = 0, chill = 0, shock = 0, poison = 0, iframes = 0, hurtFlash = 0, envCd = 0;
+    int wet = 0, oily = 0, bloody = 0; // frames left coated: wet won't catch fire but conducts; oil burns longer and hotter
     int cd = 0, timer = 0, state = 0, attackT = 0;
     int bleedMark = 0; // struck by a bleeding weapon: dies messily
     int dropT = 0;     // frames left falling through one-way platforms
+    int stagger = 0, hitT = 0, hitSwing = 0; // reeling from a blow (no control), the recoil animation, the last swing that struck it
+    float hitDir = 0;  // which way that blow knocked it
+    int atkPhase = 0, atkT = 0; // a melee attack: 1 winding up, 2 striking, 3 recovering; frames left in the phase
+    bool atkDone = false;       // this attack has already landed
     float anim = 0, squash = 1;
+    // the last direct blow (HitKind), its direction and force: how the body goes when it dies
+    uint8_t lastHit = 0, nWounds = 0;
+    float lastAng = 0, lastK = 0;
+    // stab and bolt wounds, in sprite space (x from the middle, flipped by facing; y up from the feet), and the
+    // angle the blow came in at: they bleed, and a bolt stays stuck in the body
+    float woundX[4] = {}, woundY[4] = {}, woundA[4] = {};
+    uint8_t woundK[4] = {};
     float cx() const { return x + w * 0.5f; }
     float cy() const { return y + h * 0.5f; }
 };
 
-// Perks: gifts from a haven's shrine that last the rest of the run (they stack).
-enum PerkId { PK_HEARTY, PK_SWIFT, PK_HIDE, PK_FURY, PK_WIND, PK_MEAD, PERK_COUNT };
-struct PerkDef { const char* name; const char* desc; Color col; };
-extern const PerkDef PERKS[PERK_COUNT];
+// Amulets: Norse charms worn on a cord, one at a time. Found rarely in chests, on the fallen, and on
+// every guardian; walk over one bare-necked to put it on, or press F over it to swap.
+enum AmuletId { AM_MJOLNIR, AM_VALKNUT, AM_HELM, AM_VEGVISIR, AM_TROLLCROSS, AM_YGGDRASIL, AM_NJORD, AM_JORMUNGANDR, AM_SKADI, AM_BROKKR, AMULET_COUNT };
+struct AmuletDef { const char* name; const char* desc; Color col; const char* art[20]; };
+extern const AmuletDef AMULETS[AMULET_COUNT];
+void wearAmulet(int id); // -1 takes it off
+int randomAmulet();      // one you're not already wearing
+// Pixel art from char rows (see items.cpp:artColor), `px` units (or pixels) a pixel, top-left at (x, y).
+void drawPixelArt(const char* const* rows, int n, float x, float y, float px);
+void drawAmulet(int id, float x, float y, float px);
+extern const char* const MEAD_ART[8];
 
-// A shrine offers one of each: an upgrade for the weapon in hand, a perk, and a spell.
-enum BoonKind { BOON_WEAPON, BOON_PERK, BOON_SPELL };
-enum WeaponUpgrade { WU_HONE, WU_RUNE };
-struct Boon { int kind = BOON_SPELL, id = 0, fx = 0; }; // weapon: id = WeaponUpgrade, fx = the rune's effect bit
-void rollShrine(Boon out[3]);
-std::string boonTitle(const Boon& b);
-std::string boonDesc(const Boon& b);
-void grantBoon(const Boon& b);
-
+const int CAPE_N = 12; // points down the player's cape
 struct Player
 {
     Mob m;
@@ -193,14 +206,20 @@ struct Player
     int pending[RES_COUNT] = {};
     int armour = -1; // metal index, -1 = padded gambeson
     int potions = 2;
-    int perks[PERK_COUNT] = {};
+    int amulet = -1; // AmuletId worn, -1 none
     float stamina = 100;
+    float breath = 100; // under water it runs out, then you drown
     int attackCd = 0, swingT = 0, swingDir = 1, recoil = 0;
+    int atkStyle = 0, atkLen = 1, atkHitAt = 0, combo = 0, comboT = 0, swingId = 0; // the melee attack under way (swingT: frames left)
     float aim = 0;
     int coyote = 0, jumpBuf = 0, onWall = 0;
+    int mantleT = 0, mantleDir = 0; // pulling up over a ledge: frames left, and which way
+    float mx0 = 0, my0 = 0, mx1 = 0, my1 = 0;
     int hook = 0; // 0 none, 1 flying, 2 attached
     float hx = 0, hy = 0, hvx = 0, hvy = 0, rope = 0;
     int hookTravel = 0;
+    bool hasWisp = false; // Baldr's Offering: a light spirit that follows you
+    float wx = 0, wy = 0;
     int kills = 0;
     int combatT = 0; // weapon stays drawn this many frames after attacking
     int coins = 0;   // banked between runs
@@ -209,7 +228,7 @@ struct Player
     float squash = 1, runPhase = 0;
     int rollT = 0, rollCd = 0, rollDir = 1;
     bool wasGround = false;
-    Vector2 cape[7] = {}, capePrev[7] = {};
+    Vector2 cape[CAPE_N] = {}, capePrev[CAPE_N] = {};
     bool capeInit = false;
 };
 
@@ -231,7 +250,7 @@ struct Proj
     std::vector<int> hits;
 };
 
-enum PickupKind { PU_SPELL, PU_WEAPON, PU_POTION, PU_HEART, PU_COIN };
+enum PickupKind { PU_SPELL, PU_WEAPON, PU_POTION, PU_HEART, PU_COIN, PU_AMULET, PU_MEAD }; // PU_AMULET: `spell` = AmuletId; PU_MEAD heals you whole
 struct Pickup
 {
     Mob b;
@@ -242,10 +261,23 @@ struct Pickup
     bool alive = true;
 };
 
-enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE, IT_BOAT };
+enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE, IT_BOAT, IT_LANTERN, IT_PROP };
 // IT_BOAT: a longship; `used` = beached scenery, otherwise F sets sail. IT_TORCH style 1 = wall sconce.
 // IT_ROPE: hangs from (x, y) down to row `data`. IT_CRATE: breakable obstacle, wood cells in [x, x+w) x [y-h, y), `data` = hits left.
-struct Interact { int type; float x, y; bool used = false; int data = 0; int style = 0; int w = 0, h = 0, cells = 0, hit = 0; };
+struct Interact { int type; float x, y; bool used = false; int data = 0; int style = 0; int w = 0, h = 0, cells = 0, hit = 0;
+                  float vx = 0, vy = 0, ang = 0, va = 0; int rest = 99; }; // chests are little rigid bodies: velocity, spin, frames at rest
+// IT_LANTERN: an oil lantern on a chain from (x, y), `data` units long, swinging at `ang`. `style` 1 = the chain
+// snapped and it's falling free (x, y is then the lantern itself); `used` = smashed.
+inline Vector2 lanternPos(const Interact& it) { return it.style ? Vector2{it.x, it.y} : Vector2{it.x + std::sin(it.ang) * it.data, it.y + std::cos(it.ang) * it.data}; }
+const float CHEST_HW = 9.5f, CHEST_HH = 7.2f; // a chest's half size in units; (x, y - CHEST_HH) is its centre
+// IT_PROP: a loose crate (style 0), barrel (1) or small box (2): a rigid body like a chest, knocked about by
+// blows, bolts, blasts and anyone walking into it. bodyHalf: the half size of any such body.
+inline Vector2 bodyHalf(const Interact& it)
+{
+    static const Vector2 PROP[3] = {{6, 6}, {4.5f, 6.5f}, {4, 3.5f}};
+    return it.type == IT_PROP ? PROP[it.style % 3] : Vector2{CHEST_HW, CHEST_HH};
+}
+inline bool isBody(const Interact& it) { return it.type == IT_CHEST || it.type == IT_PROP; }
 // How a stage shows off its special weapon (replaces the old sword-in-stone).
 enum DisplayStyle { DS_ROCK, DS_TARGET, DS_TABLE, DS_RACK, DS_GRAVE, DS_CART, DS_ICE, DS_ANVIL, DS_ALTAR };
 
@@ -269,7 +301,7 @@ struct Particle
 };
 
 // A light with no object of its own (lanterns, lit windows); `flame` also draws a flickering flame.
-struct Lamp { float x, y, r; Color c; bool flame = false; };
+struct Lamp { float x, y, r; Color c; bool flame = false; bool smoke = false; }; // smoke: no light, just a curl of smoke (a hall's roof)
 
 // A safe area between two biomes. You walk in through `x0`, the gate drops behind you, and the far
 // gate at `x1` opens onto the next biome. A boss's haven stays barred until the boss falls.
@@ -284,6 +316,30 @@ struct Haven
 };
 
 struct FloatText { float x, y; std::string s; int life; Color col; };
+
+// How a creature was last struck, which decides how it falls: cut in two, flung, blown apart.
+enum HitKind { HK_NONE, HK_SLASH, HK_CHOP, HK_BLUNT, HK_PIERCE, HK_BOLT, HK_BLAST };
+enum WoundKind { WK_PIERCE, WK_BOLT, WK_CUT };
+
+// A little rigid body: centre, velocity, angle and spin, frames at rest (asleep past 40).
+struct RigidBody { float x = 0, y = 0, vx = 0, vy = 0, ang = 0, va = 0; int rest = 0; };
+// One step against the terrain: `pts` is its outline about the centre, `I` its inertia per unit mass;
+// `square` snaps it level when it settles nearly so. Returns whether it's touching anything.
+bool rigidStep(RigidBody& b, const std::vector<Vector2>& pts, float I, bool square);
+
+// A dead body, or a piece of one: the creature's own sprite pixels as a rigid body, bleeding from its wounds.
+struct Wound { float x, y, ang; int kind; float pressure; }; // about the centre, in the body's own frame
+struct Corpse
+{
+    RigidBody b;
+    Texture2D tex{};
+    float unit = 1, ox = 0, oy = 0; // units per pixel; the texture's top-left from the centre
+    std::vector<Vector2> pts;
+    float I = 1;
+    std::vector<Wound> wounds;
+    CellMaterial gore = CellMaterial::Blood;
+    int life = 0;
+};
 
 // Verlet ragdoll: 9 joints joined by sticks, colours picked from the creature.
 struct Ragdoll
@@ -323,26 +379,30 @@ extern const int STAGE_COUNT;
 
 // ================================================================ game
 
-enum GameState { GS_TITLE, GS_LOADING, GS_PLAY, GS_INVENTORY, GS_ANVIL, GS_SHRINE, GS_PAUSE, GS_DEAD, GS_WIN, GS_SHOP };
+enum GameState { GS_TITLE, GS_LOADING, GS_PLAY, GS_INVENTORY, GS_ANVIL, GS_PAUSE, GS_DEAD, GS_WIN, GS_SHOP };
 enum LoadTarget { LOAD_STAGE, LOAD_SANDBOX, LOAD_VILLAGE };
 
 // ================================================================ meta progression (meta.cpp)
 
-enum UnlockKind { UK_WEAPON, UK_STAFF, UK_SPELL, UK_HOOK, UK_ARMOUR, UK_FLASK };
+enum UnlockKind { UK_WEAPON, UK_STAFF, UK_SPELL, UK_HOOK, UK_ARMOUR, UK_FLASK, UK_WISP };
 struct Unlock { const char* name; int shop, price, kind, a, b; const char* desc; };
 extern const Unlock UNLOCKS[];
 extern const int UNLOCK_COUNT;
 extern const char* SHOP_NAMES[3];
+// Weapons, staves and spells are bought for the next run only (`stocked`); the outfitter's gear is kept for good.
+inline bool isKitKind(int kind) { return kind == UK_WEAPON || kind == UK_STAFF || kind == UK_SPELL; }
 struct Meta
 {
     int bank = 0, runs = 0, deepest = 0;
-    bool owned[64] = {}, equipped[64] = {};
+    bool owned[64] = {}, equipped[64] = {}, stocked[64] = {};
 };
 extern Meta META;
 void loadMeta();
 void saveMeta();
 void toggleEquip(int i);
 bool buyUnlock(int i);
+void sellBack(int i);  // a readied weapon or spell, refunded
+void spendKit();       // setting sail: the readied weapons and spells go with you, and are gone from the stalls
 void bankRun();
 void applyLoadout();
 
@@ -364,6 +424,7 @@ struct Game
     std::vector<Haven> havens;
     std::vector<FloatText> texts;
     std::vector<Ragdoll> rags;
+    std::vector<Corpse> corpses;
     std::vector<Weapon> stoneLoot; // weapons held by sword-in-stone shrines (Interact::data indexes this)
     std::vector<std::pair<std::string, int>> msgs;
     float camX = 0, camY = 0, shake = 0;
@@ -371,8 +432,6 @@ struct Game
     int scale = 3, vw = 0, vh = 0;
     int frame = 0, nextId = 1;
     int winTimer = 0, deadTimer = 0, bannerTimer = 0;
-    Boon shrineOffer[3];
-    int shrineAt = -1; // the shrine being prayed at (index into inter)
     SpellCard heldSpell;
     int invSel = 0;
     int nearInteract = -1;
@@ -382,12 +441,17 @@ struct Game
     float uiScale = 1; // accessibility: UI size multiplier
     bool showHelp = false, reduceShake = false;
     int playX0 = 0;   // the gate you last came through: nothing behind it is reachable any more
+    int seaEnd = 0;   // the run's west sea: x where the beach takes over from it (0 = none)
+    float roamX0 = 0, roamX1 = 0; // in Hearthwick: how far you may walk either way (0, 0 = anywhere)
+    bool underwater = false; // the player's head is under
+    float stormX0 = 0, stormX1 = 0; // the storm over Dunmoor gathers from x0 to x1 (0 = none)
+    int thunderT = 0;               // frames till the thunder after a flash
     int duneEnd = 0;  // stage 1 opens with the Whispering Dunes: x where they give way to the Greenmarch (0 = none)
     int sailT = 0;    // frames into the voyage out of Hearthwick (0 = not sailing)
     bool duneCrossed = false;
 };
 extern Game G;
-inline bool inDunes() { return G.duneEnd > 0 && G.p.m.x < G.duneEnd && !G.sanctuary && !G.inVillage; }
+inline bool inDunes() { return G.duneEnd > 0 && G.p.m.x < G.duneEnd && G.p.m.x > G.seaEnd && !G.sanctuary && !G.inVillage; }
 
 // items.cpp
 std::string weaponName(const Weapon& w);
@@ -410,6 +474,7 @@ bool canAfford(const int cost[RES_COUNT]);
 void payCost(const int cost[RES_COUNT]);
 float armourDef(int armour);
 void castSelfTest();
+void collapseSelfTest();
 
 // entities.cpp
 enum DamageFlags { DMG_HIT = 1 };
@@ -444,31 +509,45 @@ const char* sandboxBrushName();
 // rig.cpp (animation)
 void drawPlayerRig(int camX, int camY);
 void drawMobAnimated(const Mob& m, int camX, int camY);
+void drawBurning(const Mob& m, int camX, int camY); // flames licking up off anything on fire
 void burstSprite(const Mob& m);
 void drawHeld(float ox, float oy);
+void detail2x(const Color* src, int w, int h, std::vector<Color>& out); // pixel art doubled: Scale2x, a lit rim, shade
+void prepareStallArt(); // builds the stalls' upscaled art (outside any render texture)
+enum AttackStyle { ATK_SLASH, ATK_STAB, ATK_THRUST, ATK_CHOP, ATK_SLAM };
+void attackPose(float& ang, float& ext, int back);
+void startAttack(const Weapon& w);
+void drawWeaponSprite(const Weapon& w, Vector2 at, float ang, float scale, bool centred);
+float weaponLength(const Weapon& w);
 void spawnRagdoll(float cx, float bottom, float h, float vx, float vy, Color head, Color body, Color limb, bool bony, CellMaterial gore);
 void pushRagdolls(float x, float y, float radius, float force);
 void updateRagdolls();
 void drawRagdolls(int camX, int camY);
-void ragdollForMob(const Mob& m);
+void spawnCorpse(const Mob& m);
+void updateCorpses();
+void drawCorpses(int camX, int camY);
+void clearCorpses();
 void ragdollForPlayer();
 struct Sprite;
 void drawSpriteBig(const Sprite& s, float x, float bottom, bool flip, Color tint);
 void drawSpriteNative(const Sprite& s, float x, float bottom, bool flip);
+void drawChest(float cx, float cy, float ang, bool open); // centre, in render-texture units
+void drawSpriteTint(const Sprite& s, float x, float bottom, bool flip, Color tint); // native size, 'a' tinted
 
 // levelgen.cpp
 void startRun();      // the first biomes of a new run, stitched together
-void advanceWorld(Haven& h); // h just sealed: trim the world behind it and grow the next biome ahead
+void advanceWorld(Haven& h); // h just sealed: grow the next biome on ahead
 void setGate(int x0, int x1, int y0, int y1, bool closed);
 void generateSandbox();
 void generateVillage();
 void dumpStages(const char* dir);
+void growDampCaves(); // the damp caves fill in as the camera nears them
 
 // audio.cpp (everything is synthesised at startup)
 enum Sfx {
     SFX_SWING, SFX_HIT, SFX_CLANG, SFX_EXPLODE, SFX_CAST, SFX_FIRE, SFX_ZAP, SFX_ICE, SFX_BOW, SFX_JUMP,
     SFX_LAND, SFX_STEP, SFX_HURT, SFX_DIE, SFX_PICKUP, SFX_ORE, SFX_CHEST, SFX_PORTAL, SFX_CLICK, SFX_CRAFT,
-    SFX_ROLL, SFX_ROAR, SFX_POTION, SFX_SPLASH, SFX_HOOK, SFX_BARK, SFX_HOWL, SFX_KNOCK, SFX_SMASH, SFX_COUNT
+    SFX_ROLL, SFX_ROAR, SFX_POTION, SFX_SPLASH, SFX_HOOK, SFX_BARK, SFX_HOWL, SFX_KNOCK, SFX_SMASH, SFX_THRUST, SFX_SLAM, SFX_HEAVY, SFX_XBOW, SFX_DING, SFX_DRAW, SFX_WHOOSH, SFX_COUNT
 };
 void initAudio();
 void closeAudio();
@@ -480,7 +559,6 @@ void playAt(int id, float x, float y, float vol = 1, float pitch = 1);
 void drawHUD();
 void updateDrawInventory();
 void updateDrawAnvil();
-void updateDrawShrine();
 void updateDrawShop();
 void initUI();
 void uiText(const std::string& s, float x, float y, float size, Color c, int style = 0); // style: 0 body, 1 bold, 2 title

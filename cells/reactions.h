@@ -2,6 +2,8 @@
 #pragma once
 #include "material.h"
 
+// Unordered pairs: a cell checks one random neighbour per tick (world.cpp:tryReact, via its pair lookup).
+// A new reaction is just a row here.
 struct Reaction {
     CellMaterial a;
     CellMaterial b;
@@ -19,12 +21,3 @@ inline const Reaction reactions[] = {
     { CellMaterial::Lava, CellMaterial::Blood, CellMaterial::Lava, CellMaterial::Smoke, 2 },
     { CellMaterial::Lava, CellMaterial::Bone, CellMaterial::Lava, CellMaterial::Smoke, 20 },
 };
-
-inline const Reaction* findReaction(CellMaterial a, CellMaterial b) {
-    for (const auto& r : reactions) {
-        if ((r.a == a && r.b == b) || (r.a == b && r.b == a)) {
-            return &r;
-        }
-    }
-    return nullptr;
-}

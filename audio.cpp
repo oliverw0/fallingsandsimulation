@@ -1,8 +1,10 @@
-// All sound is synthesised at startup, so the game ships without audio files.
+// Most sound is synthesised at startup; the recordings (sword swings and drawing, hammer swings, the
+// crossbow, the frying pan) are compiled in from sounds.h, so the game still ships without audio files.
 // Recipes layer filtered noise, modal (inharmonic) partials and formant-filtered voices,
 // then run through a small Freeverb-style reverb. Common sounds get several variants.
 #include "game.h"
 #include "util.h"
+#include "sounds.h"
 #include <cmath>
 #include <vector>
 #include <functional>
@@ -153,15 +155,61 @@ static void build()
         for (int v = 0; v < variants; v++) sfx[id].base.push_back(make(v));
     };
 
-    // sword swing: band-passed air sweeping up and back down (doppler-ish), short airy tail
+    // blade swish: three recorded sword swings, taken in turn at random
     add(SFX_SWING, 2, 3, [](int v) {
-        Rng n(10 + v); Biquad bp;
-        float dur = 0.22f + v * 0.02f;
-        return render(dur, 0.12f, 0.4f, 0.55f, [=](float t) mutable {
+        static const Wave swings[3] = {{SWING1_FRAME_COUNT, SWING1_SAMPLE_RATE, SWING1_SAMPLE_SIZE, SWING1_CHANNELS, SWING1_DATA},
+                                       {SWING2_FRAME_COUNT, SWING2_SAMPLE_RATE, SWING2_SAMPLE_SIZE, SWING2_CHANNELS, SWING2_DATA},
+                                       {SWING3_FRAME_COUNT, SWING3_SAMPLE_RATE, SWING3_SAMPLE_SIZE, SWING3_CHANNELS, SWING3_DATA}};
+        return LoadSoundFromWave(swings[v]);
+    });
+    // a sword drawn from its scabbard (recorded), when you take one in hand
+    add(SFX_DRAW, 8, 1, [](int) {
+        Wave w{SWORD_DRAW_FRAME_COUNT, SWORD_DRAW_SAMPLE_RATE, SWORD_DRAW_SAMPLE_SIZE, SWORD_DRAW_CHANNELS, SWORD_DRAW_DATA};
+        return LoadSoundFromWave(w);
+    });
+    // heavy swing (axe, hammer): two recorded war-hammer swings
+    add(SFX_HEAVY, 3, 2, [](int v) {
+        static const Wave swings[2] = {{HAMMER1_FRAME_COUNT, HAMMER1_SAMPLE_RATE, HAMMER1_SAMPLE_SIZE, HAMMER1_CHANNELS, HAMMER1_DATA},
+                                       {HAMMER2_FRAME_COUNT, HAMMER2_SAMPLE_RATE, HAMMER2_SAMPLE_SIZE, HAMMER2_CHANNELS, HAMMER2_DATA}};
+        return LoadSoundFromWave(swings[v]);
+    });
+    // poke: a short sharp jab of air, a flick of cloth and a faint metallic hiss off the point
+    add(SFX_THRUST, 2, 3, [](int v) {
+        Rng n(520 + v); Biquad bp, ck, ring1, ring2;
+        ck.set(HP, 2500, 0.7f);
+        ring1.set(BP, 3200 + v * 200, 18);
+        ring2.set(BP, 4700 + v * 150, 22);
+        float dur = 0.14f + v * 0.015f;
+        return render(dur, 0.06f, 0.3f, 0.55f, [=](float t) mutable {
             float x = t / dur;
-            bp.set(BP, 350 + 2300 * std::sin(3.14159f * x) * (0.9f + 0.1f * v), 1.4f);
-            return bp(n()) * std::sin(3.14159f * std::pow(x, 0.7f));
+            float a = x < 0.22f ? std::pow(x / 0.22f, 1.5f) : std::exp(-(x - 0.22f) * 11);
+            bp.set(BP, 900 + 2600 * a, 1.6f);
+            float s = n();
+            float hiss = (ring1(s) + ring2(s)) * env(t, 0.004f, 0.05f) * 0.5f;
+            return bp(s) * a + ck(s) * env(t, 0.0008f, 0.004f) * 0.5f + hiss;
         });
+    });
+    // slam: a hammer into the ground - a sub-thump, a dull body thud, a crunch of grit, then stones pattering down
+    add(SFX_SLAM, 4, 3, [](int v) {
+        Rng n(540 + v), r(560 + v); Biquad body, grit, patter;
+        body.set(LP, 280, 0.8f);
+        grit.set(BP, 1700 + v * 200, 0.9f);
+        patter.set(BP, 2600, 1.2f);
+        return render(0.75f, 0.22f, 0.6f, 0.95f, [=](float t) mutable {
+            float boom = std::sin(TAU * (62 - 30 * t) * t) * env(t, 0.002f, 0.16f);
+            float thud = body(n()) * 4.0f * env(t, 0.001f, 0.06f);
+            float crunch = grit(n()) * 2.2f * env(t, 0.004f, 0.09f);
+            float density = t > 0.06f ? 0.02f * std::exp(-(t - 0.06f) * 6) : 0;
+            float pat = (r() * 0.5f + 0.5f < density ? 1.0f : 0.0f);
+            return softclip(boom * 1.4f + thud + crunch + patter(pat * 8.0f) * 0.6f);
+        });
+    });
+    // crossbow: three recorded bolts loosed
+    add(SFX_XBOW, 3, 3, [](int v) {
+        static const Wave shots[3] = {{XBOW1_FRAME_COUNT, XBOW1_SAMPLE_RATE, XBOW1_SAMPLE_SIZE, XBOW1_CHANNELS, XBOW1_DATA},
+                                      {XBOW2_FRAME_COUNT, XBOW2_SAMPLE_RATE, XBOW2_SAMPLE_SIZE, XBOW2_CHANNELS, XBOW2_DATA},
+                                      {XBOW3_FRAME_COUNT, XBOW3_SAMPLE_RATE, XBOW3_SAMPLE_SIZE, XBOW3_CHANNELS, XBOW3_DATA}};
+        return LoadSoundFromWave(shots[v]);
     });
     // flesh hit: low thump + wet squelch + click transient
     add(SFX_HIT, 2, 3, [](int v) {
@@ -186,6 +234,17 @@ static void build()
             for (int i = 0; i < 5; i++) s += std::sin(TAU * f0 * ratio[i] * t * (1 + 0.002f * std::sin(TAU * 5 * t))) * std::exp(-t / dec[i]) / (1 + i * 0.6f);
             return s * env(t, 0.0008f, 1) + ck(n()) * env(t, 0.0005f, 0.006f) * 0.8f;
         });
+    });
+    // frying pan: a light whoosh as it's swung, and a bright metal clang when it lands (all recorded)
+    add(SFX_WHOOSH, 2, 1, [](int) {
+        Wave w{PAN_WHOOSH_FRAME_COUNT, PAN_WHOOSH_SAMPLE_RATE, PAN_WHOOSH_SAMPLE_SIZE, PAN_WHOOSH_CHANNELS, PAN_WHOOSH_DATA};
+        return LoadSoundFromWave(w);
+    });
+    add(SFX_DING, 3, 3, [](int v) {
+        static const Wave hits[3] = {{PAN_HIT1_FRAME_COUNT, PAN_HIT1_SAMPLE_RATE, PAN_HIT1_SAMPLE_SIZE, PAN_HIT1_CHANNELS, PAN_HIT1_DATA},
+                                     {PAN_HIT2_FRAME_COUNT, PAN_HIT2_SAMPLE_RATE, PAN_HIT2_SAMPLE_SIZE, PAN_HIT2_CHANNELS, PAN_HIT2_DATA},
+                                     {PAN_HIT3_FRAME_COUNT, PAN_HIT3_SAMPLE_RATE, PAN_HIT3_SAMPLE_SIZE, PAN_HIT3_CHANNELS, PAN_HIT3_DATA}};
+        return LoadSoundFromWave(hits[v]);
     });
     // explosion: crack, roaring low-passed body that darkens, sub boom, crackle; big room
     add(SFX_EXPLODE, 4, 2, [](int v) {
@@ -590,7 +649,9 @@ void updateAudio(bool inGame)
     static float musicVol = 0.5f, windVol = 0;
     bool dunes = inGame && inDunes();
     musicVol += ((dunes ? 0.0f : 0.5f) - musicVol) * 0.01f;
-    windVol += ((dunes ? 0.75f : (inGame && (G.inVillage || G.duneEnd) ? 0.12f : 0.0f)) - windVol) * 0.01f;
+    float windTo = dunes ? 0.75f : (inGame && (G.inVillage || G.duneEnd) ? 0.12f : 0.0f);
+    if (inGame && G.underwater) windTo = 0; // no wind under the waves
+    windVol += (windTo - windVol) * (inGame && G.underwater ? 0.08f : 0.01f);
     if (!IsSoundPlaying(music)) PlaySound(music);
     if (!IsSoundPlaying(wind)) PlaySound(wind);
     SetSoundVolume(music, musicVol);

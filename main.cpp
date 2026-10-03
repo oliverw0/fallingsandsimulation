@@ -13,11 +13,13 @@ static RenderTexture2D rt{};
 static Texture2D worldTex{};
 static std::vector<Color> pix;
 
-// The world renders at one texel per cell into a small render texture, then scales up crisp.
+// The world renders at one texel per cell - SUB cells to the world unit - into a render texture where
+// characters draw in units (scaled by SUB), then the whole thing scales up crisp.
+static const int SUB = 2; // must match the play grid's scale (world.scale)
 static void setupView()
 {
     int sw = GetScreenWidth(), sh = GetScreenHeight();
-    int scale = std::max(2, (int)std::lround(sh / 256.0));
+    int scale = 3; // fixed: a bigger window or fullscreen shows more of the world, not the same view bigger
     int vw = (sw + scale - 1) / scale, vh = (sh + scale - 1) / scale;
     if (rt.id && vw == G.vw && vh == G.vh && scale == G.scale)
         return;
@@ -29,11 +31,11 @@ static void setupView()
         UnloadRenderTexture(rt);
         UnloadTexture(worldTex);
     }
-    rt = LoadRenderTexture(vw, vh);
-    Image img = GenImageColor(vw, vh, BLACK);
+    rt = LoadRenderTexture(vw * SUB, vh * SUB);
+    Image img = GenImageColor(vw * SUB, vh * SUB, BLACK); // the grid is SUB cells per unit, drawn one texel each
     worldTex = LoadTextureFromImage(img);
     UnloadImage(img);
-    pix.assign((size_t)vw * vh, BLACK);
+    pix.assign((size_t)vw * SUB * vh * SUB, BLACK);
 }
 
 // ---------------------------------------------------------------- lighting
@@ -45,13 +47,13 @@ static const int LS = 2; // world pixels per light texel
 static Texture2D lightTex{};
 static int lw = 0, lh = 0, lox = 0, loy = 0, lightId = 0;
 static std::vector<float> lr, lg, lb, lsky, er, eg, eb, llast;
-static std::vector<int> lstamp, ltop;
+static std::vector<int> lstamp, ltop, lwet;
 static std::vector<Color> lpix;
 
-static bool opaque(int x, int y)
+static bool opaque(int x, int y) // x, y in world units: the light map works in units, sampling one cell of each
 {
-    if (!world.in(x, y)) return true;
-    CellMaterial m = world.cells[(size_t)y * world.w + x].material;
+    if (!world.inU(x, y)) return true;
+    CellMaterial m = world.get(x * world.scale, y * world.scale).material;
     Kind k = props(m).kind;
     return (k == Kind::Solid || k == Kind::Powder) && m != CellMaterial::Glass && m != CellMaterial::Ice;
 }
@@ -136,17 +138,24 @@ static void buildLight(int cx, int cy)
     if (outdoors)
     {
         ltop.assign(lw, 0);
+        lwet.assign(lw, 1 << 30);
         for (int i = 0; i < lw; i++)
         {
             int x = lox + i * LS + LS / 2, y = 0;
-            while (y < world.h && !opaque(x, y)) y++;
+            while (y < world.hU() && !opaque(x, y))
+            {
+                if (lwet[i] > y && props(world.get(x * world.scale, y * world.scale).material).kind == Kind::Liquid) lwet[i] = y;
+                if (y - lwet[i] > 260) break; // the moonlight is gone by here: no need to sound the rest of the deep
+                y++;
+            }
             ltop[i] = y;
         }
         for (int j = 0; j < lh; j++)
             for (int i = 0; i < lw; i++)
             {
                 int y = loy + j * LS + LS / 2;
-                lsky[(size_t)j * lw + i] = y < ltop[i] ? 1.0f : std::max(0.0f, 1 - (y - ltop[i]) / 12.0f);
+                float sea = std::max(0.0f, 1 - std::max(0, std::min(y, ltop[i]) - lwet[i]) / 260.0f); // deep water swallows the moonlight
+                lsky[(size_t)j * lw + i] = sea * (y < ltop[i] ? 1.0f : std::max(0.0f, 1 - (y - ltop[i]) / 12.0f));
             }
         boxBlur(lsky, lw, lh, 4, 2); // soft edges: light spills a little way into doorways and overhangs
     }
@@ -160,15 +169,12 @@ static void buildLight(int cx, int cy)
         for (int i = 0; i < lw * LS; i++)
         {
             int x = lox + i, y = loy + j;
-            if (!world.in(x, y)) continue;
-            const Cell& c = world.cells[(size_t)y * world.w + x];
-            float r = 0, g = 0, b = 0;
-            if (c.material == CellMaterial::Fire || (c.flags & CF_BURNING)) r = 1.0f, g = 0.55f, b = 0.2f;
-            else if (c.material == CellMaterial::Lava) r = 1.0f, g = 0.42f, b = 0.12f;
-            else if (c.material == CellMaterial::Acid) r = 0.12f, g = 0.3f, b = 0.06f;
-            else continue;
+            if (!world.inU(x, y)) continue;
+            const Cell& c = world.get(x * world.scale, y * world.scale);
+            Color gl = (c.flags & CF_BURNING) ? props(CellMaterial::Fire).glow : props(c.material).glow; // burning things glow like fire
+            if (!gl.a) continue;
             size_t q = (size_t)(j / LS) * lw + i / LS;
-            er[q] += r; eg[q] += g; eb[q] += b;
+            er[q] += gl.r / 255.0f; eg[q] += gl.g / 255.0f; eb[q] += gl.b / 255.0f;
             anyEmit = true;
         }
     if (anyEmit)
@@ -182,20 +188,25 @@ static void buildLight(int cx, int cy)
     {
         float fl = 0.88f + 0.12f * hash2((int)it.x, G.frame / 4, 9);
         if (it.type == IT_TORCH) pointLight(it.x, it.y - 15, 90, warm, fl);
+        else if (it.type == IT_LANTERN && !it.used) { Vector2 lp = lanternPos(it); pointLight(lp.x, lp.y + 4, 72, warm, fl); }
         else if (it.type == IT_SHRINE && !it.used) pointLight(it.x, it.y - 34, 56, {200, 190, 255, 255}, 0.7f);
         else if (it.type == IT_STONE && !it.used) pointLight(it.x, it.y - 16, 44, G.stoneLoot[it.data].glow, 0.7f);
     }
-    for (auto& l : G.lamps) pointLight(l.x, l.y, l.r, l.c, l.flame ? 0.88f + 0.12f * hash2((int)l.x, G.frame / 4, 9) : 0.85f);
+    for (auto& l : G.lamps) if (!l.smoke) pointLight(l.x, l.y, l.r, l.c, l.flame ? 0.88f + 0.12f * hash2((int)l.x, G.frame / 4, 9) : 0.85f);
     for (auto& p : G.projs)
         if (p.kind == PK_SPELL && p.spell != SP_DIG && p.spell != SP_BOMB) pointLight(p.x, p.y, 34, p.col, 0.9f);
+    if (G.p.m.alive && G.p.hasWisp) pointLight(G.p.wx, G.p.wy, 150, {255, 238, 200, 255}, 0.8f); // Baldr's Offering
     if (G.p.m.alive) pointLight(G.p.m.cx(), G.p.m.cy() - 4, 64, {255, 236, 210, 255}, 0.5f); // enough to see your own feet
+    for (auto& m : G.mobs) // anything on fire lights its surroundings
+        if (m.burn > 0) pointLight(m.cx(), m.cy() - 4, 48, {255, 140, 50, 255}, 0.8f);
+    if (G.p.m.alive && G.p.m.burn > 0) pointLight(G.p.m.cx(), G.p.m.cy() - 4, 70, {255, 140, 50, 255}, 0.95f);
 
     const float moon[3] = {0.66f, 0.72f, 0.92f};
     for (size_t q = 0; q < n; q++)
     {
         int wx = lox + (int)(q % lw) * LS, wy = loy + (int)(q / lw) * LS;
-        if (world.in(wx, wy) && world.sky[(size_t)wy * world.w + wx]) { lpix[q] = WHITE; continue; } // the night sky keeps its own colours
-        float e = 2.2f, s = lsky[q];
+        if (world.inU(wx, wy) && world.skyOf(wx * world.scale, wy * world.scale)) { lpix[q] = WHITE; continue; } // the night sky keeps its own colours
+        float e = 2.2f, s = lsky[q] * (1 - 0.6f * world.storm) + lsky[q] * world.flash * 1.4f;
         float r = amb[0] + s * moon[0] + lr[q] + std::min(1.0f, er[q] * e);
         float g = amb[1] + s * moon[1] + lg[q] + std::min(0.7f, eg[q] * e);
         float b = amb[2] + s * moon[2] + lb[q] + std::min(0.4f, eb[q] * e);
@@ -207,23 +218,27 @@ static void buildLight(int cx, int cy)
 static void renderScene()
 {
     int cx = G.rcx, cy = G.rcy;
-    renderWorld(pix.data(), cx, cy, G.vw, G.vh);
+    renderWorld(pix.data(), cx * SUB, cy * SUB, G.vw * SUB, G.vh * SUB);
     UpdateTexture(worldTex, pix.data());
     buildLight(cx, cy);
+    prepareStallArt();
     BeginTextureMode(rt);
     ClearBackground(BLACK);
     DrawTexture(worldTex, 0, 0, WHITE);
+    rlPushMatrix();
+    rlScalef(SUB, SUB, 1); // entities draw in world units as before
     drawEntities(cx, cy);
     BeginBlendMode(BLEND_MULTIPLIED);
     DrawTexturePro(lightTex, {0, 0, (float)lw, (float)lh}, {(float)(lox - cx), (float)(loy - cy), (float)lw * LS, (float)lh * LS}, {0, 0}, 0, WHITE);
     EndBlendMode();
+    rlPopMatrix();
     EndTextureMode();
     float shake = G.shake * (G.reduceShake ? 0.2f : 1.0f);
     float sx = shake > 0.5f ? frange(-shake, shake) : 0;
     float sy = shake > 0.5f ? frange(-shake, shake) : 0;
     rlDrawRenderBatchActive();
     rlDisableColorBlend(); // copy the scene as-is; its alpha channel is meaningless after in-texture blending
-    DrawTexturePro(rt.texture, {0, 0, (float)G.vw, -(float)G.vh},
+    DrawTexturePro(rt.texture, {0, 0, (float)G.vw * SUB, -(float)G.vh * SUB},
                    {sx, sy, (float)G.vw * G.scale, (float)G.vh * G.scale}, {0, 0}, 0, WHITE);
     rlDrawRenderBatchActive();
     rlEnableColorBlend();
@@ -278,11 +293,143 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--selftest")
     {
         castSelfTest();
+        collapseSelfTest();
+        materialSelfTest();
         return 0;
     }
     if (argc > 2 && std::string(argv[1]) == "--dump")
     {
         dumpStages(argv[2]);
+        return 0;
+    }
+
+    if (argc > 2 && std::string(argv[1]) == "--shot") // dev: lit screenshots of Hearthwick's stalls, <dir>/stall0..2.png
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "shot");
+        setupView();
+        newGameKit(false);
+        generateVillage();
+        G.state = GS_PLAY;
+        { // a line-up of the detailed enemies beside the player, for shot.png
+            float fx = G.p.m.cx() + 30, fy = G.p.m.y + G.p.m.h;
+            int types[] = {E_GUARD, E_GUARD, E_GUARD, E_KNIGHT, E_KNIGHT, E_BLACKKNIGHT};
+            for (int k = 0; k < 6; k++)
+            {
+                Mob e = makeEnemy(types[k], fx + k * 22 + (k == 5 ? 10 : 0), fy);
+                e.id = k % 3; e.facing = -1; e.anim = 0;
+                if (types[k] == E_KNIGHT) e.id = k - 3;
+                G.mobs.push_back(e);
+            }
+            G.camX = G.p.m.cx() - 40; G.camY = fy - G.vh * 0.7f;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ExportImage(img, (std::string(argv[2]) + "/lineup.png").c_str());
+            UnloadImage(img);
+            G.mobs.clear();
+        }
+        { // combat.png: each weapon wound up, landing and following through; icons.png; pickups.png
+            Player& P = G.p;
+            int types[] = {W_DAGGER, W_SWORD, W_SPEAR, W_AXE, W_MACE, W_PAN, W_CROSSBOW, W_STAFF};
+            const int CW = 120, CH = 84;
+            Image sheet = GenImageColor(CW * 3, CH * 8, BLACK);
+            auto grab = [&](int col, int row) {
+                G.camX = P.m.cx() - G.vw / 2.0f; G.camY = P.m.cy() - G.vh / 2.0f;
+                syncRenderCamera();
+                BeginDrawing(); renderScene(); EndDrawing();
+                Image img = LoadImageFromTexture(rt.texture);
+                ImageFlipVertical(&img);
+                int px = (int)(P.m.cx() - G.rcx) * 2, py = (int)(P.m.cy() - G.rcy) * 2;
+                ImageDraw(&sheet, img, {(float)px - CW / 2 + 10, (float)py - CH / 2 - 6, (float)CW, (float)CH}, {(float)col * CW, (float)row * CH, (float)CW, (float)CH}, WHITE);
+                UnloadImage(img);
+            };
+            P.m.facing = 1; P.aim = -0.15f; P.combatT = 100;
+            for (int r = 0; r < 8; r++)
+            {
+                Weapon w; w.type = types[r]; w.metal = M_IRON;
+                if (w.type == W_STAFF) w.staff.gem = SKYBLUE;
+                P.hotbar = {w}; P.sel = 0;
+                for (int c = 0; c < 3; c++)
+                {
+                    P.swingT = 0;
+                    if (isMelee(w.type))
+                    {
+                        P.comboT = 0; P.combo = 2; // so this is the chain's first blow
+                        startAttack(w);
+                        int at = c == 0 ? P.atkHitAt / 2 : (c == 1 ? P.atkHitAt : P.atkHitAt + 3);
+                        P.swingT = P.atkLen - at;
+                    }
+                    else P.recoil = c == 1 ? 6 : 0;
+                    grab(c, r);
+                }
+            }
+            P.swingT = 0;
+            ExportImage(sheet, (std::string(argv[2]) + "/combat.png").c_str());
+            UnloadImage(sheet);
+            RenderTexture2D icons = LoadRenderTexture(8 * 64, 64);
+            BeginTextureMode(icons);
+            ClearBackground({28, 26, 38, 255});
+            for (int i = 0; i < 8; i++)
+            {
+                Weapon w; w.type = types[i]; w.metal = i % 2 ? M_STEEL : M_COPPER;
+                if (w.type == W_STAFF) w.staff.gem = SKYBLUE;
+                drawItemIcon(w, i * 64 + 6.0f, 6, 52);
+            }
+            EndTextureMode();
+            Image ic = LoadImageFromTexture(icons.texture);
+            ImageFlipVertical(&ic);
+            ExportImage(ic, (std::string(argv[2]) + "/icons.png").c_str());
+            UnloadImage(ic);
+            for (int i = 0; i < 8; i++)
+            {
+                Weapon w; w.type = types[i]; w.metal = i % 2 ? M_STEEL : M_FIRESTONE;
+                if (w.type == W_STAFF) w.staff.gem = SKYBLUE;
+                addPickupWeapon(P.m.cx() + 14 + i * 14, P.m.y + P.m.h - 10, w);
+            }
+            for (int k = 0; k < 90; k++) updateGame(); // let them land
+            P.hotbar.clear();
+            G.camX = P.m.cx() - 20; G.camY = P.m.cy() - G.vh / 2.0f;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image pk = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&pk);
+            ImageCrop(&pk, {(float)(P.m.cx() - G.rcx) * 2 - 20, (float)(P.m.cy() - G.rcy) * 2 - 40, 300, 80});
+            ExportImage(pk, (std::string(argv[2]) + "/pickups.png").c_str());
+            UnloadImage(pk);
+            G.pickups.clear();
+        }
+        { // cave.png: a stretch of the Greenmarch caves, lit
+            startRun();
+            float px = G.p.m.x, py = G.p.m.y;
+            for (int i = 0; i < 30; i++) updateGame();
+            G.camX = px + 900; G.camY = py + 120;
+            syncRenderCamera();
+            G.rcx = (int)G.camX; G.rcy = (int)G.camY;
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ExportImage(img, (std::string(argv[2]) + "/cave.png").c_str());
+            UnloadImage(img);
+            generateVillage();
+        }
+        for (auto& it : G.inter)
+        {
+            if (it.type != IT_SHOP) continue;
+            G.camX = it.x - G.vw / 2.0f;
+            G.camY = it.y - G.vh * 0.62f;
+            syncRenderCamera();
+            BeginDrawing();
+            renderScene();
+            EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ExportImage(img, (std::string(argv[2]) + "/stall" + std::to_string(it.data) + ".png").c_str());
+            UnloadImage(img);
+            std::printf("stall%d at %d,%d\n", it.data, (int)it.x - G.rcx, (int)it.y - G.rcy);
+        }
+        CloseWindow();
         return 0;
     }
 
@@ -300,6 +447,7 @@ int main(int argc, char** argv)
 
     while (!WindowShouldClose() && !quit)
     {
+        if (IsKeyPressed(KEY_F11)) ToggleBorderlessWindowed();
         setupView();
         updateAudio(G.state != GS_TITLE && G.state != GS_LOADING);
         if (G.state != lastState) { lastState = G.state; stateAge = 0; }
@@ -326,7 +474,6 @@ int main(int argc, char** argv)
             }
             break;
         case GS_ANVIL:
-        case GS_SHRINE:
         case GS_SHOP:
             if (stateAge > 3 && (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_TAB))) G.state = GS_PLAY;
             break;
@@ -373,7 +520,6 @@ int main(int argc, char** argv)
             {
             case GS_INVENTORY: updateDrawInventory(); break;
             case GS_ANVIL: updateDrawAnvil(); break;
-            case GS_SHRINE: updateDrawShrine(); break;
             case GS_SHOP: updateDrawShop(); break;
             case GS_PAUSE:
             {

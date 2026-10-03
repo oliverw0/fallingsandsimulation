@@ -215,6 +215,7 @@ static const char* IC_SKULL[] = {"..wwwww..", ".wwwwwww.", "wwkkwkkww", "wwkkwkk
 static const char* IC_FLASK[] = {"...nn....", "...ww....", "...ww....", "..wrrw...", ".wrrrrw..", ".rrwrrr..", ".rrrrrr..", "..rrrr..."};
 static const char* IC_COIN[] = {"..yyyy..", ".yywwyy.", "yywyyyyo", "yywyyyyo", "yyyyyyyo", "yyyyyyoo", ".yyyyoo.", "..oooo.."};
 static const char* IC_HOOK[] = {"....nn...", "...n..n..", "...n..n..", "....nn...", ".....n...", ".....n...", "n....n...", "nn..nn...", ".nnnn...."};
+static const char* IC_WISP[] = {"...y....", "..yww...", ".ywwwy..", ".ywwwy..", "..ywy...", "...yo...", "..o.o...", "...o...."};
 static const char* IC_SHIELD[] = {"aaaaaaaa", "awaaaaaA", "awaaaaaA", "aaaaaaaA", "AaaaaaAA", ".AaaaAA.", "..AaAA..", "...AA..."};
 
 void drawResIcon(int r, float x, float y, float size)
@@ -286,6 +287,12 @@ void drawItemIcon(const Weapon& w, float x, float y, float size)
         EndBlendMode();
     }
     if (w.type == W_PAN) mc = {96, 96, 104, 255};
+    if (w.type != W_ARMOUR) // the weapon's own sprite, laid corner to corner
+    {
+        float L = weaponLength(w) * 2 + 6;
+        drawWeaponSprite(w, {x + size / 2, y + size / 2}, -PI / 4, size * 1.2f / L, true);
+        return;
+    }
     switch (w.type)
     {
     case W_SPEAR: drawIcon10(ICON_SPEAR, x, y, size, mc, WHITE); break;
@@ -422,6 +429,7 @@ void drawHUD()
     y += 28 * u;
     pixelIcon(IC_BOOT, 8, x, y, is * 0.9f, WHITE);
     bar(x + is + 8 * u, y + 6 * u, bw, 8 * u, P.stamina / 100, {232, 202, 74, 255}, {44, 38, 12, 220});
+    if (P.breath < 100) bar(x + is + 8 * u, y + 17 * u, bw, 6 * u, P.breath / 100, P.breath < 30 && G.frame / 8 % 2 ? Color{240, 90, 80, 255} : Color{150, 210, 250, 255}, {14, 30, 46, 220}); // air
 
     float cx = x, cy = y + 30 * u;
     auto chip = [&](const char* label, Color c) {
@@ -431,7 +439,22 @@ void drawHUD()
         text(label, cx + 7 * u, cy + 3 * u, 14 * u, INK, 1);
         cx += w + 6 * u;
     };
-    if (pm.burn > 0) chip("Burning", ELEMENT_COLORS[EL_FIRE]);
+    if (pm.burn > 0) // on fire: a pulsing warning and the edges of the screen ablaze
+    {
+        float p = 0.5f + 0.5f * std::sin(G.frame * 0.35f);
+        int e = (int)(sh * 0.16f);
+        Color hot = {255, (unsigned char)(90 + 60 * p), 20, (unsigned char)(70 + 60 * p)}, none = {255, 90, 20, 0};
+        BeginBlendMode(BLEND_ADDITIVE);
+        DrawRectangleGradientV(0, sh - e, sw, e, none, hot);
+        DrawRectangleGradientV(0, 0, sw, e / 2, hot, none);
+        DrawRectangleGradientH(0, 0, e / 2, sh, hot, none);
+        DrawRectangleGradientH(sw - e / 2, 0, e / 2, sh, none, hot);
+        EndBlendMode();
+        chip(G.frame % 30 < 15 ? "ON FIRE - find water!" : "ON FIRE", {255, (unsigned char)(120 + 100 * p), 40, 255});
+    }
+    if (pm.wet > 0) chip("Soaked - won't burn, conducts", {90, 150, 230, 255});
+    if (pm.oily > 0) chip("Oiled - burns hotter", {150, 110, 50, 255});
+    if (pm.bloody > 0) chip("Bloodied", {190, 30, 36, 255});
     if (pm.poison > 0) chip("Poisoned", ELEMENT_COLORS[EL_POISON]);
     if (pm.chill > 0) chip("Chilled", ELEMENT_COLORS[EL_ICE]);
     if (pm.shock > 0) chip("Shocked", ELEMENT_COLORS[EL_SHOCK]);
@@ -453,6 +476,27 @@ void drawHUD()
     rightStat(IC_FLASK, 8, RED, std::to_string(P.potions) + " flasks  (Q)");
     rightStat(IC_SHIELD, 8, P.armour < 0 ? Color{168, 140, 104, 255} : METALS[P.armour].color,
               std::string(P.armour < 0 ? "Gambeson" : METALS[P.armour].name) + "  " + std::to_string((int)(armourDef(P.armour) * 100)) + "%");
+    if (P.amulet >= 0) // the amulet worn, on its cord
+    {
+        std::string s = AMULETS[P.amulet].name;
+        float w = uiTextWidth(s, rs * 0.82f, 1), px = rs * 1.4f / 20;
+        drawAmulet(P.amulet, rx - w - rs - 6 - 2 * px, ry - rs * 0.2f, px);
+        text(s, rx - w, ry + rs * 0.05f, rs * 0.82f, AMULETS[P.amulet].col, 1);
+        ry += rs + 10 * u;
+    }
+    if (P.amulet == AM_VEGVISIR && !G.inVillage && !G.sandbox) // the wayfinder's rune points on
+        for (auto& h : G.havens)
+        {
+            if (h.sealed || h.x0 < pm.cx()) continue;
+            float px0 = (pm.cx() - G.rcx) * G.scale, py0 = (pm.cy() - G.rcy) * G.scale;
+            float a = std::atan2(h.floor - 20 - pm.cy(), h.x0 + 110 - pm.cx()), R = 54 * u, s = 9 * u;
+            Vector2 tip = {px0 + std::cos(a) * R, py0 + std::sin(a) * R};
+            Vector2 l = {tip.x - std::cos(a) * s * 2 + std::sin(a) * s, tip.y - std::sin(a) * s * 2 - std::cos(a) * s};
+            Vector2 r = {tip.x - std::cos(a) * s * 2 - std::sin(a) * s, tip.y - std::sin(a) * s * 2 + std::cos(a) * s};
+            float pulse = 0.6f + 0.4f * std::sin(G.frame * 0.1f);
+            DrawTriangle(tip, r, l, {150, 190, 255, (unsigned char)(200 * pulse)});
+            break;
+        }
     ry += 4 * u;
     for (int r = 0; r < RES_COUNT; r++)
     {
@@ -532,8 +576,8 @@ void drawHUD()
             {"A / D", "Move"}, {"W / Space", "Jump  (W swims)"}, {"Hold toward wall + W", "Climb (uses stamina)"}, {"Space on a wall", "Wall-jump"},
             {"Shift", "Dodge roll"}, {"Left mouse", "Attack / cast"}, {"Hold right mouse", "Grappling hook  (W / S reel)"},
             {"1 - 6 / wheel", "Switch item"}, {"Q", "Drink a flask"}, {"G", "Drop held item"}, {"F", "Interact"},
-            {"Tab", "Inventory & staff editing"}, {"Esc", "Pause & settings"}, {"F1", "Toggle this panel"}};
-        int n = 14;
+            {"Tab", "Inventory & staff editing"}, {"Esc", "Pause & settings"}, {"F1", "Toggle this panel"}, {"F11", "Fullscreen"}};
+        int n = 15;
         float pw = 540 * u, ph = (n * 30 + 70) * u;
         Rectangle pr = {sw / 2.0f - pw / 2, sh / 2.0f - ph / 2, pw, ph};
         panel(pr);
@@ -943,83 +987,6 @@ void updateDrawAnvil()
 
 // The shrine's three gifts: one for the weapon in hand, one for you, one for your staff. Taking one
 // opens the haven's far gate.
-void updateDrawShrine()
-{
-    float u = U();
-    int sw = GetScreenWidth(), sh = GetScreenHeight();
-    DrawRectangle(0, 0, sw, sh, {0, 0, 0, 160});
-    textC("The shrine offers a single gift", sw / 2.0f, sh / 2.0f - 220 * u, 32 * u, C_GOLD, 2);
-    static const char* kinds[3] = {"For your weapon", "For you", "A spell"};
-    float cw = 270 * u, chh = 320 * u, gap = 30 * u;
-    float x0 = sw / 2.0f - (3 * cw + 2 * gap) / 2;
-    for (int i = 0; i < 3; i++)
-    {
-        const Boon& b = G.shrineOffer[i];
-        Color col = b.kind == BOON_SPELL ? SPELLS[b.id].col : (b.kind == BOON_PERK ? PERKS[b.id].col : Color{214, 190, 120, 255});
-        Rectangle r = {x0 + i * (cw + gap), sh / 2.0f - 160 * u, cw, chh};
-        panel(r);
-        if (hovered(r)) DrawRectangleRoundedLinesEx(r, 0.04f, 6, 3, col);
-        textC(kinds[b.kind], r.x + cw / 2, r.y + 12 * u, 15 * u, DIM, 1);
-        float ix = r.x + cw / 2 - 44 * u, iy = r.y + 36 * u, is = 88 * u;
-        if (b.kind == BOON_SPELL) drawSpellIcon(b.id, ix, iy, is, false, makeCard(b.id).uses);
-        else if (b.kind == BOON_WEAPON && !G.p.hotbar.empty()) drawItemIcon(G.p.hotbar[G.p.sel], ix, iy, is);
-        else // a rune-stone glyph for the perks
-        {
-            DrawRectangleRounded({ix + is * 0.2f, iy, is * 0.6f, is}, 0.4f, 6, {58, 56, 64, 255});
-            float cx = ix + is / 2, t = 5 * u;
-            DrawLineEx({cx, iy + is * 0.15f}, {cx, iy + is * 0.85f}, t, col);
-            DrawLineEx({cx, iy + is * 0.45f}, {cx - is * 0.18f, iy + is * 0.25f}, t, col);
-            DrawLineEx({cx, iy + is * 0.45f}, {cx + is * 0.18f, iy + is * 0.25f}, t, col);
-        }
-        textC(boonTitle(b), r.x + cw / 2, r.y + 138 * u, 22 * u, col, 2);
-        std::string desc = boonDesc(b), line;
-        float ty = r.y + 176 * u;
-        size_t pos = 0;
-        while (pos < desc.size())
-        {
-            size_t sp = desc.find(' ', pos);
-            std::string word = desc.substr(pos, sp == std::string::npos ? std::string::npos : sp - pos);
-            std::string trial = line.empty() ? word : line + " " + word;
-            if (uiTextWidth(trial, 16 * u, 0) > cw - 28 * u)
-            {
-                textC(line, r.x + cw / 2, ty, 16 * u, INK);
-                ty += 21 * u;
-                line = word;
-            }
-            else
-                line = trial;
-            if (sp == std::string::npos) break;
-            pos = sp + 1;
-        }
-        if (!line.empty()) textC(line, r.x + cw / 2, ty, 16 * u, INK);
-        if (b.kind == BOON_SPELL)
-        {
-            const SpellDef& d = SPELLS[b.id];
-            textC("Mana " + std::to_string(d.mana) + (d.uses ? "    " + std::to_string(d.uses) + " charges" : ""), r.x + cw / 2, r.y + chh - 40 * u, 16 * u, {120, 170, 255, 255}, 1);
-        }
-        if (clicked(r))
-        {
-            std::string title = boonTitle(b); // named before it's granted (a rune already carved reads as a whetstone)
-            grantBoon(b);
-            playSfx(SFX_PICKUP, 0.8f, 0.7f);
-            if (G.shrineAt >= 0 && G.shrineAt < (int)G.inter.size())
-            {
-                Interact& sh = G.inter[G.shrineAt];
-                sh.used = true;
-                for (auto& h : G.havens) // the haven's far gate grinds open
-                    if (sh.x > h.x0 && sh.x < h.x1)
-                    {
-                        setGate(h.x1 - HAVEN_WALL + 1, h.x1, h.floor - HAVEN_DOOR, h.floor - 1, false);
-                        playSfx(SFX_PORTAL, 0.7f, 0.6f);
-                    }
-            }
-            message("The shrine grants you " + title + (b.kind == BOON_SPELL ? ". (Tab to equip)" : ".") + " The far gate grinds open.");
-            G.state = GS_PLAY;
-        }
-    }
-    textC("Esc to decide later  (the way on stays shut until you choose)", sw / 2.0f, sh / 2.0f + 180 * u, 16 * u, DIM);
-}
-
 // ---------------------------------------------------------------- village shops
 
 void updateDrawShop()
@@ -1033,7 +1000,9 @@ void updateDrawShop()
     std::string bank = std::to_string(META.bank) + " coins banked";
     pixelIcon(IC_COIN, 8, pn.x + pn.width - 50 * u - uiTextWidth(bank, 18 * u, 1), pn.y + 22 * u, 22 * u, WHITE);
     text(bank, pn.x + pn.width - 24 * u - uiTextWidth(bank, 18 * u, 1), pn.y + 22 * u, 18 * u, C_GOLD, 1);
-    text("Buy once to unlock forever. Equipped items join every new run.", pn.x + 24 * u, pn.y + 56 * u, 15 * u, DIM);
+    text(G.shopId == 2 ? "Gear bought here is yours for good. Equipped gear joins every run."
+                       : "What you buy here goes with you on the next run only. Click a readied item to sell it back.",
+         pn.x + 24 * u, pn.y + 56 * u, 15 * u, DIM);
 
     float y = pn.y + 90 * u, rowH = 66 * u;
     for (int i = 0; i < UNLOCK_COUNT; i++)
@@ -1041,7 +1010,8 @@ void updateDrawShop()
         const Unlock& un = UNLOCKS[i];
         if (un.shop != G.shopId) continue;
         Rectangle row = {pn.x + 20 * u, y, pn.width - 40 * u, rowH - 8 * u};
-        bool owned = META.owned[i], eq = META.equipped[i];
+        bool kit = isKitKind(un.kind), ready = META.stocked[i];
+        bool owned = META.owned[i] || ready, eq = META.equipped[i] || ready;
         DrawRectangleRounded(row, 0.15f, 4, hovered(row) ? Color{44, 40, 58, 255} : Color{28, 26, 38, 255});
         if (eq) DrawRectangleRoundedLinesEx(row, 0.15f, 4, 2, {140, 220, 120, 255});
         float ix = row.x + 10 * u, iy = row.y + 6 * u, is = rowH - 20 * u;
@@ -1053,6 +1023,7 @@ void updateDrawShop()
         case UK_HOOK: pixelIcon(IC_HOOK, 9, ix, iy, is, WHITE); break;
         case UK_ARMOUR: { Weapon w; w.type = W_ARMOUR; w.metal = un.a; drawItemIcon(w, ix, iy, is); break; }
         case UK_FLASK: pixelIcon(IC_FLASK, 8, ix, iy, is, RED); break;
+        case UK_WISP: pixelIcon(IC_WISP, 8, ix, iy, is, WHITE); break;
         }
         text(un.name, row.x + rowH + 4 * u, row.y + 8 * u, 19 * u, INK, 1);
         text(un.desc, row.x + rowH + 4 * u, row.y + 32 * u, 15 * u, DIM);
@@ -1060,15 +1031,15 @@ void updateDrawShop()
         bool can = !owned && META.bank >= un.price;
         Color bc = owned ? (eq ? Color{60, 110, 60, 255} : Color{60, 56, 80, 255}) : (can ? Color{120, 90, 40, 255} : Color{50, 40, 40, 255});
         DrawRectangleRounded(btn, 0.3f, 4, hovered(btn) ? brighten(bc, 25) : bc);
-        std::string label = owned ? (eq ? "Equipped" : "Equip") : "Buy  " + std::to_string(un.price);
+        std::string label = ready ? (hovered(btn) ? "Sell back" : "Readied") : owned ? (eq ? "Equipped" : "Equip") : "Buy  " + std::to_string(un.price);
         textC(label, btn.x + btn.width / 2, btn.y + btn.height / 2 - 10 * u, 18 * u, owned || can ? INK : DIM, 1);
         if (!owned) pixelIcon(IC_COIN, 8, btn.x + 10 * u, btn.y + btn.height / 2 - 9 * u, 18 * u, WHITE);
         if (clicked(btn))
         {
-            if (!owned)
+            if (ready) { sellBack(i); playSfx(SFX_CLICK, 0.6f, 0.8f); message(std::string("Sold back: ") + un.name); }
+            else if (!owned)
             {
-                if (buyUnlock(i)) { playSfx(SFX_CRAFT, 0.7f, 1.2f); message(std::string("Unlocked: ") + un.name); }
-                else message("Not enough coins - delve deeper and bring more back.");
+                if (buyUnlock(i)) { playSfx(SFX_CRAFT, 0.7f, 1.2f); message(std::string(kit ? "Readied for the next run: " : "Unlocked: ") + un.name); }
             }
             else
             {
@@ -1081,7 +1052,7 @@ void updateDrawShop()
 
     std::string kit = "Next run: Frying Pan";
     for (int i = 0; i < UNLOCK_COUNT; i++)
-        if (META.owned[i] && META.equipped[i]) kit += std::string(", ") + UNLOCKS[i].name;
+        if (META.stocked[i] || (META.owned[i] && META.equipped[i])) kit += std::string(", ") + UNLOCKS[i].name;
     text(kit, pn.x + 24 * u, pn.y + pn.height - 62 * u, 16 * u, INK, 1);
-    textC("One weapon, one staff and two spells may be equipped.   Esc to leave.", pn.x + pn.width / 2, pn.y + pn.height - 32 * u, 15 * u, DIM);
+    textC("One weapon, one staff and two spells per run.   Esc to leave.", pn.x + pn.width / 2, pn.y + pn.height - 32 * u, 15 * u, DIM);
 }

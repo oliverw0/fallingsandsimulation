@@ -22,6 +22,7 @@ const Unlock UNLOCKS[] = {
     {"Grappling Hook", 2, 100, UK_HOOK, 0, 0, "Hold right mouse to swing across chasms."},
     {"Copper Armour", 2, 120, UK_ARMOUR, M_COPPER, 0, "Begin each run in copper mail."},
     {"Spare Flask", 2, 60, UK_FLASK, 0, 0, "Begin each run with an extra healing flask."},
+    {"Baldr's Offering", 2, 90, UK_WISP, 0, 0, "A light spirit drifts at your shoulder, lighting the dark."},
 };
 const int UNLOCK_COUNT = (int)(sizeof(UNLOCKS) / sizeof(UNLOCKS[0]));
 const char* SHOP_NAMES[3] = {"Weaponsmith", "Arcanist", "Outfitter"};
@@ -42,7 +43,19 @@ void loadMeta()
         else if (key == "deepest") META.deepest = v;
         else if (key == "owned" && v >= 0 && v < UNLOCK_COUNT) META.owned[v] = true;
         else if (key == "equip" && v >= 0 && v < UNLOCK_COUNT) META.equipped[v] = true;
+        else if (key == "stock" && v >= 0 && v < UNLOCK_COUNT) META.stocked[v] = true;
     }
+    // Saves from before weapons and spells were per-run: they're refunded, so every run starts with the pan
+    // and whatever you buy for it. Happens once; the old `owned` lines aren't written back.
+    bool migrated = false;
+    for (int i = 0; i < UNLOCK_COUNT; i++)
+    {
+        if (!isKitKind(UNLOCKS[i].kind) || !META.owned[i]) continue;
+        META.bank += UNLOCKS[i].price;
+        META.owned[i] = META.equipped[i] = false;
+        migrated = true;
+    }
+    if (migrated) saveMeta();
 }
 
 void saveMeta()
@@ -53,6 +66,7 @@ void saveMeta()
     {
         if (META.owned[i]) f << "owned " << i << "\n";
         if (META.equipped[i]) f << "equip " << i << "\n";
+        if (META.stocked[i]) f << "stock " << i << "\n";
     }
 }
 
@@ -78,13 +92,45 @@ void toggleEquip(int i)
 
 bool buyUnlock(int i)
 {
-    if (META.owned[i] || META.bank < UNLOCKS[i].price) return false;
-    META.bank -= UNLOCKS[i].price;
+    const Unlock& u = UNLOCKS[i];
+    if (META.owned[i] || META.stocked[i]) return false;
+    if (META.bank < u.price) { message("Not enough coins - delve deeper and bring more back."); return false; }
+    if (isKitKind(u.kind)) // for the next run only, within the loadout's limits
+    {
+        int n = 0;
+        for (int k = 0; k < UNLOCK_COUNT; k++) n += META.stocked[k] && UNLOCKS[k].kind == u.kind;
+        if (n >= (u.kind == UK_SPELL ? 2 : 1))
+        {
+            message(u.kind == UK_SPELL ? "You can only carry two starting spells. Sell one back first."
+                                       : u.kind == UK_STAFF ? "You already have a staff for the next run. Sell it back first."
+                                                            : "You already have a weapon for the next run. Sell it back first.");
+            return false;
+        }
+        META.bank -= u.price;
+        META.stocked[i] = true;
+        saveMeta();
+        return true;
+    }
+    META.bank -= u.price;
     META.owned[i] = true;
     META.equipped[i] = false;
     toggleEquip(i); // equip straight away where the loadout allows it
     saveMeta();
     return true;
+}
+
+void sellBack(int i)
+{
+    if (!META.stocked[i]) return;
+    META.stocked[i] = false;
+    META.bank += UNLOCKS[i].price;
+    saveMeta();
+}
+
+void spendKit()
+{
+    for (int i = 0; i < UNLOCK_COUNT; i++) META.stocked[i] = false;
+    saveMeta();
 }
 
 // Called once when a run ends (death or victory).
@@ -98,13 +144,14 @@ void bankRun()
     saveMeta();
 }
 
-// Build the run's starting kit from the equipped unlocks.
+// Build the run's starting kit: a frying pan, the readied weapons and spells, and the equipped gear.
 void applyLoadout()
 {
     Player& P = G.p;
     P.hotbar = {fryingPan()};
     P.bag.clear();
     P.hasHook = false;
+    P.hasWisp = false;
     P.armour = -1;
     P.potions = 1;
     Weapon staff;
@@ -112,7 +159,7 @@ void applyLoadout()
     std::vector<int> spells;
     for (int i = 0; i < UNLOCK_COUNT; i++)
     {
-        if (!META.owned[i] || !META.equipped[i]) continue;
+        if (!META.stocked[i] && !(META.owned[i] && META.equipped[i])) continue;
         const Unlock& u = UNLOCKS[i];
         switch (u.kind)
         {
@@ -131,6 +178,7 @@ void applyLoadout()
         case UK_HOOK: P.hasHook = true; break;
         case UK_ARMOUR: P.armour = u.a; break;
         case UK_FLASK: P.potions++; break;
+        case UK_WISP: P.hasWisp = true; break;
         }
     }
     for (size_t k = 0; k < spells.size(); k++)

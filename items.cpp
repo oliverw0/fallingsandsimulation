@@ -42,7 +42,7 @@ const SpellDef SPELLS[SPELL_COUNT] = {
     {"Ice Shard", "IS", ST_PROJ, 20, 8, 0, 2, 10, 6.0f, 60, EL_ICE, 0.02f, 0, 0, 0, {160, 220, 255, 255}, "Chills foes and freezes water solid."},
     {"Lightning", "LB", ST_PROJ, 60, 25, 10, 0, 26, 14.0f, 30, EL_SHOCK, 0, 3, 0, 1, {240, 240, 130, 255}, "Near-instant bolt. Electrifies any water it strikes.", 8},
     {"Acid Orb", "AO", ST_PROJ, 30, 15, 0, 3, 6, 4.0f, 90, EL_POISON, 0.05f, 0, 0, 1, {130, 255, 80, 255}, "Bursts into a pool of corrosive acid.", 6},
-    {"Bomb", "BO", ST_PROJ, 30, 40, 0, 0, 40, 3.0f, 100, EL_FIRE, 0.15f, 14, 0, 0, {170, 170, 180, 255}, "A heavy bomb with a short fuse. Mines ore.", 3},
+    {"Bomb", "BO", ST_PROJ, 30, 40, 0, 0, 40, 3.0f, 180, EL_FIRE, 0.15f, 22, 0, 0, {170, 170, 180, 255}, "A heavy bomb on a long fuse. Blasts a crater and mines ore.", 3},
     {"Digging Bolt", "DG", ST_PROJ, 3, 2, 0, 1, 2, 6.0f, 12, EL_PHYS, 0, 0, 0, 0, {200, 170, 120, 255}, "Carves tunnels through soft rock."},
     {"Water Orb", "WO", ST_PROJ, 15, 10, 0, 2, 3, 4.5f, 80, EL_PHYS, 0.05f, 0, 0, 0, {60, 120, 230, 255}, "Summons a burst of water. Douses flames.", 10},
     {"Trigger Bolt", "TB", ST_PROJ, 10, 6, 0, 2, 6, 7.0f, 40, EL_PHYS, 0, 0, 0, 1, {255, 255, 160, 255}, "Spark bolt that casts the next spell where it hits.", 15},
@@ -301,7 +301,7 @@ Weapon fryingPan()
     return w;
 }
 
-float weaponDamage(const Weapon& w) { return WTYPES[w.type].dmg * METALS[w.metal].dmg * w.dmgMul * 0.85f * (1 + 0.15f * G.p.perks[PK_FURY]); } // steel trails magic a little
+float weaponDamage(const Weapon& w) { return WTYPES[w.type].dmg * METALS[w.metal].dmg * w.dmgMul * 0.85f * (G.p.amulet == AM_MJOLNIR ? 1.25f : 1.0f); } // steel trails magic a little
 int weaponCooldown(const Weapon& w) { return (int)(WTYPES[w.type].cooldown * ((w.fx & UF_QUICK) ? 0.6f : 1.0f)); }
 
 void recipeCost(int type, int metal, int out[RES_COUNT])
@@ -495,93 +495,94 @@ void castSelfTest()
     std::printf("cast self-test passed\n");
 }
 
-// ================================================================ shrine gifts
-
-const PerkDef PERKS[PERK_COUNT] = {
-    {"Troll's Blood", "+25 maximum health, and the wounds close at once", {200, 60, 60, 255}},
-    {"Sleipnir's Stride", "You move 12% faster", {120, 200, 255, 255}},
-    {"Bear Hide", "You take 10% less damage from everything", {170, 120, 70, 255}},
-    {"Berserker's Fury", "Your weapons hit 15% harder", {255, 120, 40, 255}},
-    {"Hugin's Breath", "Stamina comes back half again as fast", {180, 230, 160, 255}},
-    {"Mead of the Hall", "One more healing flask, filled", {230, 190, 80, 255}},
+// ================================================================ amulets
+// Pixel art, 16 wide: a cord looping down to a bail, and the charm hung from it (after the user's sketches).
+//  k/K cord   s/S/d silver   g/G/o gold   i/I iron   w/W wood   a/A stone   e/E green stone   b/B blue
+//  r/R ember  f/F frost   n/N dark bronze   v venom   l lightning   x engraving
+#define CORD "..k..........k..", "...k........k...", "....k......k....", ".....k....k.....", "......k..k......", ".......ss......."
+const AmuletDef AMULETS[AMULET_COUNT] = {
+    {"Mjolnir", "Thor's hammer: your blows land a quarter harder, and finishers call down lightning", {120, 200, 255, 255},
+     {CORD, ".......Go.......", ".......Go.......", "..l....Go....l..", "......GGgo......", ".GGGGGGgggggggo.", ".Gggggxxxxggggo.", ".Ggggxggggxgggo.",
+      ".Gggggxxxxggggo.", "..ggggggggggggo.", "..GGgo....GGgo..", ".GGgo......Ggoo.", ".Ggo........ggo.", "..l..........l..", "................"}},
+    {"Valknut", "Odin's knot: when you fall, Odin sends you back once - and the knot breaks", {200, 200, 214, 255},
+     {CORD, ".......SS.......", "......SddS......", ".....Sd..dS.....", "....SdSSSSdS....", "...SdSd..dSdS...", "..SdSd....dSdS..", ".SdSSSSSSSSSSdS.",
+      "SdS.Sd....dS.SdS", "SSSSSSSSSSSSSSSS", "dddddddddddddddd"}},
+    {"Aegishjalmr", "The Helm of Awe: foes quail, and their blows do you 30% less harm", {214, 170, 80, 255},
+     {CORD, ".......gg.......", ".....gggggg.....", "...ggxgxxgxgg...", "..ggxgggxgggxgg.", "..gxxgggxgggxxg.", ".ggggxxgxgxxgggo", ".gxxxxxxxxxxxxxo",
+      ".ggggxxgxgxxgggo", "..gxxgggxgggxxg.", "..ggxgggxgggxgg.", "...ggxgxxgxgg...", ".....gggggo.....", ".......oo......."}},
+    {"Vegvisir", "The wayfinder: a rune at your side always points on to the next waystone", {150, 190, 255, 255},
+     {CORD, ".......SS.......", ".....SSddSS.....", "....Sd.Sd.dS....", "...Sd.S.Sd.S.S..", "..Sd...SdS..dS..", "..SSSSSSbSSSSSS.", "..Sd...SdS..dS..",
+      "...Sd.S.Sd.S.S..", "....Sd.Sd.dS....", ".....SSddSS.....", ".......dd......."}},
+    {"Troll Cross", "Fire, frost, storm and venom do you half the harm, and trolls by you cannot heal", {150, 150, 160, 255},
+     {CORD, ".......II.......", ".....IIiiII.....", "....Ii....iI....", "...Ii......iI...", "...Ii......iI...", "...Ii......iI...", "....Ii....iI....",
+      ".....Ii..iI.....", "......IiiI......", ".....iI..Ii.....", "....iI....Ii....", "...ii......ii..."}},
+    {"Yggdrasil's Root", "+25 maximum health while you wear it, and your wounds slowly close", {90, 190, 120, 255},
+     {CORD, ".......ww.......", "......wWWw......", ".....wwWWww.....", "...ww.wWWw.ww...", "..w.wwaeeEaww.w.", "..wwaeEeewwaww..", ".w.waeewwEeeaw..",
+      "...aeEewEeeEea..", "..waeeEwweEewa.w", "...aEeeewEeeea..", "..w.aeeEwweea.w.", "....aaeewEaa....", ".....w.aa.w....."}},
+    {"Njordr's Pendant", "The sea-god's knot: you breathe under water", {90, 150, 240, 255},
+     {CORD, ".......SS.......", "....SSSddSSS....", "...Sd.SddS.dS...", "..Sd.Sd..dS.dS..", "..S.SdSbbSdS.S..", "..Sd.dSbbSd.dS..", "..SBBfBSSBfBBS..",
+      "..bBfBBbbBBfBb..", "...bbBBbbBBbb...", "....SdSddSdS....", ".....SdBBdS.....", ".......bb......."}},
+    {"Jormungandr's Coil", "The world serpent: your weapons poison what they strike", {120, 230, 80, 255},
+     {CORD, ".......nn.......", ".....nnNNnn.....", "....nN....Nn....", "...nN.NNNv.Nn...", "..nN.NnnNN..Nn..", "..nN..nNNnN.Nn..", "..nN.NNnn.N.Nn..",
+      "..nN.Nn.nNNnNn..", "...nN.NNnn.Nn...", "....nN..v.Nn....", ".....nnNNnn.....", ".......nn......."}},
+    {"Skadi's Snowflake", "The winter huntress: your weapons chill what they strike", {190, 230, 255, 255},
+     {CORD, ".......ff.......", "....f..FF..f....", ".....f.FF.f.....", "..f...fFFf...f..", "...ff..FF..ff...", ".....ffFFff.....", "FFFFFFFFFFFFFFFF",
+      ".....ffFFff.....", "...ff..FF..ff...", "..f...fFFf...f..", ".....f.FF.f.....", "....f..FF..f....", ".......ff......."}},
+    {"Brokkr's Anvil", "The dwarf smith's charm: your weapons bite rock one hardness harder", {240, 120, 50, 255},
+     {CORD, ".......ii.......", ".....rRRr.......", "....rRRRRr......", ".....rRRr.......", "IIIIIIIIIIIIi...", ".iIIIIIIIIIIii..", "..iiiiirRiiii...",
+      ".....iiiiii.....", "......iiii......", ".....iiiiii.....", "....iiiiiiii...."}},
 };
+#undef CORD
 
-// Runes a shrine can carve into a weapon, and what each one does.
-struct Rune { int fx; const char* name; };
-static const Rune RUNES[] = {
-    {UF_BURN, "Kenaz"}, {UF_CHILL, "Isa"}, {UF_CHAIN, "Thurisaz"}, {UF_POISON, "Hagalaz"},
-    {UF_BLEED, "Tiwaz"}, {UF_LEECH, "Laguz"}, {UF_QUICK, "Raidho"}, {UF_KNOCK, "Uruz"},
-};
+// A drinking horn of mead, foaming over a gold rim.
+const char* const MEAD_ART[8] = {"...........GGo..", "..........GFFFo.", ".........GwWWwo.", "........wWWwwo..", "......wWWwwo....", "...owWWwwo......", ".owWwwo.........", "ooo............."};
 
-static Weapon* heldWeapon() { return G.p.hotbar.empty() ? nullptr : &G.p.hotbar[G.p.sel]; }
-
-void rollShrine(Boon out[3])
+static Color artColor(char c)
 {
-    out[0].kind = BOON_WEAPON;
-    out[0].id = chance(2) ? WU_HONE : WU_RUNE;
-    out[0].fx = RUNES[irand((int)(sizeof(RUNES) / sizeof(RUNES[0])))].fx;
-    out[1].kind = BOON_PERK;
-    out[1].id = irand(PERK_COUNT);
-    out[2].kind = BOON_SPELL;
-    out[2].id = randomSpell(G.stage);
+    switch (c)
+    {
+    case 'k': return {58, 40, 28, 255};    case 'K': return {96, 70, 48, 255};
+    case 's': return {170, 176, 186, 255}; case 'S': return {224, 228, 234, 255}; case 'd': return {96, 100, 112, 255};
+    case 'g': return {196, 150, 58, 255};  case 'G': return {248, 216, 122, 255}; case 'o': return {120, 84, 30, 255};
+    case 'i': return {70, 70, 78, 255};    case 'I': return {130, 130, 140, 255};
+    case 'w': return {110, 74, 44, 255};   case 'W': return {156, 112, 66, 255};
+    case 'a': return {110, 112, 104, 255}; case 'A': return {150, 150, 140, 255};
+    case 'e': return {40, 130, 84, 255};   case 'E': return {120, 214, 150, 255};
+    case 'b': return {44, 70, 180, 255};   case 'B': return {130, 176, 250, 255};
+    case 'r': return {210, 70, 30, 255};   case 'R': return {255, 190, 80, 255};
+    case 'f': return {160, 210, 245, 255}; case 'F': return {240, 250, 255, 255};
+    case 'n': return {50, 56, 40, 255};    case 'N': return {104, 114, 80, 255}; case 'v': return {130, 240, 80, 255};
+    case 'l': return {210, 236, 255, 255}; case 'x': return {40, 28, 20, 255};
+    default: return BLANK;
+    }
 }
 
-// What a weapon gift does to the weapon you're holding right now: a staff is bound rather than honed,
-// and a rune it already bears becomes a whetstone instead.
-static int weaponGift(const Boon& b, const Weapon* w)
+void drawPixelArt(const char* const* rows, int n, float x, float y, float px)
 {
-    if (!w || w->type == W_STAFF) return -1;
-    if (b.id == WU_RUNE && !(w->fx & b.fx)) return WU_RUNE;
-    return WU_HONE;
+    for (int j = 0; j < n; j++)
+    {
+        if (!rows[j]) break;
+        for (int i = 0; rows[j][i]; i++)
+        {
+            Color c = artColor(rows[j][i]);
+            if (c.a) DrawRectangleV({x + i * px, y + j * px}, {px, px}, c);
+        }
+    }
 }
 
-static const char* runeName(int fx)
-{
-    for (auto& r : RUNES)
-        if (r.fx == fx) return r.name;
-    return "";
-}
+void drawAmulet(int id, float x, float y, float px) { if (id >= 0 && id < AMULET_COUNT) drawPixelArt(AMULETS[id].art, 20, x, y, px); }
 
-std::string boonTitle(const Boon& b)
-{
-    if (b.kind == BOON_SPELL) return SPELLS[b.id].name;
-    if (b.kind == BOON_PERK) return PERKS[b.id].name;
-    const Weapon* w = heldWeapon();
-    int g = weaponGift(b, w);
-    if (!w) return "An Empty Hand";
-    if (g < 0) return "Seidr Binding";
-    if (g == WU_RUNE) return std::string(runeName(b.fx)) + " Rune";
-    return "Dwarven Whetstone";
-}
-
-std::string boonDesc(const Boon& b)
-{
-    if (b.kind == BOON_SPELL) return SPELLS[b.id].desc;
-    if (b.kind == BOON_PERK) return PERKS[b.id].desc;
-    const Weapon* w = heldWeapon();
-    int g = weaponGift(b, w);
-    if (!w) return "Hold a weapon to have it blessed";
-    std::string on = " (" + weaponName(*w) + ")";
-    if (g < 0) return "Your staff gains a spell slot and 40 mana" + on;
-    if (g == WU_RUNE) return std::string("Carved into your weapon: ") + fxDescription(b.fx) + on;
-    return "Your weapon hits 25% harder" + on;
-}
-
-void grantBoon(const Boon& b)
+void wearAmulet(int id)
 {
     Player& P = G.p;
-    if (b.kind == BOON_SPELL) { P.bag.push_back(makeCard(b.id)); return; }
-    if (b.kind == BOON_PERK)
-    {
-        P.perks[b.id]++;
-        if (b.id == PK_HEARTY) { P.m.maxHp += 25; P.m.hp = P.m.maxHp; }
-        if (b.id == PK_MEAD) P.potions++;
-        return;
-    }
-    Weapon* w = heldWeapon();
-    int g = weaponGift(b, w);
-    if (!w) return;
-    if (g < 0) { w->staff.slots.push_back(SpellCard{}); w->staff.manaMax += 40; w->staff.mana = w->staff.manaMax; }
-    else if (g == WU_RUNE) w->fx |= b.fx;
-    else w->dmgMul *= 1.25f;
+    if (P.amulet == AM_YGGDRASIL) { P.m.maxHp -= 25; P.m.hp = std::min(P.m.hp, P.m.maxHp); }
+    P.amulet = id;
+    if (id == AM_YGGDRASIL) { P.m.maxHp += 25; P.m.hp += 25; }
+}
+
+int randomAmulet()
+{
+    int id;
+    do id = irand(AMULET_COUNT); while (id == G.p.amulet);
+    return id;
 }
