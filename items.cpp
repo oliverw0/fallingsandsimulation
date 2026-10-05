@@ -23,8 +23,8 @@ const MetalDef METALS[METAL_COUNT] = {
 
 //                 name         dmg range cd  arc  mine  cost
 const WeaponTypeDef WTYPES[WTYPE_COUNT] = {
-    {"Dagger",     5,  15, 14, 45, 0.25f, 0.6f},
-    {"Sword",      9,  21, 26, 65, 0.35f, 1.0f},
+    {"Dagger",     5,  17, 14, 45, 0.25f, 0.6f},
+    {"Sword",      9,  27, 26, 55, 0.35f, 1.0f},
     {"Battleaxe",  15, 23, 44, 85, 0.60f, 1.5f},
     {"Crossbow",   10, 0,  45, 0,  0.0f,  1.2f},
     {"Staff",      0,  0,  0,  0,  0.0f,  0.0f},
@@ -56,7 +56,30 @@ const SpellDef SPELLS[SPELL_COUNT] = {
     {"Explosive", "EX", ST_MOD, 25, 10, 0, 0, 0, 0, 0, EL_PHYS, 0, 5, 0, 1, {255, 170, 70, 255}, "Modifier: projectiles explode on impact.", 10},
     {"Double Cast", "x2", ST_MULTI, 0, 0, 0, 0, 0, 0, 0, EL_PHYS, 0, 0, 2, 0, {240, 240, 240, 255}, "Multicast: casts the next 2 spells at once."},
     {"Triple Cast", "x3", ST_MULTI, 2, 0, 0, 0, 0, 0, 0, EL_PHYS, 0, 0, 3, 1, {255, 255, 255, 255}, "Multicast: casts the next 3 spells at once.", 12},
+    {"Blood Spear", "BS", ST_PROJ, 0, 0, 0, 0, 44, 9.5f, 70, EL_PHYS, 0.02f, 0, 0, 99, {196, 28, 40, 255}, "A spear of red iron, thrown with terrible force."},
 };
+
+// ---------------------------------------------------------------- scrolls
+// One-shot spells, found in chests and on the dead or bought for the start of a run. Each is a short preset of the casting engine
+// below (modifiers stacked on a projectile) with no mana to pay, or a small custom effect: so each lands harder than a staff's spark.
+const ScrollDef SCROLLS[SC_COUNT] = {
+    {"Scroll of Firebolt", "A great ball of flame that bursts on impact and sets all alight.", {255, 120, 40, 255}, 0},
+    {"Scroll of Lightning", "A bolt that tears through every foe in a line, and the water they stand in.", {240, 240, 130, 255}, 1},
+    {"Scroll of Blood Spear", "A spear of red iron, thrown with terrible force. Nothing stops it.", {196, 28, 40, 255}, 0},
+    {"Scroll of Frost Nova", "A ring of ice shards bursts out in every direction.", {160, 220, 255, 255}, 1},
+    {"Scroll of Meteor", "Calls a burning rock down from the sky where you point.", {255, 170, 60, 255}, 2},
+    {"Scroll of Venom", "A spray of corrosive acid orbs.", {130, 255, 80, 255}, 0},
+};
+
+int randomScroll(int tier)
+{
+    for (int tries = 0; tries < 50; tries++)
+    {
+        int s = irand(SC_COUNT);
+        if (SCROLLS[s].minTier <= tier) return s;
+    }
+    return SC_FIREBOLT;
+}
 
 SpellCard makeCard(int id) { return SpellCard{id, SPELLS[id].uses ? SPELLS[id].uses : -1}; }
 
@@ -124,12 +147,6 @@ Staff randomStaff(int tier)
 Weapon randomWeapon(int tier)
 {
     Weapon w;
-    if (chance(2))
-    {
-        w.type = W_STAFF;
-        w.staff = randomStaff(tier);
-        return w;
-    }
     if (tier >= 1 && chance(30))
         return rollLegendary(tier, false); // a rare named weapon (never on the first stage)
     static const int types[] = {W_DAGGER, W_SWORD, W_AXE, W_SPEAR, W_MACE, W_CROSSBOW};
@@ -217,6 +234,7 @@ Weapon rollLegendary(int tier, bool fromStone, int forceType)
         bool ranged = w.type == W_CROSSBOW;
         if ((f == UF_MULTISHOT || f == UF_EXPLOSIVE) && !ranged) continue;
         if ((f == UF_MINER || f == UF_KNOCK || f == UF_LEECH) && ranged) continue;
+        if (f == UF_MINER && !chance(6)) continue; // rock-cutting is a rare gift: most blades never have it
         pool.push_back(i);
     }
     int count = 1 + (chance(2) ? 1 : 0) + ((fromStone || (tier >= 3 && chance(3))) ? 1 : 0);
@@ -290,14 +308,14 @@ Weapon themedWeapon(int style, int stage)
     return w;
 }
 
-Weapon fryingPan()
+Weapon starterSword()
 {
     Weapon w;
-    w.type = W_PAN;
+    w.type = W_SWORD;
     w.metal = M_IRON;
-    w.title = "Frying Pan";
-    w.lore = "Seasoned by a hundred breakfasts. Better than nothing.";
-    w.dmgMul = 0.8f;
+    w.title = "Weathered Norse Sword";
+    w.lore = "Notched by a hundred winters. It still bites.";
+    w.dmgMul = 0.85f;
     return w;
 }
 
@@ -448,6 +466,42 @@ void fireShots(const std::vector<Shot>& shots, float x, float y, float ang, floa
             sp += 4 * DEG2RAD; // multicasts fan out a little
         spawnSpell(sh, x, y, ang + frange(-sp, sp), friendly);
     }
+}
+
+// Reads a scroll's spell once from (x, y) toward ang. Returns false if it could not be cast.
+bool castScroll(int id, float x, float y, float ang)
+{
+    Staff s;
+    s.mana = s.manaMax = 99999;
+    s.delay = 0; s.recharge = 0; s.spread = 0; s.perCast = 1;
+    auto put = [&](std::initializer_list<int> ids) { for (int sp : ids) s.slots.push_back(makeCard(sp)); };
+    switch (id)
+    {
+    case SC_FIREBOLT: put({SP_DMG, SP_DMG, SP_IGNITE, SP_EXPLOSIVE, SP_FIREBALL}); break;
+    case SC_LIGHTNING: put({SP_DMG, SP_DMG, SP_PIERCE, SP_LIGHTNING}); break;
+    case SC_BLOODSPEAR: put({SP_DMG, SP_PIERCE, SP_BLOODSPEAR}); break;
+    case SC_VENOM: put({SP_DMG, SP_TRIPLE, SP_ACID, SP_ACID, SP_ACID}); break;
+    case SC_FROSTNOVA: // a ring of shards
+    {
+        Shot sh{SP_ICE, Mods{}, nullptr};
+        sh.mods.dmg = 14; sh.mods.pierce = true; sh.mods.speedMul = 1.1f;
+        for (int k = 0; k < 16; k++) spawnSpell(sh, x, y, ang + k * 2 * PI / 16, true);
+        return true;
+    }
+    case SC_METEOR: // a rock from the sky onto the mark, 90 units out along the aim
+    {
+        float tx = x + std::cos(ang) * 90, ty = y + std::sin(ang) * 90;
+        Shot sh{SP_BOMB, Mods{}, nullptr};
+        sh.mods.dmg = 40; sh.mods.blast = 12; sh.mods.speedMul = 2.2f; sh.mods.el = EL_FIRE; sh.mods.elSet = true; sh.mods.trailFire = true;
+        spawnSpell(sh, tx, ty - 130, PI / 2, true);
+        return true;
+    }
+    default: return false;
+    }
+    spellsSpent.clear();
+    bool ok = castStaff(s, x, y, ang, true);
+    spellsSpent.clear();
+    return ok;
 }
 
 // Self-check for the staff casting rules: `sand.exe --selftest`

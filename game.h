@@ -53,13 +53,21 @@ struct WeaponTypeDef
 };
 extern const WeaponTypeDef WTYPES[WTYPE_COUNT];
 
-// ================================================================ spells (Noita-style staves)
+// ================================================================ scrolls: one-shot spells, found or bought (items.cpp)
+
+enum ScrollId { SC_FIREBOLT, SC_LIGHTNING, SC_BLOODSPEAR, SC_FROSTNOVA, SC_METEOR, SC_VENOM, SC_COUNT };
+struct ScrollDef { const char* name; const char* desc; Color col; int minTier; };
+extern const ScrollDef SCROLLS[SC_COUNT];
+const int SCROLL_CASE = 5; // how many a player can carry
+
+// ================================================================ spells (the casting engine scrolls are built on)
 
 enum SpellType { ST_PROJ, ST_MOD, ST_MULTI };
 enum SpellId {
     SP_SPARK, SP_MISSILE, SP_FIREBALL, SP_ICE, SP_LIGHTNING, SP_ACID, SP_BOMB, SP_DIG, SP_WATER, SP_TRIGGER,
     SP_DMG, SP_SPEED, SP_BOUNCE, SP_HOMING, SP_PIERCE, SP_IGNITE, SP_FROST, SP_EXPLOSIVE,
     SP_DOUBLE, SP_TRIPLE,
+    SP_BLOODSPEAR, // scroll-only: a heavy, fast, piercing spear of red iron
     SPELL_COUNT
 };
 
@@ -134,6 +142,7 @@ enum EnemyType {
     E_IMP, E_WRAITH, E_GOLEM,
     E_WOLF, E_REDCAP, E_DRAUGR, E_TROLL, E_BANSHEE, E_KELPIE, E_GUARD, // Norse & Scottish folklore
     E_RISEN, // the dead levy on the field before Dunmoor
+    E_SERPENT, E_SCORPION, E_RAIDER, // the open sea; the desert east of Dunmoor
     E_BLACKKNIGHT, E_LICH, ENEMY_COUNT
 };
 enum AIType { AI_WALK, AI_RANGED, AI_FLY, AI_HOP, AI_BOMB, AI_FLYCAST, AI_BOSS_KNIGHT, AI_BOSS_LICH };
@@ -156,6 +165,8 @@ extern const EnemyDef ENEMIES[ENEMY_COUNT];
 struct Mob
 {
     int type = -1; // -1 = player
+    int tier = 0;  // the depth it was made for (G.stage when spawned): scales its drops
+    bool sea = false; // it lives in the open sea: it may carry an Önd orb
     int id = 0;
     float x = 0, y = 0, vx = 0, vy = 0;
     int w = 6, h = 10;
@@ -167,6 +178,7 @@ struct Mob
     int cd = 0, timer = 0, state = 0, attackT = 0;
     int bleedMark = 0; // struck by a bleeding weapon: dies messily
     int dropT = 0;     // frames left falling through one-way platforms
+    int stuckT = 0;    // frames spent wedged inside rock or rubble
     int stagger = 0, hitT = 0, hitSwing = 0; // reeling from a blow (no control), the recoil animation, the last swing that struck it
     float hitDir = 0;  // which way that blow knocked it
     int atkPhase = 0, atkT = 0; // a melee attack: 1 winding up, 2 striking, 3 recovering; frames left in the phase
@@ -206,6 +218,8 @@ struct Player
     int pending[RES_COUNT] = {};
     int armour = -1; // metal index, -1 = padded gambeson
     int potions = 2;
+    int bombs = 0; // rune bombs: rare finds, thrown with B
+    int ondT = 0; // frames left of Önd: picked up (only the sea gives it), you need no air
     int amulet = -1; // AmuletId worn, -1 none
     float stamina = 100;
     float breath = 100; // under water it runs out, then you drown
@@ -223,6 +237,10 @@ struct Player
     int kills = 0;
     int combatT = 0; // weapon stays drawn this many frames after attacking
     int coins = 0;   // banked between runs
+    std::vector<int> scrolls; // ScrollIds carried, read one at a time (R); the selected one is `scrollSel`
+    int scrollSel = 0;
+    int readT = 0;            // frames left of the casting pose after reading a scroll
+    bool hasMap = false;      // the Wayfinder's Map: a minimap in the HUD
     bool hasHook = true, crouch = false, prone = false, climb = false; // posture: standing / crouched (16 tall) / prone (9 tall); climb = hanging on a rope
     // animation state
     float squash = 1, runPhase = 0;
@@ -250,22 +268,33 @@ struct Proj
     std::vector<int> hits;
 };
 
-enum PickupKind { PU_SPELL, PU_WEAPON, PU_POTION, PU_HEART, PU_COIN, PU_AMULET, PU_MEAD }; // PU_AMULET: `spell` = AmuletId; PU_MEAD heals you whole
+enum PickupKind { PU_SCROLL, PU_WEAPON, PU_POTION, PU_HEART, PU_COIN, PU_AMULET, PU_MEAD, PU_BOMB, PU_OND }; // PU_AMULET: `spell` = AmuletId; PU_MEAD heals you whole
 struct Pickup
 {
     Mob b;
-    int kind = PU_SPELL;
+    int kind = PU_SCROLL; // PU_SCROLL: `spell` = ScrollId
     int spell = 0;
     Weapon weapon;
     int age = 0;
     bool alive = true;
 };
 
-enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE, IT_BOAT, IT_LANTERN, IT_PROP };
+enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_TORCH, IT_STONE, IT_SHOP, IT_ROPE, IT_CRATE, IT_BOAT, IT_LANTERN, IT_PROP, IT_DECOR };
+// IT_DECOR: a background sprite standing on the floor at (x, y): `data` = DecorKind, `style` = variant (bit 6 flips it),
+// `w` = the kind's one free dimension in units (a table's length, a post's height, a hanging's drop). decor.cpp paints
+// everything from DK_DRESSER on; decorAnchor says whether (x, y) is its foot, its hanging point or its centre.
+enum DecorKind { DK_CACTUS, DK_BUSH, DK_SKELETON, DK_GIANT,
+                 DK_DRESSER, DK_TABLE, DK_PICTURE, DK_TOOL, DK_SHELF, DK_RACK, DK_ARROWS, DK_BUNK, DK_HEARTH, DK_SHIELD, DK_POST, DK_LADDER, DK_YARD,
+                 DK_TAPESTRY, DK_DRAPE, DK_CHAIN, DK_BLOOD, DK_HORNS, DK_ANTLERS, DK_DRAGONPILLAR, DK_IDOL, DK_CRANE, DK_SPIKE };
+Image decorImageFine(int kind, int var, int size);
+int decorAnchor(int kind, int var);
+void exportDecorSheet(const char* path);
+void loadStep(float frac, const char* what); // main.cpp: redraws the loading screen with a progress bar (no-op without a window)
+Image stallImageFine(int kind, int layer); // Hearthwick's market stalls, layers 0 (back) and 1 (counter), 144 x 124 px
 // IT_BOAT: a longship; `used` = beached scenery, otherwise F sets sail. IT_TORCH style 1 = wall sconce.
 // IT_ROPE: hangs from (x, y) down to row `data`. IT_CRATE: breakable obstacle, wood cells in [x, x+w) x [y-h, y), `data` = hits left.
 struct Interact { int type; float x, y; bool used = false; int data = 0; int style = 0; int w = 0, h = 0, cells = 0, hit = 0;
-                  float vx = 0, vy = 0, ang = 0, va = 0; int rest = 99; }; // chests are little rigid bodies: velocity, spin, frames at rest
+                  float vx = 0, vy = 0, ang = 0, va = 0; int rest = 99; int fade = 0; }; // chests are little rigid bodies: velocity, spin, frames at rest; fade: an opened chest's frames left before it is gone (-1 gone)
 // IT_LANTERN: an oil lantern on a chain from (x, y), `data` units long, swinging at `ang`. `style` 1 = the chain
 // snapped and it's falling free (x, y is then the lantern itself); `used` = smashed.
 inline Vector2 lanternPos(const Interact& it) { return it.style ? Vector2{it.x, it.y} : Vector2{it.x + std::sin(it.ang) * it.data, it.y + std::cos(it.ang) * it.data}; }
@@ -274,10 +303,10 @@ const float CHEST_HW = 9.5f, CHEST_HH = 7.2f; // a chest's half size in units; (
 // blows, bolts, blasts and anyone walking into it. bodyHalf: the half size of any such body.
 inline Vector2 bodyHalf(const Interact& it)
 {
-    static const Vector2 PROP[3] = {{6, 6}, {4.5f, 6.5f}, {4, 3.5f}};
-    return it.type == IT_PROP ? PROP[it.style % 3] : Vector2{CHEST_HW, CHEST_HH};
+    static const Vector2 PROP[3] = {{6, 6}, {4.5f, 6.5f}, {4, 3.5f}}, PLANK[3] = {{5, 1.5f}, {8, 1.5f}, {12, 1.5f}}; // styles 3, 6, 9: a floating plank, short, medium, long
+    return it.type == IT_PROP ? (it.style >= 3 ? PLANK[(it.style / 3 - 1) % 3] : PROP[it.style % 3]) : Vector2{CHEST_HW, CHEST_HH};
 }
-inline bool isBody(const Interact& it) { return it.type == IT_CHEST || it.type == IT_PROP; }
+inline bool isBody(const Interact& it) { return (it.type == IT_CHEST && it.fade >= 0) || it.type == IT_PROP; }
 // How a stage shows off its special weapon (replaces the old sword-in-stone).
 enum DisplayStyle { DS_ROCK, DS_TARGET, DS_TABLE, DS_RACK, DS_GRAVE, DS_CART, DS_ICE, DS_ANVIL, DS_ALTAR };
 
@@ -288,6 +317,7 @@ struct Trap
     int x, y, dir = 1, timer = 0;
     bool done = false;
     int rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0;
+    int hp = 3, hit = 0; // dart traps: blows left before the head breaks off, frames of the hit flash
 };
 
 struct Particle
@@ -301,7 +331,7 @@ struct Particle
 };
 
 // A light with no object of its own (lanterns, lit windows); `flame` also draws a flickering flame.
-struct Lamp { float x, y, r; Color c; bool flame = false; bool smoke = false; }; // smoke: no light, just a curl of smoke (a hall's roof)
+struct Lamp { float x, y, r; Color c; bool flame = false; bool smoke = false; float beam = 0, w = 0, wh = 0; }; // smoke: no light, just a curl of smoke (a hall's roof); beam: a window's moonlight, falling this far (w wide)
 
 // A safe area between two biomes. You walk in through `x0`, the gate drops behind you, and the far
 // gate at `x1` opens onto the next biome. A boss's haven stays barred until the boss falls.
@@ -325,7 +355,7 @@ enum WoundKind { WK_PIERCE, WK_BOLT, WK_CUT };
 struct RigidBody { float x = 0, y = 0, vx = 0, vy = 0, ang = 0, va = 0; int rest = 0; };
 // One step against the terrain: `pts` is its outline about the centre, `I` its inertia per unit mass;
 // `square` snaps it level when it settles nearly so. Returns whether it's touching anything.
-bool rigidStep(RigidBody& b, const std::vector<Vector2>& pts, float I, bool square);
+bool rigidStep(RigidBody& b, const std::vector<Vector2>& pts, float I, bool square, float buoy = 0); // buoy: lift per step when fully under water (0 = sinks)
 
 // A dead body: the creature's limb rig (rig.cpp) as a Verlet ragdoll - joints as points, limbs as sticks.
 // Fixed arrays: nothing is allocated while it falls.
@@ -392,13 +422,13 @@ enum LoadTarget { LOAD_STAGE, LOAD_SANDBOX, LOAD_VILLAGE };
 
 // ================================================================ meta progression (meta.cpp)
 
-enum UnlockKind { UK_WEAPON, UK_STAFF, UK_SPELL, UK_HOOK, UK_ARMOUR, UK_FLASK, UK_WISP };
+enum UnlockKind { UK_WEAPON, UK_SCROLL, UK_HOOK, UK_ARMOUR, UK_FLASK, UK_WISP, UK_MAP };
 struct Unlock { const char* name; int shop, price, kind, a, b; const char* desc; };
 extern const Unlock UNLOCKS[];
 extern const int UNLOCK_COUNT;
 extern const char* SHOP_NAMES[3];
-// Weapons, staves and spells are bought for the next run only (`stocked`); the outfitter's gear is kept for good.
-inline bool isKitKind(int kind) { return kind == UK_WEAPON || kind == UK_STAFF || kind == UK_SPELL; }
+// Weapons and scrolls are bought for the next run only (`stocked`); the permanent gear (hook, armour, flask, wisp, map) is kept for good.
+inline bool isKitKind(int kind) { return kind == UK_WEAPON || kind == UK_SCROLL; }
 struct Meta
 {
     int bank = 0, runs = 0, deepest = 0;
@@ -409,8 +439,8 @@ void loadMeta();
 void saveMeta();
 void toggleEquip(int i);
 bool buyUnlock(int i);
-void sellBack(int i);  // a readied weapon or spell, refunded
-void spendKit();       // setting sail: the readied weapons and spells go with you, and are gone from the stalls
+void sellBack(int i);  // a readied weapon or scroll, refunded
+void spendKit();       // setting sail: the readied weapons and scrolls go with you, and are gone from the stalls
 void bankRun();
 void applyLoadout();
 
@@ -448,8 +478,10 @@ struct Game
     int hitstop = 0;
     float uiScale = 1; // accessibility: UI size multiplier
     bool showHelp = false, reduceShake = false;
+    bool dev = false, devGod = false, devFly = false, devMap = false; // dev tools (F2, dev.cpp)
     int playX0 = 0;   // the gate you last came through: nothing behind it is reachable any more
     int seaEnd = 0;   // the run's west sea: x where the beach takes over from it (0 = none)
+    Rectangle desert{}; // the Scorched Reach east of Dunmoor, in units (width 0 = none)
     float roamX0 = 0, roamX1 = 0; // in Hearthwick: how far you may walk either way (0, 0 = anywhere)
     bool underwater = false; // the player's head is under
     float stormX0 = 0, stormX1 = 0; // the storm over Dunmoor gathers from x0 to x1 (0 = none)
@@ -459,6 +491,18 @@ struct Game
     bool duneCrossed = false;
 };
 extern Game G;
+// The named stretches that aren't a stage of their own: 1 the dunes, 2 the open sea, 3 the desert (0: the stage's own name).
+inline int regionId()
+{
+    if (G.sanctuary || G.inVillage || G.sandbox) return 0;
+    float x = G.p.m.cx(), y = G.p.m.cy();
+    if (G.seaEnd && x < G.seaEnd - 60) return 2;
+    if (G.desert.width > 0 && x > G.desert.x + 40 && y < G.desert.y + G.desert.height) return 3;
+    if (G.duneEnd > 0 && G.p.m.x < G.duneEnd && G.p.m.x > G.seaEnd) return 1;
+    return 0;
+}
+inline const char* regionName(int r) { static const char* n[] = {"", "The Whispering Dunes", "The Drowned Deep", "The Scorched Reach"}; return n[r]; }
+inline const char* regionSub(int r) { static const char* n[] = {"", "Only the wind lives here", "It grows darker, and hungrier, the further out you swim", "Sand, sun-bleached bones, and things with stings"}; return n[r]; }
 inline bool inDunes() { return G.duneEnd > 0 && G.p.m.x < G.duneEnd && G.p.m.x > G.seaEnd && !G.sanctuary && !G.inVillage; }
 
 // items.cpp
@@ -470,11 +514,16 @@ bool onPlatform(const Mob& m);
 int weaponCooldown(const Weapon& w);
 Weapon rollLegendary(int tier, bool fromStone, int forceType = -1);
 Weapon themedWeapon(int style, int stage);
-Weapon fryingPan();
+Weapon starterSword(); // the weathered Norse sword every run begins with
 const char* fxDescription(int bit);
 Staff randomStaff(int tier);
 Weapon randomWeapon(int tier);
 int randomSpell(int tier);
+int randomScroll(int tier);
+bool castScroll(int id, float x, float y, float ang); // reads a scroll's spell once, from (x, y) toward ang
+bool readScroll();                                      // the selected scroll, from the player (entities.cpp)
+void drawMinimap(float x, float y, float size, float u); // minimap.cpp
+void drawScroll(int sc, float cx, float cy, float w, float glow); // a parchment scroll sealed in its colour (ui.cpp), w wide
 bool castStaff(Staff& s, float x, float y, float ang, bool friendly);
 void fireShots(const std::vector<Shot>& shots, float x, float y, float ang, float spread, bool friendly);
 void recipeCost(int type, int metal, int out[RES_COUNT]);
@@ -494,8 +543,8 @@ void damageMob(Mob& m, float dmg, Element el, float kx, float ky, int flags);
 void explode(float x, float y, int r, float dmg, Element el, bool friendly, int power);
 void spawnParticle(float x, float y, float vx, float vy, int life, Color col, float grav);
 void spawnSpell(const Shot& sh, float x, float y, float ang, bool friendly);
-void spawnOreBurst(float x, float y, int count);
-void addPickupSpell(float x, float y, int spell);
+void spawnOreBurst(float x, float y, int count, float power = 1); // power: how hard it is flung
+void addPickupScroll(float x, float y, int scroll);
 void addPickupWeapon(float x, float y, const Weapon& w);
 void addPickup(float x, float y, int kind);
 void addCoins(float x, float y, int count, int value);
@@ -510,22 +559,37 @@ Vector2 mouseWorld();
 void syncRenderCamera();
 void travelOnward();
 void returnToRoad();
-int roadFloorAt(int x); // -1 where there's no single road (castle, village...)
+int roadFloorAt(int x);
+// Dev profiler: milliseconds per section of a frame, eased over ~10 frames (shown by the F3 dev overlay).
+enum ProfSec { PF_PLAYER, PF_MOBS, PF_PROJ, PF_ITEMS, PF_DAMP, PF_SIM, PF_STRUCT, PF_BLAST, PF_FX, PF_CORPSE, PF_WORLD, PF_LIGHT, PF_DRAW, PF_HUD, PF_COUNT };
+extern float PROF[PF_COUNT];
+extern const char* const PROF_NAMES[PF_COUNT];
+inline void profLap(double& t0, int sec) { double t = GetTime(); PROF[sec] += ((float)((t - t0) * 1000) - PROF[sec]) * 0.1f; t0 = t; } // -1 where there's no single road (castle, village...)
 void shiftEntities(float dx, float dy); // the world was re-cut: move everything that lives in world coordinates
 const char* sandboxBrushName();
+// dev.cpp: F2 dev tools; devUpdate runs before updateGame each play frame, devDraw over the HUD
+void devUpdate();
+void devDraw();
+std::vector<Rectangle> devPieceRects(); // each biome in the live world, in units (levelgen.cpp)
+int fallingBodies();                    // collapsed slabs in flight (entities.cpp)
 
 // rig.cpp (animation)
-void drawPlayerRig(int camX, int camY);
+void drawPlayerRig(int camX, int camY); // the old posed-limb hero (rig.cpp), no longer used for the player
+void drawPlayerViking(int camX, int camY); // the player from the baked Viking sheets (viking.cpp)
 void drawMobAnimated(const Mob& m, int camX, int camY);
+int windupFor(int type); // an enemy's melee wind-up, in frames
+void drawFlame(float x, float y, float s, int seed); // a live flame rooted at (x, y), ~7s units tall
 void drawBurning(const Mob& m, int camX, int camY); // flames licking up off anything on fire
 void burstSprite(const Mob& m);
 void drawHeld(float ox, float oy);
 void detail2x(const Color* src, int w, int h, std::vector<Color>& out); // pixel art doubled: Scale2x, a lit rim, shade
 void prepareStallArt(); // builds the stalls' upscaled art (outside any render texture)
-enum AttackStyle { ATK_SLASH, ATK_STAB, ATK_THRUST, ATK_CHOP, ATK_SLAM };
+enum AttackStyle { ATK_SLASH, ATK_STAB, ATK_THRUST, ATK_CHOP, ATK_SLAM, ATK_SWEEP };
 void attackPose(float& ang, float& ext, int back);
 void startAttack(const Weapon& w);
 void drawWeaponSprite(const Weapon& w, Vector2 at, float ang, float scale, bool centred);
+bool weapon3dDraw(const Weapon& w, Vector2 at, float ang, float scale, bool centred); // viking.cpp: the 3D-modelled weapon icons
+float weapon3dLength(const Weapon& w);
 float weaponLength(const Weapon& w);
 void spawnRagdoll(float cx, float bottom, float h, float vx, float vy, Color head, Color body, Color limb, bool bony, CellMaterial gore);
 void pushRagdolls(float x, float y, float radius, float force);
@@ -544,7 +608,13 @@ void ragdollForPlayer();
 struct Sprite;
 void drawSpriteBig(const Sprite& s, float x, float bottom, bool flip, Color tint);
 void drawSpriteNative(const Sprite& s, float x, float bottom, bool flip);
-void drawChest(float cx, float cy, float ang, bool open); // centre, in render-texture units
+void drawChest(float cx, float cy, float ang, bool open, Color tint = WHITE, float sink = 0); // centre, in render-texture units
+void drawBomb(float cx, float cy, float ang, float scale);
+void drawOnd(float cx, float cy, float scale); // an Önd orb, centred
+void drawDecor(const Interact& it, float x, float y); // IT_DECOR, feet at (x, y) on screen (units) // a rune bomb, centred on its body
+void drawDartTrap(float faceX, float mouthY, int dir, bool broken, int hit, int hp = 3); // the wall face it's set in, the height it fires at
+int folkLooks(int kind); // how many looks a villager kind (0 man, 1 woman, 2 child) has
+void drawFolk(int kind, int look, float anim, bool walking, int dir, float x, float y, Color coat, int seed); // a villager, feet at (x, y)
 void drawSpriteTint(const Sprite& s, float x, float bottom, bool flip, Color tint); // native size, 'a' tinted
 
 // levelgen.cpp
@@ -581,3 +651,4 @@ void drawResIcon(int r, float x, float y, float size);
 void cancelInventoryDrag();
 void drawItemIcon(const Weapon& w, float x, float y, float size);
 void drawSpellIcon(int spell, float x, float y, float size, bool highlight, int uses = -1);
+void drawSpellPickup(int spell, float cx, float cy, float phase); // a spell lying in the world: a glowing rune-tablet

@@ -1,4 +1,4 @@
-// Most sound is synthesised at startup; the recordings (sword swings and drawing, hammer swings, the
+// Most sound (and all the music) is synthesised at startup; the recordings (sword swings and drawing, hammer swings, the
 // crossbow, the frying pan) are compiled in from sounds.h, so the game still ships without audio files.
 // Recipes layer filtered noise, modal (inharmonic) partials and formant-filtered voices,
 // then run through a small Freeverb-style reverb. Common sounds get several variants.
@@ -6,6 +6,8 @@
 #include "util.h"
 #include "sounds.h"
 #include <cmath>
+#include <cstring>
+#include <cstdlib>
 #include <vector>
 #include <functional>
 #include <algorithm>
@@ -23,7 +25,7 @@ struct SfxSlot
     int minGap = 0; // frames between plays (stops 30 explosions stacking)
 };
 static SfxSlot sfx[SFX_COUNT];
-static Sound music{}, wind{};
+static Sound wind{};
 static bool audioOk = false;
 static int frameCounter = 0;
 
@@ -525,49 +527,6 @@ static void build()
             s.alias.push_back(al);
         }
 
-    // music: dark minor pad (Am - F - C - E) with sparse plucked notes, drenched in reverb
-    const float chords[4][3] = {{220.0f, 261.6f, 329.6f}, {174.6f, 220.0f, 261.6f}, {130.8f, 196.0f, 261.6f}, {164.8f, 207.7f, 246.9f}};
-    const float scale[6] = {220.0f, 261.6f, 293.7f, 329.6f, 392.0f, 440.0f};
-    const float total = 32.0f;
-    std::vector<float> buf((size_t)(total * SR), 0.0f);
-    Rng mr(300);
-    Biquad padLp;
-    padLp.set(LP, 900, 0.7f);
-    for (size_t i = 0; i < buf.size(); i++)
-    {
-        float t = (float)i / SR;
-        int c = (int)(t / 8.0f) % 4;
-        float local = std::fmod(t, 8.0f);
-        float amp = std::min(1.0f, local / 2.0f) * std::min(1.0f, (8.0f - local) / 2.0f);
-        float v = 0;
-        for (int k = 0; k < 3; k++)
-        {
-            float f = chords[c][k] * 0.5f;
-            for (float det : {0.996f, 1.004f}) // two detuned saws per note
-                v += (std::fmod(f * det * t, 1.0f) * 2 - 1);
-        }
-        buf[i] = padLp(v) * 0.05f * amp + std::sin(TAU * 55 * t) * 0.05f;
-    }
-    for (int note = 0; note < 24; note++) // plucks
-    {
-        float st = note * 1.33f + (mr() * 0.5f + 0.5f) * 0.6f;
-        if (mr() < -0.2f) continue;
-        float f = scale[(int)((mr() * 0.5f + 0.5f) * 5.99f)] * (mr() > 0.3f ? 2.0f : 1.0f);
-        std::vector<float> line((size_t)(SR / f));
-        for (auto& b : line) b = mr();
-        size_t idx = 0;
-        for (int j = 0; j < SR * 2 && (size_t)(st * SR) + j < buf.size(); j++)
-        {
-            float s = line[idx];
-            size_t nx = (idx + 1) % line.size();
-            line[idx] = (line[idx] + line[nx]) * 0.4985f;
-            idx = nx;
-            buf[(size_t)(st * SR) + j] += s * 0.08f;
-        }
-    }
-    reverb(buf, 0.6f, 0.88f);
-    music = bake(buf, 0.6f);
-
     // wind over the dunes: rumbling low noise and a breathy band that swells with each gust, plus a
     // faint whistle. Gusts are periodic over the buffer and the ends are cross-faded, so it loops cleanly.
     {
@@ -593,12 +552,389 @@ static void build()
     }
 }
 
+// ---------------------------------------------------------------- music
+// One looping tune per area, written as notes and played on a small synthetic band (lute, flute, harp, bells,
+// brass, choir, drums). Each tune is rendered once at startup, its reverb tail folded back over its start so it
+// loops seamlessly, and streamed from memory as a WAV.
+
+enum { TR_VILLAGE, TR_GREEN, TR_BATTLE, TR_DESERT, TR_CASTLE, TR_CRYPT, TR_MINES, TR_FROST, TR_FORGE, TR_CITADEL, TR_HAVEN, TR_SEA, TR_COUNT };
+struct Track
+{
+    Music m{};
+    std::vector<unsigned char> wav; // the stream reads straight from this
+    float vol = 0;
+    bool ok = false, on = false;
+};
+static Track trk[TR_COUNT];
+using Buf = std::vector<float>;
+struct Part { float r, a, d; }; // partial: frequency ratio, amplitude, decay time constant (s)
+
+static float mtof(float n) { return 440.0f * std::pow(2.0f, (n - 69) / 12.0f); }
+
+// additive plucked/struck note; rotating oscillators keep it cheap
+static void strike(Buf& b, float t0, float f, float amp, const Part* ps, int n, float ring)
+{
+    size_t i0 = (size_t)(t0 * SR), len = (size_t)(ring * SR);
+    for (int k = 0; k < n; k++)
+    {
+        float fk = f * ps[k].r;
+        if (fk > SR * 0.45f) continue;
+        float w = TAU * fk / SR, cw = std::cos(w), sw = std::sin(w), c = 1, s = 0;
+        float a = amp * ps[k].a, dk = std::exp(-1.0f / (ps[k].d * SR));
+        for (size_t i = 0; i < len && i0 + i < b.size(); i++)
+        {
+            b[i0 + i] += s * a;
+            float c2 = c * cw - s * sw;
+            s = s * cw + c * sw; c = c2; a *= dk;
+        }
+    }
+}
+static const Part LUTE[] = {{1, 1, .7f}, {2, .55f, .4f}, {3, .38f, .25f}, {4, .2f, .17f}, {5, .1f, .12f}, {6, .05f, .09f}};
+static const Part OUD[] = {{1, 1, .6f}, {2, .8f, .35f}, {3, .6f, .25f}, {4, .4f, .15f}, {5, .25f, .1f}};
+static const Part HARP[] = {{1, 1, 1.2f}, {2, .3f, .6f}, {3, .12f, .3f}, {4, .05f, .2f}};
+static const Part HARPSI[] = {{1, 1, .5f}, {2, .7f, .35f}, {3, .5f, .25f}, {4, .4f, .2f}, {5, .3f, .15f}, {6, .2f, .1f}, {7, .12f, .08f}};
+static const Part BELL[] = {{1, 1, 1.6f}, {2.76f, .5f, .9f}, {5.4f, .3f, .5f}, {8.93f, .15f, .3f}};
+static const Part GLASS[] = {{1, 1, 2.2f}, {2, .35f, 1.2f}, {3, .2f, .8f}, {4.01f, .1f, .5f}, {6.02f, .06f, .3f}};
+static const Part METAL[] = {{1, 1, .35f}, {2.32f, .7f, .2f}, {4.25f, .5f, .12f}, {6.63f, .3f, .08f}};
+#define STRIKE(b, t, f, amp, inst, ring) strike(b, t, f, amp, inst, (int)(sizeof(inst) / sizeof(Part)), ring)
+
+static void lute(Buf& b, float t, float midi, float amp, float ring = 1.5f) { STRIKE(b, t, mtof(midi), amp, LUTE, ring); }
+
+// sustained breathy flute with vibrato
+static void flute(Buf& b, float t0, float f, float dur, float amp)
+{
+    size_t i0 = (size_t)(t0 * SR), n = (size_t)((dur + 0.1f) * SR);
+    Rng r((uint32_t)(f * 10));
+    Biquad br;
+    br.set(BP, f * 2, 2);
+    float ph = 0;
+    for (size_t i = 0; i < n && i0 + i < b.size(); i++)
+    {
+        float t = (float)i / SR;
+        ph += f * (1 + 0.006f * std::sin(TAU * 5.3f * t) * std::min(1.0f, t / 0.25f)) / SR;
+        float e = std::min(1.0f, t / 0.05f) * (t < dur ? 1.0f : std::exp(-(t - dur) / 0.03f));
+        float s = std::sin(TAU * ph) + 0.22f * std::sin(TAU * 2 * ph) + 0.06f * std::sin(TAU * 3 * ph);
+        b[i0 + i] += (s + br(r()) * 0.35f) * e * amp;
+    }
+}
+
+// two detuned saws through a low-pass: pads, drones and brass (swell opens the filter with the envelope)
+static void saws(Buf& b, float t0, float f, float dur, float amp, float att, float rel, float cut, float swell = 0)
+{
+    size_t i0 = (size_t)(t0 * SR), n = (size_t)((dur + rel) * SR);
+    Biquad lp;
+    float p1 = 0, p2 = 0.37f;
+    for (size_t i = 0; i < n && i0 + i < b.size(); i++)
+    {
+        float t = (float)i / SR, e = std::min(1.0f, t / att) * (t < dur ? 1.0f : std::max(0.0f, 1 - (t - dur) / rel));
+        if ((i & 31) == 0) lp.set(LP, cut * (1 + swell * e), 0.7f);
+        p1 += f * 0.997f / SR; p2 += f * 1.003f / SR;
+        p1 -= std::floor(p1); p2 -= std::floor(p2);
+        b[i0 + i] += lp((p1 * 2 - 1) + (p2 * 2 - 1)) * e * amp * 0.5f;
+    }
+}
+static void pad(Buf& b, float t0, float dur, std::initializer_list<int> notes, float amp, float cut)
+{
+    for (int n : notes) saws(b, t0, mtof((float)n), dur, amp, dur * 0.3f, dur * 0.3f, cut);
+}
+static void brass(Buf& b, float t, float midi, float dur, float amp) { saws(b, t, mtof(midi), dur, amp, 0.08f, 0.15f, 800, 1.3f); }
+
+// sung vowel: 0 ah, 1 oo, 2 oh
+static void choir(Buf& b, float t0, float f, float dur, float amp, int vowel)
+{
+    static const float F[3][3] = {{700, 1100, 2500}, {350, 750, 2500}, {450, 800, 2600}};
+    Voice v(F[vowel][0], F[vowel][1], F[vowel][2], (uint32_t)(f * 7));
+    size_t i0 = (size_t)(t0 * SR), n = (size_t)((dur + 1) * SR);
+    for (size_t i = 0; i < n && i0 + i < b.size(); i++)
+    {
+        float t = (float)i / SR, e = std::min(1.0f, t / (dur * 0.4f)) * (t < dur ? 1.0f : std::max(0.0f, 1 - (t - dur)));
+        b[i0 + i] += v(f * (1 + 0.004f * std::sin(TAU * 5 * t + f)), 0.12f) * e * amp;
+    }
+}
+
+// drums: a pitch-dropping skin thump, and a noisy hand-drum / snare slap
+static void thump(Buf& b, float t0, float f, float amp, float dec)
+{
+    size_t i0 = (size_t)(t0 * SR), n = (size_t)(dec * 6 * SR);
+    Rng r((uint32_t)(i0 + f));
+    float ph = 0;
+    for (size_t i = 0; i < n && i0 + i < b.size(); i++)
+    {
+        float t = (float)i / SR;
+        ph += f * (1 + 1.2f * std::exp(-t * 30)) / SR;
+        b[i0 + i] += (std::sin(TAU * ph) * std::exp(-t / dec) + r() * std::exp(-t / 0.004f) * 0.2f) * amp;
+    }
+}
+static void skin(Buf& b, float t0, float f, float amp, float dec)
+{
+    size_t i0 = (size_t)(t0 * SR), n = (size_t)(dec * 5 * SR);
+    Rng r((uint32_t)(i0 + f));
+    Biquad bp;
+    bp.set(BP, f, 1.2f);
+    for (size_t i = 0; i < n && i0 + i < b.size(); i++)
+    {
+        float t = (float)i / SR;
+        b[i0 + i] += (bp(r()) * 2 + std::sin(TAU * f * 0.5f * t) * 0.3f) * std::exp(-t / dec) * amp;
+    }
+}
+
+// "c#5:2 r:1 bb4:3": note name, octave, length in steps (r = rest); `play(midi, start, length)` per note
+template <class F> static void tune(const char* s, float t0, float step, F play)
+{
+    static const int semi[7] = {9, 11, 0, 2, 4, 5, 7}; // a b c d e f g
+    float t = t0;
+    while (*s)
+    {
+        while (*s == ' ' || *s == '|') s++;
+        if (!*s) break;
+        int midi = -1;
+        if (*s == 'r') s++;
+        else
+        {
+            int n = semi[*s++ - 'a'];
+            if (*s == '#') { n++; s++; } else if (*s == 'b') { n--; s++; }
+            midi = 12 * (*s++ - '0' + 1) + n;
+        }
+        float len = 1;
+        if (*s == ':') { char* e; len = std::strtof(s + 1, &e); s = e; }
+        if (midi >= 0) play(midi, t, len * step);
+        t += len * step;
+    }
+}
+
+// fingerpicked arpeggio, 8 steps to the bar, one chord per `per` bars
+static void arpeggio(Buf& b, float e, const int* roots, const bool* minor, int chords, int per, const Part* inst, int np, float amp)
+{
+    static const int maj[8] = {0, 7, 12, 16, 19, 16, 12, 7}, mnr[8] = {0, 7, 12, 15, 19, 15, 12, 7};
+    for (int c = 0; c < chords; c++)
+        for (int k = 0; k < per * 8; k++)
+            strike(b, (c * per * 8 + k) * e, mtof((float)roots[c] + (minor[c] ? mnr : maj)[k % 8]), amp * (k % 8 == 0 ? 1.2f : 0.8f), inst, np, 1.8f);
+}
+
+// Hearthwick: a Norse bard's jig in D dorian, 6/8. The lute carries the tune once, then a flute takes it up over a frame drum.
+static void tVillage(Buf& b)
+{
+    const float e = 0.18f, bar = 6 * e;
+    struct Ch { int root, t[3]; };
+    static const Ch Dm{50, {57, 62, 65}}, C{48, {55, 60, 64}}, G{43, {55, 59, 62}}, Am{45, {57, 60, 64}}, F{41, {57, 60, 65}};
+    const Ch* prog[16] = {&Dm, &C, &G, &Am, &Dm, &C, &G, &Dm, &F, &C, &G, &Am, &F, &C, &G, &Dm};
+    static const char* A = "a4:1 d5:2 d5:1 f5:2  e5:2 c5:1 e5:3  d5:1 b4:2 g4:1 b4:2  a4:3 c5:1 b4:1 a4:1  a4:1 d5:2 d5:1 f5:2  e5:2 g5:1 e5:3  d5:2 b4:1 c5:1 b4:1 a4:1  d5:5 r:1";
+    static const char* B = "f5:1 a5:2 a5:1 c6:2  g5:2 e5:1 g5:3  g5:1 b5:2 b5:1 a5:2  a5:3 e5:1 f5:1 e5:1  f5:1 a5:2 a5:1 c6:2  e6:2 c6:1 g5:3  b5:2 a5:1 g5:1 e5:1 d5:1  d5:5 r:1";
+    for (int k = 0; k < 32; k++)
+    {
+        const Ch& c = *prog[k % 16];
+        float t = k * bar;
+        lute(b, t, (float)c.root, 0.8f, 1.6f);
+        lute(b, t + 3 * e, (float)c.root + 7, 0.6f, 1.2f);
+        for (int s : {1, 2, 4, 5})
+            for (int j = 1; j < 3; j++) lute(b, t + s * e + j * 0.014f, (float)c.t[j], 0.3f, 0.5f);
+        if (k >= 16) // second time round: bodhran
+        {
+            skin(b, t, 120, 0.7f, 0.09f); skin(b, t + 3 * e, 120, 0.5f, 0.08f);
+            skin(b, t + 5 * e, 160, 0.25f, 0.05f);
+        }
+    }
+    auto lead = [&](int m, float t, float d) { lute(b, t, (float)m, 1.0f, std::min(1.5f, std::max(0.5f, d * 1.6f))); };
+    auto fl = [&](int m, float t, float d) { flute(b, t, mtof((float)m), d * 0.92f, 0.45f); lute(b, t, (float)m, 0.35f, 0.6f); };
+    tune(A, 0, e, lead); tune(B, 8 * bar, e, lead);
+    tune(A, 16 * bar, e, fl); tune(B, 24 * bar, e, fl);
+}
+
+// the Greenmarch: a wary D minor, harp-picked, with a thin distant flute
+static void tGreen(Buf& b)
+{
+    const float e = 0.375f;
+    static const int roots[4] = {50, 46, 43, 45};
+    static const bool minor[4] = {true, false, true, true};
+    arpeggio(b, e, roots, minor, 4, 2, HARP, 4, 0.35f);
+    for (int c = 0; c < 4; c++) pad(b, c * 6.0f, 6, {roots[c] - 12, roots[c], roots[c] + 7, roots[c] + 12 + (minor[c] ? 3 : 4)}, 0.35f, 600);
+    tune("a4:6 r:2  f4:4 e4:2 d4:2  d5:4 c5:2 bb4:2  a4:6 r:2  bb4:6 r:2  g4:4 a4:4  e5:4 d5:2 c5:2  a4:6 r:2", 0, e,
+         [&](int m, float t, float d) { flute(b, t, mtof((float)m), d * 0.9f, 0.2f); });
+}
+
+// the battlefield: war drums and a lone horn in D minor
+static void tBattle(Buf& b)
+{
+    const float u = 0.7f, bar = 4 * u;
+    for (int k = 0; k < 8; k++)
+    {
+        float t = k * bar;
+        thump(b, t, 62, 1.2f, 0.25f); thump(b, t + 2 * u, 76, 0.9f, 0.2f); thump(b, t + 3.5f * u, 62, 0.6f, 0.2f);
+        if (k % 4 == 3) for (int j = 0; j < 12; j++) skin(b, t + 3 * u + j * u / 12, 220, 0.12f + j * 0.03f, 0.05f); // a roll
+    }
+    for (int p = 0; p < 4; p++) { saws(b, p * 2 * bar, 36.7f, 2 * bar, 0.5f, 1.5f, 1.5f, 300); saws(b, p * 2 * bar, 55, 2 * bar, 0.3f, 1.5f, 1.5f, 400); }
+    tune("d4:2 f4:1 a4:1 d5:3 c5:1  bb4:3 a4:1 g4:2 f4:2  e4:2 g4:2 c5:3 b4:1  a4:2 f4:2 d4:4", 0, u, [&](int m, float t, float d) { brass(b, t, (float)m, d * 0.95f, 0.5f); });
+}
+
+// the Scorched Reach: an oud winding through E phrygian dominant over a darbuka
+static void tDesert(Buf& b)
+{
+    const float e = 0.3f, bar = 8 * e;
+    for (int k = 0; k < 8; k++)
+    {
+        float t = k * bar;
+        for (int p : {0, 4}) thump(b, t + p * e, 110, 0.9f, 0.1f);
+        for (int p : {2, 3, 6}) skin(b, t + p * e, 1800, 0.45f, 0.04f);
+        STRIKE(b, t, mtof(40), 0.8f, OUD, 1.5f);
+        STRIKE(b, t + 4 * e, mtof(47), 0.5f, OUD, 1.2f);
+    }
+    for (int p = 0; p < 4; p++) { saws(b, p * 2 * bar, mtof(40), 2 * bar, 0.35f, 1, 1, 350); saws(b, p * 2 * bar, mtof(47), 2 * bar, 0.2f, 1, 1, 350); }
+    tune("e4:2 f4:1 g#4:1 f4:1 e4:1 f4:2  g#4:2 a4:1 g#4:1 f4:2 e4:2  a4:2 b4:2 c5:2 b4:2  a4:1 g#4:1 f4:2 e4:4"
+         "  b4:2 c5:1 b4:1 a4:2 g#4:2  a4:1 b4:1 c5:2 d5:2 c5:2  b4:2 a4:1 g#4:1 f4:2 g#4:2  f4:2 e4:6", 0, e,
+         [&](int m, float t, float d) { STRIKE(b, t, mtof((float)m), 0.45f, OUD, std::min(1.4f, std::max(0.4f, d * 1.5f))); });
+}
+
+// Dunmoor: a slow court dirge in A minor, harpsichord over a stately pad and timpani
+static void tCastle(Buf& b)
+{
+    static const int ch[4][3] = {{57, 60, 64}, {53, 57, 60}, {48, 55, 64}, {52, 56, 59}}, root[4] = {45, 41, 36, 40};
+    for (int c = 0; c < 4; c++)
+    {
+        float t = c * 8.0f;
+        pad(b, t, 8, {ch[c][0], ch[c][1], ch[c][2], root[c]}, 0.3f, 700);
+        thump(b, t, 55, 1.1f, 0.3f); thump(b, t + 4, 55, 0.6f, 0.3f);
+        STRIKE(b, t, mtof((float)root[c] + 12), 0.45f, BELL, 3);
+    }
+    tune("e5:3 a5:1 c6:2 b5:1 a5:1  a5:2 f5:2 c6:3 a5:1  g5:2 c6:2 e6:3 d6:1  b5:3 g#5:1 e5:4", 0, 1.0f,
+         [&](int m, float t, float d) { STRIKE(b, t, mtof((float)m), 0.2f, HARPSI, 1.0f); });
+}
+
+// the Crypts: a low drone, a lonely choir note or two, and bells dropped into the dark
+static void tCrypt(Buf& b)
+{
+    for (int k = 0; k < 4; k++) { saws(b, k * 8.0f, mtof(38), 8, 0.5f, 3, 3, 250); saws(b, k * 8.0f, mtof(45), 8, 0.3f, 3, 3, 250); }
+    static const float bt[9] = {2, 5.5f, 9, 12.5f, 17, 20, 23.5f, 27, 29.5f};
+    static const int bn[9] = {74, 70, 72, 69, 75, 67, 74, 70, 63};
+    for (int i = 0; i < 9; i++) STRIKE(b, bt[i], mtof((float)bn[i]), 0.3f, BELL, 4);
+    choir(b, 4, mtof(62), 6, 2.5f, 1); choir(b, 8, mtof(63), 6, 2.0f, 1);
+    choir(b, 20, mtof(57), 7, 2.5f, 1); choir(b, 23, mtof(58), 6, 2.0f, 1);
+}
+
+// Deepdelve: a miner's plodding E minor, bass lute, anvil clinks and picks, a hollow pipe the second time round
+static void tMines(Buf& b)
+{
+    const float u = 0.5f, bar = 4 * u;
+    static const int roots[8] = {40, 40, 40, 40, 36, 36, 38, 38};
+    for (int k = 0; k < 16; k++)
+    {
+        float t = k * bar;
+        int r = roots[k % 8];
+        lute(b, t, (float)r, 0.9f); lute(b, t + 1.5f * u, (float)r, 0.6f); lute(b, t + 2 * u, (float)r + 7, 0.7f); lute(b, t + 3 * u, (float)r, 0.6f);
+        thump(b, t, 55, 0.7f, 0.15f);
+        for (int p : {1, 3}) STRIKE(b, t + p * u, 900 + 220 * ((k + p) % 3), 0.35f, METAL, 0.8f);
+        for (int p = 0; p < 8; p++) skin(b, t + p * u / 2, 3000, 0.08f, 0.02f);
+    }
+    for (int p = 0; p < 4; p++) saws(b, p * 4 * bar, mtof(28), 4 * bar, 0.5f, 1, 1, 250);
+    tune("e4:3 g4:1 b4:4  a4:2 g4:2 e4:4  g4:3 e4:1 c5:4  b4:4 a4:2 f#4:2", 16 * u, u, [&](int m, float t, float d) { flute(b, t, mtof((float)m), d * 0.9f, 0.15f); });
+}
+
+// Frostdeep: glass bells running up shifting chords over a cold pad
+static void tFrost(Buf& b)
+{
+    static const int ch[4][4] = {{69, 72, 76, 83}, {74, 77, 81, 88}, {71, 74, 79, 83}, {69, 72, 76, 83}};
+    static const int pat[8] = {0, 2, 1, 3, 2, 3, 1, 2}, low[4] = {45, 38, 40, 45};
+    for (int c = 0; c < 4; c++)
+    {
+        pad(b, c * 8.0f, 8, {low[c] + 12, low[c] + 19, low[c] + 24}, 0.25f, 1000);
+        for (int k = 0; k < 16; k++)
+            STRIKE(b, c * 8.0f + k * 0.5f, mtof((float)ch[c][pat[k % 8]]), k % 8 == 0 ? 0.4f : 0.22f, GLASS, 2.5f);
+        STRIKE(b, c * 8.0f, mtof((float)low[c] + 24), 0.5f, BELL, 4);
+    }
+}
+
+// the Infernal Forge: pounding anvils and a growling brass riff in C phrygian
+static void tForge(Buf& b)
+{
+    const float u = 0.45f, bar = 4 * u;
+    static const int riff[2][8] = {{0, 0, 1, 0, 0, 0, 3, 1}, {0, 0, 0, 1, 0, 5, 3, 1}};
+    for (int k = 0; k < 16; k++)
+    {
+        float t = k * bar;
+        for (int p = 0; p < 4; p++) thump(b, t + p * u, 50, 1.0f, 0.18f);
+        for (int p : {0, 2}) STRIKE(b, t + p * u, 640, 0.6f, METAL, 1.0f);
+        for (int p : {1, 3}) skin(b, t + p * u, 260, 0.6f, 0.07f);
+        for (int p = 0; p < 8; p++) brass(b, t + p * u / 2, 36.0f + riff[k % 2][p], u / 2 * 0.9f, 0.7f);
+        if (k % 4 == 0) { brass(b, t, 48, 1.6f * u, 0.8f); brass(b, t, 55, 1.6f * u, 0.8f); }
+    }
+}
+
+// the Lich's Citadel: a choir in D minor under a tolling bell and a church-organ drone
+static void tCitadel(Buf& b)
+{
+    static const int ch[4][3] = {{57, 62, 65}, {58, 62, 65}, {58, 62, 67}, {57, 61, 64}}, root[4] = {38, 34, 31, 33};
+    for (int c = 0; c < 4; c++)
+    {
+        float t = c * 8.0f;
+        for (int j = 0; j < 3; j++) choir(b, t, mtof((float)ch[c][j]), 7, 3.0f, j == 1 ? 2 : 0);
+        saws(b, t, mtof((float)root[c]), 8, 0.5f, 2, 2, 700); saws(b, t, mtof((float)root[c] + 12), 8, 0.3f, 2, 2, 900);
+        STRIKE(b, t, mtof((float)root[c] + 12), 0.9f, BELL, 5);
+        thump(b, t, 50, 1.0f, 0.4f);
+    }
+}
+
+// a waystone: a hushed A minor, slow harp over a warm pad over a warm pad
+static void tHaven(Buf& b)
+{
+    const float e = 0.45f;
+    static const int roots[4] = {45, 41, 38, 40};
+    static const bool minor[4] = {true, false, true, true};
+    arpeggio(b, e, roots, minor, 4, 2, HARP, 4, 0.4f);
+    for (int c = 0; c < 4; c++) pad(b, c * 7.2f, 7.2f, {roots[c] + 12, roots[c] + 19, roots[c] + 24 + (minor[c] ? 3 : 4)}, 0.3f, 800);
+}
+
+// the open sea: long minor swells and a bell lost in the fog
+static void tSea(Buf& b)
+{
+    static const int ch[4][3] = {{50, 57, 62}, {45, 52, 57}, {46, 53, 58}, {45, 52, 57}};
+    for (int c = 0; c < 4; c++)
+    {
+        pad(b, c * 8.0f, 8, {ch[c][0], ch[c][1], ch[c][2], ch[c][0] - 12}, 0.4f, 500);
+        STRIKE(b, c * 8.0f + 3, mtof((float)ch[c][2] + 12), 0.3f, BELL, 4);
+    }
+    choir(b, 6, mtof(57), 8, 2.0f, 1); choir(b, 22, mtof(53), 8, 2.0f, 1);
+}
+
+static void buildMusic()
+{
+    static const struct { float loop, wet, room, rms; void (*make)(Buf&); } defs[TR_COUNT] = {
+        {34.56f, 0.25f, 0.5f, 0.15f, tVillage}, {24.0f, 0.4f, 0.7f, 0.12f, tGreen},   {22.4f, 0.4f, 0.8f, 0.17f, tBattle},
+        {19.2f, 0.3f, 0.6f, 0.15f, tDesert},    {32.0f, 0.5f, 0.85f, 0.13f, tCastle}, {32.0f, 0.6f, 0.9f, 0.1f, tCrypt},
+        {32.0f, 0.3f, 0.6f, 0.15f, tMines},     {32.0f, 0.6f, 0.9f, 0.11f, tFrost},   {28.8f, 0.2f, 0.5f, 0.17f, tForge},
+        {32.0f, 0.6f, 0.9f, 0.15f, tCitadel},   {28.8f, 0.5f, 0.8f, 0.11f, tHaven},   {32.0f, 0.6f, 0.9f, 0.11f, tSea}};
+    for (int id = 0; id < TR_COUNT; id++)
+    {
+        const auto& d = defs[id];
+        size_t N = (size_t)(d.loop * SR);
+        Buf b(N + (size_t)(3 * SR), 0.0f);
+        d.make(b);
+        reverb(b, d.wet, d.room);
+        for (size_t i = N; i < b.size(); i++) b[i - N] += b[i]; // the tail wraps round onto the start
+        b.resize(N);
+        double sq = 0;
+        for (float v : b) sq += (double)v * v;
+        float k = d.rms / std::sqrt((float)(sq / N) + 1e-9f);
+        auto& w = trk[id].wav;
+        w.resize(44 + N * 2);
+        auto put = [&](size_t at, const void* p, size_t n) { std::memcpy(&w[at], p, n); };
+        uint32_t u32; uint16_t u16;
+        put(0, "RIFF", 4); u32 = 36 + (uint32_t)N * 2; put(4, &u32, 4); put(8, "WAVEfmt ", 8);
+        u32 = 16; put(16, &u32, 4); u16 = 1; put(20, &u16, 2); put(22, &u16, 2);
+        u32 = SR; put(24, &u32, 4); u32 = SR * 2; put(28, &u32, 4); u16 = 2; put(32, &u16, 2); u16 = 16; put(34, &u16, 2);
+        put(36, "data", 4); u32 = (uint32_t)N * 2; put(40, &u32, 4);
+        for (size_t i = 0; i < N; i++) { int16_t s = (int16_t)(std::tanh(b[i] * k) * 30000); put(44 + i * 2, &s, 2); }
+        trk[id].m = LoadMusicStreamFromMemory(".wav", w.data(), (int)w.size());
+        trk[id].ok = trk[id].m.frameCount > 0;
+        trk[id].m.looping = true;
+    }
+}
+
 void initAudio()
 {
     InitAudioDevice();
     audioOk = IsAudioDeviceReady();
     if (!audioOk) return;
     build();
+    buildMusic();
     SetMasterVolume(0.8f);
 }
 
@@ -611,7 +947,7 @@ void closeAudio()
             for (auto& a : v) UnloadSoundAlias(a);
         for (auto& b : s.base) UnloadSound(b);
     }
-    UnloadSound(music);
+    for (auto& t : trk) if (t.ok) UnloadMusicStream(t.m);
     UnloadSound(wind);
     CloseAudioDevice();
 }
@@ -641,21 +977,45 @@ void playAt(int id, float x, float y, float vol, float pitch)
     playSfx(id, v, pitch, clampf(0.5f + dx / 500.0f, 0.1f, 0.9f));
 }
 
+// Which tune fits where the player stands (-1: none, the dunes keep only their wind).
+static int trackFor(bool inGame)
+{
+    if (!inGame || G.inVillage) return TR_VILLAGE; // the title screen sings the bard's tune too
+    if (G.sandbox || G.sanctuary) return TR_HAVEN;
+    switch (regionId())
+    {
+    case 1: return -1;
+    case 2: return TR_SEA;
+    case 3: return TR_DESERT;
+    }
+    static const int byStage[7] = {TR_GREEN, TR_CASTLE, TR_CRYPT, TR_MINES, TR_FROST, TR_FORGE, TR_CITADEL};
+    if (G.stage == 0 && G.stormX1 > G.stormX0 && G.p.m.cx() > G.stormX0 - 100) return TR_BATTLE;
+    return byStage[std::min(std::max(G.stage, 0), 6)];
+}
+
 void updateAudio(bool inGame)
 {
     if (!audioOk) return;
     frameCounter++;
-    // the Whispering Dunes have no music, only the wind; elsewhere the music returns
-    static float musicVol = 0.5f, windVol = 0;
+    int want = trackFor(inGame);
     bool dunes = inGame && inDunes();
-    musicVol += ((dunes ? 0.0f : 0.5f) - musicVol) * 0.01f;
+    for (int i = 0; i < TR_COUNT; i++) // the wanted tune fades in as the old one fades out
+    {
+        Track& t = trk[i];
+        if (!t.ok) continue;
+        t.vol += ((i == want ? 1.0f : 0.0f) - t.vol) * 0.02f;
+        if (t.vol > 0.003f)
+        {
+            if (!t.on) { PlayMusicStream(t.m); t.on = true; }
+            UpdateMusicStream(t.m);
+            SetMusicVolume(t.m, t.vol * (inGame && G.underwater ? 0.25f : 0.5f));
+        }
+        else if (t.on) { StopMusicStream(t.m); t.on = false; }
+    }
+    static float windVol = 0;
     float windTo = dunes ? 0.75f : (inGame && (G.inVillage || G.duneEnd) ? 0.12f : 0.0f);
     if (inGame && G.underwater) windTo = 0; // no wind under the waves
     windVol += (windTo - windVol) * (inGame && G.underwater ? 0.08f : 0.01f);
-    if (!IsSoundPlaying(music)) PlaySound(music);
     if (!IsSoundPlaying(wind)) PlaySound(wind);
-    SetSoundVolume(music, musicVol);
     SetSoundVolume(wind, windVol);
-    float pitch = inGame && !G.sanctuary ? 1.0f - G.stage * 0.05f : 1.1f; // each stage sits in its own key
-    SetSoundPitch(music, pitch);
 }

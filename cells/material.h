@@ -49,6 +49,7 @@ enum class CellMaterial : uint8_t {
     Masonry,  // grey dressed stone in mortared courses: castle and crypt walls
     Glowmoss, // the damp caves' faint light
     BloodEarth, // the battlefield before Dunmoor: ground soaked dark with old blood
+    Sandstone,  // the desert east of Dunmoor: banded rock that blasts to sand
     Count
 };
 
@@ -127,7 +128,23 @@ inline const MaterialProps& props(CellMaterial m) {
         { "Masonry",    {58,58,66,255},    {138,136,146,255}, Kind::Solid,  50,   4,   0,   0, 0, 0, 0, CellMaterial::Gravel },
         { "Glowmoss",   {34,96,84,255},    {96,196,160,255},  Kind::Solid,  40,   1,  10,  40, 0, 0, 0, CellMaterial::Empty, {40,130,110,255} },
         { "Bloodied Earth", {62,22,20,255}, {112,44,34,255},  Kind::Solid,  40,   1,   0,   0, 0, 0 },
+        { "Sandstone",  {150,98,56,255},   {222,170,108,255}, Kind::Solid,  50,   3,   0,   0, 0, 0, 0, CellMaterial::Sand },
     };
     static_assert(sizeof(table) / sizeof(table[0]) == (int)CellMaterial::Count, "material table out of sync");
     return table[static_cast<unsigned char>(m)];
+}
+
+// How much a surface grips what slides on it: 1 = ordinary rock (rigid bodies' mu 0.55, corpses' Tune::FRICTION)
+inline float grip(CellMaterial m) {
+    switch (m) {
+    case CellMaterial::Ice:      return 0.08f;
+    case CellMaterial::Glass:    return 0.3f;
+    case CellMaterial::Obsidian: return 0.45f;
+    case CellMaterial::Metal:    return 0.5f;
+    case CellMaterial::Moss: case CellMaterial::Glowmoss: return 0.7f;
+    case CellMaterial::Sand: case CellMaterial::WetSand: case CellMaterial::Snow:
+    case CellMaterial::Dirt: case CellMaterial::Grass: case CellMaterial::BloodEarth: return 1.4f;
+    case CellMaterial::Gravel: return 1.6f;
+    default: return 1.0f;
+    }
 }

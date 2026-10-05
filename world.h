@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <vector>
 #include <memory>
 #include <cstdint>
@@ -22,6 +23,9 @@ struct Debris { float x, y, vx, vy; Cell cell; };
 // back wall stays at one colour per unit. Gameplay code talks in units (atU, matU, inU and the functions
 // below the struct); the simulation and renderer work in cells.
 const int CS = 64; // chunk side in cells, a power of two
+// A back-wall colour's alpha doubles as a pattern, drawn per cell when rendering (world.cpp:wallStyle): the colour
+// is the base tone, the pattern its fine grain - so tiled walls and boards are as fine as the terrain, not 2x2 blocks.
+enum WallStyle : unsigned char { WALL_TILE = 250, WALL_PLANK_V, WALL_PLANK_H, WALL_COBBLE, WALL_BRICK };
 struct Chunk
 {
     Cell cells[CS * CS];
@@ -88,6 +92,10 @@ void worldInit(int w, int h, Cell fill = Cell{}, Color fillBg = Color{12, 12, 16
 inline void disturb(int x, int y, int r) { world.disturbed.push_back({x, y, r}); } // in cells
 // in cells: the simulation over a rectangle, and drawing the grid
 void simulate(int x0, int y0, int x1, int y1);
+// Runs fn(0..n-1) across a pool of worker threads started once (a fresh std::thread costs ~0.1 ms on Windows,
+// which several times a frame cost more than the work). The caller helps, and it returns when all are done.
+void parallelFor(int n, const std::function<void(int)>& fn);
+int workerCount(); // threads parallelFor spreads over, the caller included
 Color cellColor(const Cell& c, int x, int y);
 void renderWorld(Color* px, int camX, int camY, int vw, int vh);
 // in world units: these act on every cell of the units they cover
@@ -99,5 +107,6 @@ void paintCircle(int cx, int cy, int r, CellMaterial m, bool onlyEmpty);
 bool isSolid(int x, int y);       // blocks entities (any cell of the unit)
 bool isSolidC(int x, int y);      // the one cell (in cells)
 bool isLiquidAt(int x, int y);
+float gripAt(int x, int y);      // grip() of the unit's first solid cell, 1 if none
 bool lineOfSight(float x0, float y0, float x1, float y1);
 void materialSelfTest(); // --selftest: reactions and the material table's tags

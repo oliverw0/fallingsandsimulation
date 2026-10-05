@@ -1,4 +1,8 @@
 #include <thread>
+#include <functional>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include "world.h"
 #include "util.h"
 #include <algorithm>
@@ -79,7 +83,7 @@ static uint8_t defaultLife(M m)
 {
     switch (m)
     {
-    case M::Fire: return (uint8_t)irange(20, 45);
+    case M::Fire: return (uint8_t)irange(28, 60);
     case M::Smoke: return (uint8_t)irange(40, 90);
     case M::Steam: return (uint8_t)irange(120, 240);
     default: return 0;
@@ -224,21 +228,21 @@ static void updateLiquid(int x, int y)
     int disp = P(self.material).dispersion * world.scale;
     if (self.material == M::Lava && !chance(3))
         return; // lava is sluggish
+    // Sideways only towards somewhere it can drop: a pool levels out to within a cell and then rests, instead of
+    // its surface wandering for ever (a part-filled top row used to random-walk, keeping every chunk under it awake).
+    // It looks a long way along its row for a drop (so a pool comes out flat) but moves at most `disp` a tick.
     for (int pass = 0; pass < 2; pass++)
     {
         int dir = pass ? -d : d;
-        int best = 0;
-        for (int i = 1; i <= disp; i++)
+        for (int i = 1; i <= disp * 12; i++)
         {
-            if (canSink(self, x + dir * i, y))
-                best = i;
-            else
+            if (!canSink(self, x + dir * i, y))
                 break;
-        }
-        if (best)
-        {
-            swapTo(x, y, x + dir * best, y);
-            return;
+            if (canSink(self, x + dir * i, y + 1))
+            {
+                swapTo(x, y, x + dir * std::min(i, disp), y);
+                return;
+            }
         }
     }
 }
@@ -305,6 +309,15 @@ static void updateFire(int x, int y)
         return;
     }
     c.life--;
+    if (c.life > 14 && chance(18)) // a young flame feeds a smaller one above it (or beside it), so a fire stands up in a plume
+    {
+        int fx = x + (chance(3) ? irand(3) - 1 : 0);
+        if (world.in(fx, y - 1) && world.atq(fx, y - 1).material == M::Empty)
+        {
+            put(fx, y - 1, M::Fire);
+            world.atq(fx, y - 1).life = c.life / 2;
+        }
+    }
     for (auto& d : DIRS)
     {
         int nx = x + d[0], ny = y + d[1];
@@ -369,11 +382,13 @@ static bool updateBurning(int x, int y)
             return false;
         }
     }
-    if (chance(3))
+    if (chance(2))
     {
         int nx = x + irand(3) - 1, ny = y - 1;
         if (world.in(nx, ny) && world.atq(nx, ny).material == M::Empty)
             put(nx, ny, M::Fire);
+        else if (chance(2) && world.in(x, y - 2) && world.atq(x, y - 1).material != M::Empty && world.atq(x, y - 2).material == M::Empty)
+            put(x, y - 2, M::Fire); // licks up past something sitting on top of it
     }
     const int* d = DIRS[irand(4)];
     int nx = x + d[0], ny = y + d[1];
@@ -608,6 +623,15 @@ void ignite(int x, int y)
 
 bool isSolidC(int x, int y) { return solidCell(x, y); }
 
+float gripAt(int x, int y)
+{
+    int k = world.scale;
+    for (int j = 0; j < k; j++)
+        for (int i = 0; i < k; i++)
+            if (solidCell(x * k + i, y * k + j)) return grip(world.mat(x * k + i, y * k + j));
+    return 1;
+}
+
 bool isSolid(int x, int y)
 {
     int k = world.scale;
@@ -791,7 +815,7 @@ Color cellColor(const Cell& c, int x, int y)
     switch (m)
     {
     case M::Fire:
-        col = lerpColor(Color{190, 40, 10, 230}, Color{255, 236, 130, 255}, std::min(1.0f, c.life / 40.0f));
+        col = lerpColor(Color{176, 34, 12, 220}, Color{255, 238, 140, 255}, std::min(1.0f, (c.life + (c.shade & 7) - 3) / 50.0f)); // red at the tips, white-gold at the heart
         break;
     case M::Lava:
     {
@@ -801,7 +825,13 @@ Color cellColor(const Cell& c, int x, int y)
     }
     case M::Water: case M::Acid: case M::Blood: case M::Oil:
     {
-        col = brighten(col, shimmer[(f * 5 / 2 + x * 12 + y * 4 + (c.shade >> 4) * 41) & 255]); // same shimmer: 256 steps a turn
+        // Liquids are smooth, soft-edged bodies of colour, not speckle: the tone drifts slowly across the surface on two
+        // crossing swells (broad, so neighbouring cells agree), with only a trace of per-cell grain. Water is also see-through,
+        // so the back wall and whatever is sunk in it show through, as in Noita.
+        const MaterialProps& p = P(m);
+        float t = 0.5f + (shimmer[(x * 2 + y * 3 + f) & 255] + shimmer[(x * 3 - y * 2 - f * 2 + 512) & 255]) * (1 / 70.0f) + ((c.shade & 15) - 8) * 0.002f;
+        col = lerpColor(p.a, p.b, t < 0 ? 0 : (t > 1 ? 1 : t));
+        if (m == M::Water) col.a = 138;
         break;
     }
     default:
@@ -825,14 +855,169 @@ Color cellColor(const Cell& c, int x, int y)
 
 static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, int j1);
 
+namespace
+{
+struct Pool
+{
+    std::vector<std::thread> ts;
+    std::mutex mx;
+    std::condition_variable wake, done;
+    const std::function<void(int)>* job = nullptr;
+    std::atomic<int> next{0};
+    int n = 0, gen = 0, busy = 0;
+    Pool()
+    {
+        int k = (int)std::max(1u, std::min(8u, std::thread::hardware_concurrency())) - 1;
+        for (int i = 0; i < k; i++) ts.emplace_back([this] { loop(); });
+        for (auto& t : ts) t.detach(); // they live as long as the game
+    }
+    void loop()
+    {
+        int seen = 0;
+        for (;;)
+        {
+            std::unique_lock<std::mutex> l(mx);
+            wake.wait(l, [&] { return gen != seen; });
+            seen = gen;
+            const std::function<void(int)>* f = job;
+            int N = n;
+            busy++;
+            l.unlock();
+            for (int i; (i = next++) < N;) (*f)(i);
+            l.lock();
+            if (--busy == 0) done.notify_all();
+        }
+    }
+    void run(int N, const std::function<void(int)>& f)
+    {
+        {
+            std::lock_guard<std::mutex> l(mx);
+            job = &f; n = N; next = 0; gen++;
+        }
+        wake.notify_all();
+        for (int i; (i = next++) < N;) f(i);
+        std::unique_lock<std::mutex> l(mx);
+        done.wait(l, [&] { return busy == 0; });
+    }
+};
+Pool& pool() { static Pool p; return p; }
+}
+
+void parallelFor(int n, const std::function<void(int)>& fn)
+{
+    if (n <= 1) { if (n == 1) fn(0); return; }
+    pool().run(n, fn);
+}
+int workerCount() { return (int)pool().ts.size() + 1; }
+
+// Back-wall patterns (see WallStyle in world.h), worked out per cell as the frame is drawn: `b` is the tone the level
+// painted at one colour per unit, and the pattern lays a cell-fine grain over it - tile joints, plank seams, stones.
+static Color wallStyle(Color b, int x, int y)
+{
+    float k = 1;
+    float tint = 0; // a stone or plank's own warm/cool lean
+    switch (b.a)
+    {
+    case WALL_TILE: // big dark stone tiles in running bond: sunk grout, a lit top-left edge, a shaded foot, the odd crack
+    {
+        const int TW = 48, TH = 28;
+        int row = y / TH, v = y % TH, xo = x + (row & 1) * (TW / 2), col = xo / TW, u = xo % TW;
+        float th = hash2(col, row, 77);
+        k = (0.7f + 0.5f * th) * (1 - 0.2f * v / TH);
+        if (v >= TH - 2 || u >= TW - 2) k = 0.18f;
+        else if (v < 2 || u < 2) k *= 1.4f;
+        else if (v >= TH - 4 || u >= TW - 4) k *= 0.8f;
+        else if (th > 0.88f && v > 3 && u == 10 + v * 3 / 4 + (int)(hash2(col, row, 79) * 12)) k *= 0.45f;
+        k *= 0.9f + 0.2f * hash2(x, y, 78);
+        tint = th - 0.5f;
+        break;
+    }
+    case WALL_PLANK_V: // upright boards: seams, long grain, a knot now and then, nail heads
+    {
+        const int PW = 10;
+        int p = x / PW, u = x % PW;
+        k = (0.78f + 0.34f * hash2(p, 5, 81)) * (0.9f + 0.2f * hash2(x, (y + p * 37) / 6, 82));
+        if (u == 0) k *= 0.4f;
+        else if (u == 1) k *= 1.12f;
+        else if (u == PW - 1) k *= 0.85f;
+        if (y % 48 == 3 && (u == 2 || u == PW - 3)) k = 1.45f;
+        float kn = hash2(p, y / 48, 83);
+        if (kn > 0.9f)
+        {
+            float dx = (float)(u - 5), dy = (y % 48 - 10 - (int)(kn * 120) % 24) / 1.8f, r2 = dx * dx + dy * dy;
+            if (r2 <= 9) k *= r2 > 5 ? 0.72f : 0.5f;
+        }
+        tint = hash2(p, 5, 81) - 0.5f;
+        break;
+    }
+    case WALL_PLANK_H: // boards laid along the wall, butt joints staggered between rows
+    {
+        int bd = y / 8, v = y % 8;
+        k = (0.78f + 0.34f * hash2(bd, (x + bd * 29) / 92, 84)) * (0.9f + 0.2f * hash2(x / 6 + bd * 17, y, 85));
+        if (v == 7 || (x + bd * 29) % 92 == 0) k *= 0.4f;
+        else if (v == 0) k *= 1.15f;
+        tint = hash2(bd, 2, 84) - 0.5f;
+        break;
+    }
+    case WALL_COBBLE: // rounded fieldstones bedded in mortar
+    {
+        int row = y / 10, v = y % 10, xo = x + (int)(hash2(row, 3, 86) * 14) + (row & 1) * 7, stone = xo / 14, u = xo % 14;
+        if (v == 9 || u == 13 || ((u <= 1 || u >= 12) && (v <= 1 || v >= 8))) k = 0.34f * (0.9f + 0.2f * hash2(x, y, 89));
+        else
+        {
+            k = (0.8f + 0.36f * hash2(stone, row, 87)) * (1.12f - 0.04f * v - 0.025f * u);
+            if (v == 0 || u == 0) k *= 1.18f;
+            k *= 0.92f + 0.16f * hash2(x, y, 90);
+        }
+        tint = hash2(stone, row, 91) - 0.5f;
+        break;
+    }
+    default: // WALL_BRICK: courses of bricks
+    {
+        int row = y / 8, v = y % 8, xo = x + (row & 1) * 11, u = xo % 22;
+        if (v == 7 || u == 21) k = 0.4f;
+        else
+        {
+            k = 0.8f + 0.32f * hash2(xo / 22, row, 88);
+            if (v == 0) k *= 1.15f;
+            k *= 0.93f + 0.14f * hash2(x, y, 92);
+        }
+        tint = hash2(xo / 22, row, 93) - 0.5f;
+        break;
+    }
+    }
+    auto ch = [&](int v, float lean) { return (unsigned char)std::max(0, std::min(255, (int)(v * k * (1 + tint * lean)))); };
+    return Color{ch(b.r, 0.12f), ch(b.g, 0.04f), ch(b.b, -0.1f), 255};
+}
+
 // Every pixel is independent and only reads the world, so the screen is drawn in bands, one per core.
 void renderWorld(Color* px, int camX, int camY, int vw, int vh)
 {
-    static const int nt = (int)std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
-    std::vector<std::thread> ts;
-    for (int t = 1; t < nt; t++) ts.emplace_back(renderRows, px, camX, camY, vw, vh, vh * t / nt, vh * (t + 1) / nt);
-    renderRows(px, camX, camY, vw, vh, 0, vh / nt);
-    for (auto& t : ts) t.join();
+    int nt = workerCount();
+    parallelFor(nt, [&](int t) { renderRows(px, camX, camY, vw, vh, vh * t / nt, vh * (t + 1) / nt); });
+}
+
+// Light through a rippling surface, as a web of bright lines on the water: three drifting sine fields whose near-zero sums
+// trace cells, worked on 2x2-cell blocks and cut to three levels, so it stays pixel art. Returns 0, 1 or 2.
+static float SINT[1024];
+static const bool sinInit = [] { for (int i = 0; i < 1024; i++) SINT[i] = std::sin(i * 2 * PI / 1024); return true; }();
+static inline float sl(float a) { return SINT[(int)(a * 162.97466f) & 1023]; }
+// Sunbeams from the surface: slanted bands drifting, widening and narrowing, soft-edged.
+static float rayLevel(int x, int y, int f)
+{
+    float t = f * 0.012f, qx = (float)(x >> 1), qy = (float)(y >> 1), u = qx + qy * 0.42f;
+    float b1 = 0.5f + 0.5f * sl(u * 0.085f + t * 1.3f), b2 = 0.5f + 0.5f * sl(u * 0.047f - t * 0.9f + 1.7f);
+    float beam = b1 * b1 * b1 * (0.35f + 0.65f * b2) * (0.8f + 0.2f * sl(qx * 0.31f + qy * 0.17f + t * 4.0f));
+    return clampf((beam - 0.06f) * 2.0f, 0.0f, 1.0f);
+}
+static float causticAmt(int x, int y, int f)
+{
+    float t = f * 0.021f, qx = (float)(x >> 1), qy = (float)(y >> 1);
+    float n1 = sl(qx * 0.33f + sl(qy * 0.27f + t * 1.3f) * 1.7f);
+    float n2 = sl(qy * 0.36f + sl(qx * 0.23f - t) * 1.7f);
+    float n3 = sl((qx + qy) * 0.25f + sl(qx * 0.19f + t * 0.8f) * 1.5f + t * 0.6f);
+    float line = std::max(1 - std::fabs(n1 + n2) * 3.4f, 1 - std::fabs(n2 + n3) * 3.4f);
+    return clampf((line - 0.3f) * 1.7f, 0.0f, 1.0f);
 }
 
 static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, int j1)
@@ -841,13 +1026,23 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
     float mx = vw * 0.74f - camX * 0.03f, my = vh * 0.15f - camY * 0.015f, mr = 11.0f * world.scale;
     float mr2 = mr * mr, halo2 = mr2 * 25;
     const Color out = {8, 8, 10, 255};
+    std::vector<int> wd(vw, 0); // water above each column's cell, in cells: how deep the light has faded
+    std::vector<int> since(vw, 99), wdl(vw, 0); // cells since this column last held water, and how deep that water was
+    for (int i = 0; i < vw; i++)
+        for (int k = 1; k <= 160; k++)
+        {
+            int yy = camY + j0 - k, xx = camX + i;
+            if (yy < 0 || yy >= world.h || xx < 0 || xx >= world.w || world.get(xx, yy).material != M::Water) break;
+            wd[i]++;
+        }
+    for (int i = 0; i < vw; i++) if (wd[i] > 0) { since[i] = 0; wdl[i] = wd[i]; }
     for (int j = j0; j < j1; j++)
     {
         int y = camY + j;
         Color* row = px + (size_t)j * vw;
         if (y < 0 || y >= world.h) { std::fill(row, row + vw, out); continue; }
-        float dy = j - my, dy2 = dy * dy;
-        int ly = y & (CS - 1);
+        float dy = j - my, dy2 = dy * dy, cl = 0;
+        int ly = y & (CS - 1), clAt = -99; // storm cloud cover is soft: worked out every 4th pixel along the row
         for (int i = 0; i < vw;)
         {
             int x0 = camX + i;
@@ -863,7 +1058,7 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                 Color col;
                 if (c.material == M::Empty)
                 {
-                    col = b;
+                    col = b.a == 255 ? b : wallStyle(b, x, y);
                     if (ch && ch->sky[kb])
                     {
                         float dx = i - mx, d2 = dx * dx + dy2;
@@ -882,8 +1077,12 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                             col = Color{210, 214, 236, 255};
                         if (world.storm > 0.01f) // storm clouds roll in over moon and stars, lit by the lightning
                         {
-                            float sx = (x / (float)world.scale) * 0.006f + world.frame * 0.0012f, sy = (y / (float)world.scale) * 0.016f;
-                            float cl = vnoise(sx, sy, 911) * 0.65f + vnoise(sx * 2.7f, sy * 2.7f + world.frame * 0.002f, 912) * 0.35f;
+                            if (i - clAt >= 4)
+                            {
+                                float sx = (x / (float)world.scale) * 0.006f + world.frame * 0.0012f, sy = (y / (float)world.scale) * 0.016f;
+                                cl = vnoise(sx, sy, 911) * 0.65f + vnoise(sx * 2.7f, sy * 2.7f + world.frame * 0.002f, 912) * 0.35f;
+                                clAt = i;
+                            }
                             float cover = clampf((cl - 0.75f + world.storm * 0.75f) * 3.0f, 0, 1) * world.storm;
                             Color cloud = lerpColor(Color{30, 30, 40, 255}, Color{58, 60, 72, 255}, clampf((cl - 0.4f) * 2, 0, 1));
                             col = lerpColor(lerpColor(col, Color{10, 10, 16, 255}, world.storm * 0.5f), cloud, cover);
@@ -894,6 +1093,8 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                 else
                 {
                     col = cellColor(c, x, y);
+                    wd[i] = c.material == M::Water ? wd[i] + 1 : 0;
+                    if (c.material == M::Water) { since[i] = 0; wdl[i] = wd[i]; } else if (since[i] < 99) since[i]++;
                     Kind kd = P(c.material).kind;
                     if (kd == Kind::Solid || kd == Kind::Powder) // rim light on exposed edges
                     {
@@ -905,11 +1106,57 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                             if (dn == M::Empty) col = brighten(col, -18);
                         }
                     }
+                    if (c.material == M::Water) // a bright, nearly opaque skin where the water meets the air
+                    {
+                        M up = ch && ly > 0 ? ch->cells[k - CS].material : (y > 0 ? world.get(x, y - 1).material : M::Bedrock);
+                        if (up == M::Empty) { col = brighten(col, 46); col.a = 215; }
+                    }
+                    if (c.material == M::Water && col.a == 138) col.a = (unsigned char)(138 + std::min(100, wd[i] * 3 / 5)); // the deeper, the less you see through it
                     if (col.a < 255) // composite translucent liquids/gases over the back wall
                     {
                         int a = col.a;
                         col = Color{(unsigned char)(b.r + (col.r - b.r) * a / 255), (unsigned char)(b.g + (col.g - b.g) * a / 255),
                                     (unsigned char)(b.b + (col.b - b.b) * a / 255), 255};
+                    }
+                    if (c.material == M::Water && wd[i] > 3) // specks in the water: marine snow sinking, bubbles rising, motes drifting
+                    {
+                        int f = world.frame;
+                        float a = 0;
+                        int sx = x + (int)(sl(y * 0.04f + f * 0.006f) * 3.0f), sy = y - f / 9; // snow: single cells, swaying as they sink
+                        if (hash2(sx, sy, 5151) > 0.9975f) a = 0.7f + 0.3f * hash2(sx, sy, f / 14);
+                        int bx = (x + (int)(sl(y * 0.11f + f * 0.02f) * 2.0f)) >> 1, by = (y + f / 3) >> 1; // bubbles: 2x2, wobbling upward
+                        if (hash2(bx, by, 6262) > 0.9988f) a = 0.85f;
+                        else if (hash2(x - f / 14, y, 7373) > 0.9982f) a = std::max(a, 0.42f); // a dim mote on a slow sideways current
+                        if (a > 0)
+                        {
+                            a *= 0.6f + 0.4f * std::exp(-wd[i] / 300.0f);
+                            col = Color{(unsigned char)(col.r + (205 - col.r) * a), (unsigned char)(col.g + (232 - col.g) * a), (unsigned char)(col.b + (248 - col.b) * a), 255};
+                        }
+                    }
+                    if (c.material == M::Water && wd[i] > 1) // sunbeams coming down from the surface, thinning out with depth
+                    {
+                        float rl = rayLevel(x, y, world.frame);
+                        if (rl > 0)
+                        {
+                            float fade = std::exp(-wd[i] / 70.0f) * std::min(1.0f, wd[i] / 8.0f) * (1 - 0.7f * world.storm) * rl; // faint, and fading quickly with depth
+                            col = Color{(unsigned char)std::min(255.0f, col.r + 36 * fade), (unsigned char)std::min(255.0f, col.g + 70 * fade),
+                                        (unsigned char)std::min(255.0f, col.b + 92 * fade), 255};
+                        }
+                    }
+                    if (c.material == M::Water) // the deep: the colour settles toward a dark, calm blue
+                    {
+                        float dk = std::min(0.6f, wd[i] / 520.0f);
+                        col = Color{(unsigned char)(col.r + (6 - col.r) * dk), (unsigned char)(col.g + (22 - col.g) * dk), (unsigned char)(col.b + (46 - col.b) * dk), 255};
+                    }
+                    else if ((kd == Kind::Solid || kd == Kind::Powder) && since[i] >= 1 && since[i] <= 10 && wdl[i] > 3)
+                    { // caustics: light netted across the floor and walls the water covers - soft, pale, fading with depth and with distance below the surface
+                        float cl = causticAmt(x, y, world.frame);
+                        if (cl > 0)
+                        {
+                            float fade = std::exp(-wdl[i] / 260.0f) * (1 - since[i] / 11.0f) * (1 - 0.7f * world.storm);
+                            col = Color{(unsigned char)std::min(255.0f, col.r + 26 * cl * fade), (unsigned char)std::min(255.0f, col.g + 46 * cl * fade),
+                                        (unsigned char)std::min(255.0f, col.b + 62 * cl * fade), 255};
+                        }
                     }
                 }
                 row[i] = col;

@@ -59,6 +59,10 @@ const StageDef STAGES[] = {
 const int STAGE_COUNT = (int)(sizeof(STAGES) / sizeof(STAGES[0]));
 
 static int W, H, seed;
+// The deep biomes overlap like wide steps: each reaches WING units left under the one before it (wingL) and WING
+// units right over the one after it (wingR). The haven sits at W - wingR; the entry at wingL.
+static const int WING = 600;
+static int wingL = 0, wingR = 0;
 static std::vector<uint8_t> air;
 static std::vector<Vector2> path;
 static std::vector<int> surf;
@@ -246,8 +250,9 @@ static void placeArrowTrap(int x, int fy)
             int wx = x + sd * k;
             if (!world.in(wx, ty)) break;
             if (!isSolid(wx, ty)) continue;
-            for (int yy = ty - 1; yy <= ty + 1; yy++)
-                for (int xx = 0; xx < 3; xx++) place(wx + sd * xx, yy, M::Metal);
+            for (int yy = ty - 6; yy <= ty + 6; yy++) // the slab the head is set in (drawn over by its sprite)
+                for (int xx = 0; xx < 3; xx++)
+                    if (isSolid(wx + sd * xx, yy) || yy == ty) place(wx + sd * xx, yy, M::Masonry);
             Trap t;
             t.type = TR_ARROW;
             t.x = wx; t.y = ty; t.dir = -sd;
@@ -279,7 +284,7 @@ static void placeCollapse(int x, int fy)
     G.traps.push_back(t);
 }
 
-static void addChest(int x, int fy) { G.inter.push_back({IT_CHEST, (float)x, (float)fy}); }
+static void addChest(int x, int fy) { G.inter.push_back({IT_CHEST, (float)x, (float)fy, false, G.stage + 1}); G.inter.back().rest = 0; } // data: the tier it was left at, + 1
 
 static void placeCryptRoom(int x, int fy)
 {
@@ -317,21 +322,30 @@ static void bgPut(int x, int y, Color c)
     world.skyAt(x, y) = 0;
 }
 
+// A back-wall cell painted in a pattern (WallStyle, world.h): `c` is the base tone, the pattern its cell-fine grain,
+// worked out as the frame is drawn - so boards, tiles and stones are as fine as the terrain in front of them.
+static void bgStyle(int x, int y, Color c, int style)
+{
+    if (!world.in(x, y)) return;
+    Color& b = world.bgAt(x, y);
+    b = shadeC(c, 0.8f);
+    b.a = (unsigned char)style;
+    world.skyAt(x, y) = 0;
+}
+
+// A piece of furniture or a hanging (decor.cpp), at the terrain's grain: see DecorKind in game.h for what x, y and size mean.
+static void addDecor(int kind, float x, float y, int var = -1, int size = 0, bool flip = false)
+{
+    Interact d{IT_DECOR, x, y, false, kind, ((var < 0 ? irand(64) : var) & 63) | (flip ? 64 : 0)};
+    d.w = size;
+    G.inter.push_back(d);
+}
+
 // A skeleton sprawled on the floor, painted behind (dir flips which end the skull is).
 static void paintSkeleton(int x, int fy, int dir)
 {
-    const Color bone = {216, 210, 188, 255}, dark = {120, 114, 100, 255};
-    auto p = [&](int dx, int dy, Color c) { if (world.in(x + dir * dx, fy - 1 - dy) && world.at(x + dir * dx, fy - 1 - dy).material == M::Empty) bgPut(x + dir * dx, fy - 1 - dy, c); };
-    for (int dx = 0; dx < 3; dx++)
-        for (int dy = 0; dy < 3; dy++) p(dx, dy, bone); // skull
-    p(1, 1, dark);
-    p(0, 0, dark);
-    for (int dx = 3; dx <= 11; dx++) p(dx, 0, bone); // spine
-    for (int dx : {5, 7, 9}) { p(dx, 1, bone); p(dx, 2, bone); } // ribs
-    p(6, 3, bone); p(7, 4, bone); p(8, 5, bone);                     // an arm flung up
-    p(12, 1, bone); p(13, 1, bone); p(12, 0, bone); p(13, 0, bone);  // pelvis
-    for (int dx = 14; dx <= 21; dx++) p(dx, 0, bone); // legs, one knee drawn up
-    p(16, 1, bone); p(17, 2, bone); p(18, 1, bone);
+    Interact d{IT_DECOR, (float)x + dir * 11, (float)fy, false, DK_SKELETON, irand(64) | (dir < 0 ? 64 : 0)};
+    G.inter.push_back(d);
 }
 
 // Cobweb strung across a ceiling corner: spokes fanning down and towards `dir`, joined by threads.
@@ -382,8 +396,9 @@ static const Color LAMP_WARM = {255, 168, 84, 255};
 // An oil lantern on a chain from (x, top): it swings, snaps off, and breaks into burning oil (entities.cpp).
 static void hangLantern(int x, int top, int len)
 {
+    if (irand(5) < 2) return; // fewer of them, and on short chains, so nothing swings into a wall and burns the house down
     Interact it{IT_LANTERN, (float)x, (float)top};
-    it.data = std::max(3, len + 1);
+    it.data = std::max(3, std::min(len, 3) + 1);
     G.inter.push_back(it);
 }
 
@@ -515,6 +530,7 @@ static void resetLevelState()
     G.lamps.clear();
     G.duneEnd = 0;
     G.seaEnd = 0;
+    G.desert = {};
     G.stormX0 = G.stormX1 = 0;
     world.storm = world.flash = 0;
     G.roamX0 = G.roamX1 = 0;
@@ -552,6 +568,7 @@ static std::vector<Vector2> lookouts; // tower tops where archers stand
 static std::vector<std::pair<int, int>> fortZones; // x ranges cave ramps must not tunnel into
 struct Cellar { int x0, x1, floor; };
 static std::vector<Cellar> cellars;
+static std::vector<std::pair<int, int>> doorYards; // x ranges kept clear outside house doors (no trees)
 static bool inFortZone(int x)
 {
     for (auto& z : fortZones)
@@ -595,6 +612,23 @@ static void placeObstacle(int x0, int fy, int w, int h)
     G.inter.push_back(it);
 }
 
+// A plank door filling an end doorway of a house (3 cells thick, 24 high): closed until the player opens it with F
+// (entities.cpp:updateInteract: it swings open and the way is clear), or smashes it with a blow (an IT_CRATE with style 1 = hinged
+// on the left edge, 2 = on the right).
+static void placeDoor(int x0, int fy, int hingeSide)
+{
+    Interact it{IT_CRATE, (float)x0, (float)fy};
+    it.w = 3; it.h = 24; it.data = 3; it.style = hingeSide < 0 ? 1 : 2;
+    for (int y = fy - 24; y < fy; y++)
+        for (int x = x0; x < x0 + 3; x++)
+        {
+            place(x, y, M::Wood);
+            world.at(x, y).shade = (uint8_t)(((fy - y) % 17 == 5 || (fy - y) % 17 == 6) ? 25 : irange(120, 190)); // iron-strapped planks
+            it.cells++;
+        }
+    G.inter.push_back(it);
+}
+
 // A wall of sharpened logs with a gateway through its foot.
 static void placePalisade(int x)
 {
@@ -623,59 +657,30 @@ static void placePalisade(int x)
 
 static const Color OLDWOOD = {96, 74, 54, 255}, GREYWOOD = {112, 104, 92, 255}, SEAM = {32, 24, 20, 255}, HEART = {156, 116, 72, 255};
 
-static Color oldWood(int x, int y, int board) // every board has weathered its own way
-{
-    float grey = hash2(board, 7, seed), k = 0.76f + 0.24f * hash2(x, y / 5, seed + board);
-    return shadeC(lerpColor(OLDWOOD, GREYWOOD, grey * 0.8f), k);
-}
-
 // Upright boards with dark seams and the odd knot.
 static void paintBoards(int x0, int y0, int x1, int y1, int bw)
 {
+    (void)bw; // (the boards, their seams, grain and knots are the wall's pattern now: see WALL_PLANK_V)
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++)
-        {
-            bool seam = (x - x0) % bw == 0, knot = hash2(x / 2, y / 2, seed + 41) > 0.985f;
-            bgPut(x, y, seam ? SEAM : (knot ? shadeC(SEAM, 1.7f) : oldWood(x, y, (x - x0) / bw)));
-        }
+            bgStyle(x, y, shadeC(lerpColor(OLDWOOD, GREYWOOD, 0.4f), 0.85f + 0.3f * hash2(x / 11, y / 17, seed + 6)), WALL_PLANK_V);
 }
 
-// A carved post: rounded by light and shadow, with a zig-zag engraved down its face and a block capital.
-static void paintPost(int x, int y0, int y1)
-{
-    static const char* ZIG[6] = {"#..", ".#.", "..#", "..#", ".#.", "#.."};
-    for (int y = y0; y < y1; y++)
-        for (int k = 0; k < 3; k++)
-        {
-            Color c = shadeC(HEART, k == 0 ? 1.1f : (k == 2 ? 0.7f : 0.9f));
-            bgPut(x + k, y, ZIG[(y - y0) % 6][k] == '#' ? shadeC(HEART, 0.5f) : c);
-        }
-    for (int k = -1; k <= 3; k++) { bgPut(x + k, y0, shadeC(HEART, 0.8f)); bgPut(x + k, y0 + 1, shadeC(HEART, 0.6f)); }
-}
+// A carved post: a block capital, a zig-zag engraved down its face, a plinth (decor.cpp).
+static void paintPost(int x, int y0, int y1) { addDecor(DK_POST, x + 1.5f, (float)y1, 0, y1 - y0); }
 
-// A round shield hung on the wall: iron rim, painted halves or quarters, a boss in the middle.
+// A round shield hung on the wall: iron rim, painted halves or quarters or a cross, a boss in the middle.
 static void paintShield(int cx, int cy, int r)
 {
-    static const Color paint[3][2] = {{{150, 40, 34, 255}, {214, 200, 170, 255}}, {{40, 70, 130, 255}, {206, 166, 60, 255}}, {{46, 92, 52, 255}, {196, 186, 156, 255}}};
-    const Color* p = paint[irand(3)];
-    bool quarters = chance(2);
-    for (int dy = -r; dy <= r; dy++)
-        for (int dx = -r; dx <= r; dx++)
-        {
-            int d2 = dx * dx + dy * dy;
-            if (d2 > r * r) continue;
-            Color c = quarters ? ((dx >= 0) == (dy >= 0) ? p[0] : p[1]) : (dx < 0 ? p[0] : p[1]);
-            if (d2 > (r - 1) * (r - 1)) c = {74, 70, 66, 255};
-            else if (d2 <= 1) c = {160, 160, 166, 255};
-            bgPut(cx + dx, cy + dy, shadeC(c, 0.8f + 0.2f * hash2(cx + dx, cy + dy, seed)));
-        }
+    (void)r;
+    addDecor(DK_SHIELD, (float)cx, (float)cy, irand(12), 0, chance(2));
 }
 
 struct Hall { int mid, apexY, roofBase; };
 
 // The shared part of every hall: back wall, plinth, posts, shields, and the A-frame roof with its gable,
 // ridge spikes and crossed horn-headed boards. `solid` builds the roof as real thatch / shingle cells.
-static Hall paintHall(int x, int w, int g, int wallTop, bool solid)
+static Hall paintHall(int x, int w, int g, int wallTop, bool solid, int doorTop = 0)
 {
     Hall h;
     bool thatch = chance(2);
@@ -686,13 +691,9 @@ static Hall paintHall(int x, int w, int g, int wallTop, bool solid)
     h.apexY = h.roofBase - (int)((w / 2 + eave) * slope);
     paintBoards(x, wallTop, x + w + 1, g, irange(4, 5));
     for (int y = g - 5; y < g; y++) // fieldstone plinth
-        for (int xx = x; xx <= x + w; xx++)
-        {
-            bool joint = (y - g) % 3 == 0 || (xx + ((y - g + 9) / 3) * 4) % 7 == 0;
-            bgPut(xx, y, joint ? Color{46, 44, 48, 255} : shadeC({110, 108, 112, 255}, 0.7f + 0.3f * hash2(xx / 3, y, seed)));
-        }
+        for (int xx = x; xx <= x + w; xx++) bgStyle(xx, y, shadeC({112, 108, 104, 255}, 0.75f + 0.25f * hash2(xx / 9, y, seed)), WALL_COBBLE);
     int bays = std::max(1, w / 26);
-    for (int b = 0; b <= bays; b++) paintPost(x + (w - 3) * b / bays, wallTop, g - 5);
+    for (int b = 0; b <= bays; b++) paintPost(x + (w - 3) * b / bays, wallTop, doorTop && (b == 0 || b == bays) ? doorTop : g - 5); // (the end posts stop at the top of the door frame)
     for (int b = 0; b < bays; b++)
         if (chance(2)) paintShield(x + (w - 3) * (2 * b + 1) / (2 * bays) + 1, wallTop + 7, 4);
     auto roofCell = [&](int xx, int y, int shade) {
@@ -714,28 +715,12 @@ static Hall paintHall(int x, int w, int g, int wallTop, bool solid)
         }
         if (thatch && (xx <= x - eave + 1 || xx >= x + w + eave - 1 || chance(3))) roofCell(xx, top + T, 60 + irand(60)); // ragged eaves
         if ((xx - x) % 5 == 0 && top < h.roofBase - 8) // carved spikes along the ridge
-            for (int k = 1; k <= 2; k++) bgPut(xx, top - k, shadeC(HEART, 0.7f));
-        for (int y = top + T; y < wallTop; y++) // the gable: boards fanning out from the ridge
+            addDecor(DK_SPIKE, xx + 0.5f, (float)top, 0);
+        for (int y = top + T; y < wallTop; y++) // the gable: upright boards under the roof
             if (xx >= x && xx <= x + w)
-            {
-                float a = std::atan2((float)(xx - h.mid), (float)(y - h.apexY) + 0.01f) * 7;
-                bool seam = std::fabs(a - std::round(a)) < 0.12f;
-                bgPut(xx, y, seam ? SEAM : oldWood(xx, y, (int)std::floor(a) + 20));
-            }
+                bgStyle(xx, y, shadeC(lerpColor(OLDWOOD, GREYWOOD, 0.4f), 0.62f + 0.16f * hash2(xx / 10, y / 30, seed + 7)), WALL_PLANK_V);
     }
-    // the gable boards run on past the ridge and cross, ending in carved heads
-    static const char* HEAD[5] = {"..##.", ".#..#", "##...", "#.#..", ".#..."};
-    int e = 7;
-    for (int sd : {-1, 1})
-    {
-        for (int k = 0; k <= e; k++)
-            for (int t = 0; t < 2; t++)
-                bgPut(h.mid + sd * (k + t), h.apexY + T - 1 - (int)(k * slope), shadeC(HEART, t ? 0.6f : 0.95f));
-        int tx = h.mid + sd * e, ty = h.apexY + T - 2 - (int)(e * slope) - 4;
-        for (int j = 0; j < 5; j++)
-            for (int i = 0; i < 5; i++)
-                if (HEAD[j][i] == '#') bgPut(tx + sd * i, ty + j, shadeC(HEART, 0.85f));
-    }
+    addDecor(DK_HORNS, (float)h.mid, (float)(h.apexY + T - 1), -1, (int)(slope * 10)); // the boards cross at the ridge, ending in carved heads
     for (int xx = x - 1; xx <= x + w + 1; xx++) // the tie beam between wall and gable
     {
         bgPut(xx, wallTop - 1, shadeC(HEART, 0.85f));
@@ -764,26 +749,8 @@ static void paintPorch(int doorX, int sd, int g, bool solid)
     bgPut(px + 1 + sd * 2, py - 6, shadeC(HEART, 0.8f));
 }
 
-// Firewood stacked log-ends out, or a bound hay bale.
-static void paintYardProp(int x, int g)
-{
-    if (chance(2))
-        for (int row = 0; row < 3; row++)
-            for (int i = 0; i < 3 - row % 2; i++)
-            {
-                int cx = x + i * 3 + (row % 2) + 1, cy = g - 2 - row * 3;
-                for (int dy = -1; dy <= 1; dy++)
-                    for (int dx = -1; dx <= 1; dx++)
-                        bgPut(cx + dx, cy + dy, (dx == 0 && dy == 0) ? Color{176, 132, 84, 255} : Color{92, 62, 38, 255});
-            }
-    else
-        for (int y = g - 7; y < g; y++)
-            for (int xx = x; xx < x + 10; xx++)
-            {
-                bool corner = (y == g - 7 || y == g - 1) && (xx == x || xx == x + 9), band = xx == x + 3 || xx == x + 6;
-                if (!corner) bgPut(xx, y, band ? Color{110, 80, 40, 255} : shadeC({204, 170, 96, 255}, 0.75f + 0.25f * hash2(xx, y / 2, seed)));
-            }
-}
+// Firewood stacked log-ends out, or a bound hay bale (decor.cpp).
+static void paintYardProp(int x, int g) { addDecor(DK_YARD, x + 5.0f, (float)g, chance(2) ? 0 : 1); }
 
 // ---------------------------------------------------------------- indoors: walls, and the clutter of living
 static void feastTable(int x0, int x1, int fy);
@@ -791,20 +758,11 @@ static void hearthCrane(int cx, int fy);
 static void antlerSkull(int cx, int cy);
 static void triskeleBanner(int cx, int top, int len);
 
-// Rounded fieldstones bedded in mortar, a row at a time, each stone lit from the top left.
+// Rounded fieldstones bedded in mortar: the wall's own pattern (WALL_COBBLE), a footing in the base tone.
 static void paintCobble(int x0, int y0, int x1, int y1)
 {
     for (int y = y0; y < y1; y++)
-    {
-        int row = (y - y0) / 5, ry = (y - y0) % 5;
-        for (int x = x0; x < x1; x++)
-        {
-            int u = x - x0 + row * 3 + (int)(hash2(row, 3, seed) * 5), stone = u / 6, lx = u % 6;
-            if (ry == 4 || lx == 5 || ((lx == 0 || lx == 4) && (ry == 0 || ry == 3))) { bgPut(x, y, {38, 36, 36, 255}); continue; } // mortar, and the stones' rounded corners
-            Color c = lerpColor({124, 118, 110, 255}, {106, 90, 76, 255}, hash2(stone, row, seed + 17));
-            bgPut(x, y, shadeC(c, 1.08f - 0.09f * ry - 0.04f * lx + 0.08f * hash2(x, y, seed + 5)));
-        }
-    }
+        for (int x = x0; x < x1; x++) bgStyle(x, y, lerpColor({124, 118, 110, 255}, {106, 90, 76, 255}, hash2(x / 14, y / 10, seed + 17)), WALL_COBBLE);
 }
 
 // A room's back wall: boards darkening into the corners and up under the ceiling, a cobbled footing, a beam.
@@ -813,139 +771,30 @@ static void paintRoom(int x0, int y0, int x1, int y1) // y0 the ceiling, y1 the 
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++)
         {
-            int board = (y - y0) / 4;
             float edge = std::min(1.0f, std::min({x - x0, x1 - 1 - x, (y - y0) * 2}) / 10.0f); // shadow gathers in the corners
-            float k = (0.55f + 0.45f * edge) * (0.82f + 0.18f * hash2(x / 7 + board * 13, board, seed + 8));
-            bool seam = (y - y0) % 4 == 3 || (x + board * 11) % 23 == 0;
-            bgPut(x, y, seam ? SEAM : shadeC(lerpColor({118, 86, 58, 255}, {100, 84, 70, 255}, hash2(board, x / 23, seed)), k));
+            float k = (0.55f + 0.45f * edge) * (0.82f + 0.18f * hash2(x / 7, y / 9, seed + 8));
+            bgStyle(x, y, shadeC(lerpColor({118, 86, 58, 255}, {100, 84, 70, 255}, hash2(y / 4, x / 23, seed)), k), WALL_PLANK_H);
         }
     paintCobble(x0, y1 - 6, x1, y1);
     for (int x = x0; x < x1; x++) { bgPut(x, y0, shadeC(HEART, 0.45f)); bgPut(x, y0 + 1, shadeC(HEART, 0.7f)); }
 }
 
-static void paintLadder(int x, int y0, int y1)
-{
-    for (int y = y0; y < y1; y++)
-    {
-        bgPut(x, y, shadeC(HEART, 0.8f));
-        bgPut(x + 6, y, shadeC(HEART, 0.6f));
-        if ((y - y0) % 4 == 2) for (int k = 1; k < 6; k++) bgPut(x + k, y, shadeC(HEART, 0.7f));
-    }
-}
+static void paintLadder(int x, int y0, int y1) { addDecor(DK_LADDER, x + 3.5f, (float)y1, 0, y1 - y0); }
 
-// A little painting in a gilt frame: a longship under sail at sundown, or green hills under a pale sun.
-static void paintPicture(int cx, int cy)
-{
-    int w = irange(5, 7), h = 4, kind = irand(2);
-    for (int dy = -h - 1; dy <= h + 1; dy++)
-        for (int dx = -w - 1; dx <= w + 1; dx++)
-        {
-            int x = cx + dx, y = cy + dy;
-            if (std::abs(dx) == w + 1 || std::abs(dy) == h + 1) { bgPut(x, y, (dx + dy) % 2 ? Color{204, 162, 72, 255} : Color{140, 104, 44, 255}); continue; }
-            float t = (dy + h) / (2.0f * h);
-            Color c;
-            if (kind == 0)
-            {
-                c = dy < 1 ? lerpColor({120, 70, 110, 255}, {240, 156, 92, 255}, clampf(t * 1.6f, 0, 1)) : Color{40, 60, 96, 255};
-                if (dy == 1 && (dx + cx) % 3 == 0) c = {90, 110, 150, 255};
-                if (std::abs(dx - w / 3) <= 1 && dy >= -2 && dy <= 0) c = {226, 216, 190, 255}; // the sail
-                if (std::abs(dx - w / 3) <= 2 && dy == 1) c = {70, 44, 30, 255};                 // the hull
-            }
-            else
-            {
-                float hill = std::sin(dx * 0.6f + cx) * 1.2f + 1;
-                c = dy > hill ? lerpColor({70, 112, 56, 255}, {44, 78, 40, 255}, t) : lerpColor({150, 180, 210, 255}, {214, 222, 226, 255}, t);
-                if ((dx + w / 2) * (dx + w / 2) + (dy + 2) * (dy + 2) <= 1) c = {250, 236, 170, 255};
-            }
-            bgPut(x, y, c);
-        }
-}
+// A little painting in a gilt frame: a longship at sundown, hills under a pale sun, a jarl, a stag, runes.
+static void paintPicture(int cx, int cy) { addDecor(DK_PICTURE, (float)cx, (float)cy, irand(15)); }
 
 // A tool hung on a wooden peg: an axe, a saw, a sickle, a hammer or a drinking horn on its strap.
-static void paintTool(int x, int y, int kind)
-{
-    const Color haft = {134, 92, 54, 255}, iron = {156, 156, 164, 255}, ironD = {88, 88, 96, 255}, strap = {80, 50, 30, 255};
-    bgPut(x, y, shadeC(HEART, 0.45f)); // the peg
-    switch (kind)
-    {
-    case 0: // an axe, head up
-        for (int k = 1; k < 14; k++) bgPut(x, y + k, haft);
-        for (int dy = 1; dy <= 5; dy++)
-        {
-            int reach = 2 + (dy > 1 && dy < 5);
-            for (int dx = 1; dx <= reach; dx++) bgPut(x + dx, y + dy, dx == reach ? iron : ironD);
-        }
-        break;
-    case 1: // a saw
-        for (int dy = 1; dy <= 4; dy++) for (int dx = -1; dx <= 1; dx++) bgPut(x + dx, y + dy, dy == 2 && dx == 0 ? SEAM : haft);
-        for (int k = 0; k < 11; k++) { bgPut(x, y + 5 + k, iron); bgPut(x + 1, y + 5 + k, ironD); if (k % 2) bgPut(x + 2, y + 5 + k, ironD); }
-        break;
-    case 2: // a sickle
-        for (int k = 1; k < 6; k++) bgPut(x, y + k, haft);
-        for (int a = 0; a < 14; a++) { float t = a / 13.0f * 3.0f; bgPut(x + (int)std::lround(std::sin(t) * 4), y + 6 + (int)std::lround((1 - std::cos(t)) * 3), a > 10 ? ironD : iron); }
-        break;
-    case 3: // a hammer
-        for (int k = 1; k < 11; k++) bgPut(x, y + k, haft);
-        for (int dx = -2; dx <= 2; dx++) { bgPut(x + dx, y + 11, iron); bgPut(x + dx, y + 12, ironD); }
-        break;
-    default: // a drinking horn
-        for (int k = 1; k <= 3; k++) { bgPut(x - k, y + k, strap); bgPut(x + k, y + k, strap); }
-        for (int k = 0; k < 9; k++)
-            for (int t = 0; t <= (k < 6) + (k < 3); t++)
-                bgPut(x - 4 + k, y + 4 + (int)(k * k * 0.06f) + t, k < 2 ? Color{220, 200, 150, 255} : lerpColor({206, 176, 124, 255}, {90, 60, 40, 255}, k / 9.0f));
-        break;
-    }
-}
+static void paintTool(int x, int y, int kind) { addDecor(DK_TOOL, x + 0.5f, (float)y, kind); }
 
 // A dresser: two rows of drawers on stubby feet, with a jug, a crock and a candle on top.
-static void paintDresser(int x, int fy)
-{
-    const Color wood = {112, 74, 44, 255};
-    const int w = 16, h = 12;
-    for (int y = fy - h; y < fy - 1; y++)
-        for (int xx = x; xx < x + w; xx++)
-        {
-            int ly = y - (fy - h);
-            bool top = ly == 0, line = xx == x || xx == x + w - 1 || ly == 5 || ly == 10 || (xx == x + w / 2 && ly > 0);
-            Color c = top ? shadeC(wood, 1.3f) : (line ? shadeC(wood, 0.5f) : shadeC(wood, 0.85f + 0.15f * hash2(xx / 3, ly, seed)));
-            if ((ly == 3 || ly == 8) && (xx == x + w / 4 || xx == x + 3 * w / 4)) c = {204, 170, 92, 255}; // brass pulls
-            bgPut(xx, y, c);
-        }
-    bgPut(x + 1, fy - 1, shadeC(wood, 0.5f)); bgPut(x + w - 2, fy - 1, shadeC(wood, 0.5f));
-    for (int y = fy - h - 4; y < fy - h; y++) for (int k = 0; k < 3; k++) if (y > fy - h - 4 || k == 1) bgPut(x + 2 + k, y, shadeC({150, 98, 58, 255}, 1.1f - 0.15f * k)); // jug
-    for (int y = fy - h - 2; y < fy - h; y++) for (int k = 0; k < 4; k++) bgPut(x + 7 + k, y, shadeC({186, 176, 156, 255}, 1.0f - 0.1f * k)); // crock
-    for (int y = fy - h - 3; y < fy - h; y++) bgPut(x + 13, y, {232, 222, 194, 255}); // candle
-    bgPut(x + 13, fy - h - 4, {255, 214, 120, 255});
-    bgPut(x + 13, fy - h - 5, {255, 160, 60, 255});
-}
+static void paintDresser(int x, int fy) { addDecor(DK_DRESSER, x + 8.0f, (float)fy); }
 
-// A plank shelf on brackets: bowls, jars, a wheel of cheese.
-static void paintShelf(int x, int y, int w)
-{
-    for (int xx = x; xx < x + w; xx++) { bgPut(xx, y, shadeC(HEART, 1.0f)); bgPut(xx, y + 1, shadeC(HEART, 0.55f)); }
-    for (int k = 0; k < 3; k++) { bgPut(x + 1 + k, y + 2 + k, shadeC(HEART, 0.6f)); bgPut(x + w - 2 - k, y + 2 + k, shadeC(HEART, 0.6f)); }
-    for (int xx = x + 1; xx < x + w - 3; xx += irange(4, 6))
-    {
-        int k = irand(3);
-        Color c = k == 0 ? Color{176, 164, 140, 255} : (k == 1 ? Color{96, 120, 90, 255} : Color{226, 196, 100, 255});
-        int hh = k == 0 ? 2 : (k == 1 ? 4 : 3);
-        for (int dy = 1; dy <= hh; dy++)
-            for (int dx = 0; dx < 3; dx++) bgPut(xx + dx, y - dy, shadeC(c, (dx == 0 ? 1.15f : 0.9f) - (k == 2 && dy == 2 ? 0.25f : 0)));
-    }
-}
+// A plank shelf on brackets: bowls, jars, a wheel of cheese, books.
+static void paintShelf(int x, int y, int w) { addDecor(DK_SHELF, x + w / 2.0f, (float)(y + 5), -1, w); }
 
-// Spears and a shield stood in a rack.
-static void paintRack(int x, int fy)
-{
-    for (int k = 0; k < 3; k++)
-    {
-        int sx = x + 1 + k * 3;
-        for (int y = fy - 20; y < fy; y++) bgPut(sx, y, {124, 86, 50, 255});
-        bgPut(sx, fy - 23, {170, 170, 178, 255}); bgPut(sx, fy - 22, {150, 150, 158, 255}); bgPut(sx, fy - 21, {110, 110, 118, 255});
-    }
-    for (int xx = x - 1; xx <= x + 9; xx++) { bgPut(xx, fy - 12, shadeC(HEART, 0.7f)); bgPut(xx, fy - 2, shadeC(HEART, 0.6f)); }
-    paintShield(x + 13, fy - 6, 4);
-}
+// Spears stood in a rack, an axe and a sword hung from its rails.
+static void paintRack(int x, int fy) { addDecor(DK_RACK, x + 11.0f, (float)fy, -1, 22); }
 
 // A loose crate (0), barrel (1) or small box (2) standing on the floor at fy: a rigid body (entities.cpp).
 static int addProp(int x, int fy, int style)
@@ -973,49 +822,24 @@ static int placeStores(int x, int fy, int room)
 }
 
 // A bundle of arrows in a basket.
-static void paintArrows(int x, int fy)
-{
-    for (int k = 0; k < 9; k++) { bgPut(x + k / 2 + 1, fy - 6 - k, {150, 116, 70, 255}); bgPut(x + 5 - k / 3, fy - 6 - k, {150, 116, 70, 255}); }
-    for (int k : {0, 2, 4, 5}) { bgPut(x + k, fy - 15, {226, 226, 220, 255}); bgPut(x + k, fy - 16, {196, 60, 50, 255}); } // fletching
-    for (int y = fy - 6; y < fy; y++) for (int xx = x - 1; xx < x + 8; xx++) bgPut(xx, y, (xx + y) % 2 ? Color{150, 120, 70, 255} : Color{120, 92, 52, 255});
-}
+static void paintArrows(int x, int fy) { addDecor(DK_ARROWS, x + 4.0f, (float)fy); }
 
 // Bunks against the wall: a straw mattress and a rolled blanket on each.
-static void paintBunk(int x, int fy, int tall)
-{
-    int top = fy - std::min(22, tall - 2);
-    for (int y = top; y < fy; y++) { bgPut(x, y, shadeC(HEART, 0.8f)); bgPut(x + 19, y, shadeC(HEART, 0.6f)); }
-    for (int by : {fy - 4, top + 8})
-    {
-        if (by > fy - 2) continue;
-        for (int xx = x; xx <= x + 19; xx++) { bgPut(xx, by, shadeC(HEART, 0.7f)); bgPut(xx, by + 1, shadeC(HEART, 0.45f)); }
-        for (int xx = x + 1; xx < x + 19; xx++) for (int y = by - 2; y < by; y++) bgPut(xx, y, shadeC({196, 168, 104, 255}, 0.85f + 0.15f * hash2(xx, y, seed)));
-        for (int y = by - 4; y < by - 1; y++) for (int xx = x + 2; xx < x + 6; xx++) bgPut(xx, y, (y + xx) % 3 ? Color{150, 46, 40, 255} : Color{110, 30, 28, 255});
-    }
-}
+static void paintBunk(int x, int fy, int tall) { addDecor(DK_BUNK, x + 10.0f, (float)fy, -1, std::max(8, std::min(22, tall - 2))); }
 
-// A fireplace of fieldstone with a mantel, its chimney breast going up into the beams.
+// A fireplace of fieldstone with a mantel and a fire in its mouth, its chimney breast going up into the beams.
 static void paintFireplace(int cx, int fy, int ceil)
 {
-    paintCobble(cx - 6, ceil + 2, cx + 7, fy - 14);
-    paintCobble(cx - 11, fy - 14, cx + 12, fy);
-    for (int x = cx - 12; x <= cx + 12; x++) { bgPut(x, fy - 15, shadeC(HEART, 1.0f)); bgPut(x, fy - 14, shadeC(HEART, 0.5f)); }
-    for (int y = fy - 10; y < fy; y++)
-        for (int x = cx - 6; x <= cx + 6; x++)
-        {
-            int ly = y - (fy - 10);
-            if (ly == 0 && std::abs(x - cx) > 4) continue; // an arched mouth
-            Color c = {22, 16, 14, 255};
-            if (ly >= 7) c = (x + y) % 3 ? Color{110, 70, 40, 255} : Color{200, 80, 30, 255}; // logs and embers
-            bgPut(x, y, c);
-        }
-    for (int k = 0; k < 2; k++) for (int y = fy - 18; y < fy - 15; y++) bgPut(cx - 8 + k * 14, y, k ? Color{176, 170, 156, 255} : Color{140, 100, 60, 255}); // things on the mantel
+    addDecor(DK_HEARTH, (float)cx, (float)fy, -1, fy - ceil - 1);
     G.lamps.push_back({(float)cx, (float)(fy - 4), 84, LAMP_WARM, true});
 }
 
 // Fill a storey's back wall from x0 to x1: furniture standing on the floor and, between it, things hung up.
-static void furnishRoom(int x0, int x1, int fy, int ceil, bool hearth)
+// theme: 0 anything, 1 smithy, 2 apothecary, 3 armory, 4 bedroom - the ids below are the `k` cases, listed by how common each is.
+enum { TH_ANY, TH_SMITH, TH_APOTH, TH_ARMORY, TH_BED, TH_PORT };
+static void furnishRoom(int x0, int x1, int fy, int ceil, bool hearth, int theme = TH_ANY)
 {
+    static const std::vector<int> MIX[] = {{}, {3, 5, 3, 6, 5, 7, 3}, {4, 4, 0, 4, 2, 0, 6, 4}, {5, 9, 5, 7, 5, 9, 3, 5}, {8, 8, 0, 2, 4, 0, 8}, {6, 6, 3, 6, 4, 7, 6, 3}};
     paintRoom(x0, ceil, x1, fy);
     int hx = hearth ? (x0 + x1) / 2 + irange(-8, 8) : -1000;
     if (hearth) paintFireplace(hx, fy, ceil);
@@ -1023,7 +847,7 @@ static void furnishRoom(int x0, int x1, int fy, int ceil, bool hearth)
     for (int x = x0 + irange(3, 8); x < x1 - 12;)
     {
         if (x + 26 > hx - 13 && x < hx + 13) { x = hx + 14; continue; } // keep clear of the fireplace
-        int room = std::min(x1 - 3, hearth && x < hx ? hx - 13 : x1 - 3) - x, k = irand(9), used = 0;
+        int room = std::min(x1 - 3, hearth && x < hx ? hx - 13 : x1 - 3) - x, k = theme ? MIX[theme][irand((int)MIX[theme].size())] : irand(9), used = 0;
         if (k == 0 && room >= 16) { paintDresser(x, fy); used = 16; }
         else if (k == 1 && room >= 26) { feastTable(x + 4, x + 21, fy); used = 26; }
         else if (k == 2 && room >= 14 && tall >= 20) { paintPicture(x + 7, fy - tall / 2 - 4); used = 14; }
@@ -1033,6 +857,7 @@ static void furnishRoom(int x0, int x1, int fy, int ceil, bool hearth)
         else if (k == 6 && room >= 13) used = placeStores(x + 1, fy, room - 1) + 1; // loose: knock them about
         else if (k == 7 && room >= 10) { paintArrows(x + 1, fy); used = 10; }
         else if (k == 8 && room >= 22 && tall >= 20) { paintBunk(x, fy, tall); used = 21; }
+        else if (k == 9 && room >= 12 && tall >= 20) { paintShield(x + 4, fy - tall / 2, 5); paintShield(x + 11, fy - tall / 2 + 2, 5); used = 14; } // shields on the wall
         x += (used ? used : 4) + irange(3, 8);
     }
 }
@@ -1071,14 +896,9 @@ static void placeWatchtower(int x, int TW)
         }
     for (int lv = 1; lv <= levels; lv++) // floors, the deck wider than the rest
     {
-        int fy = g - lv * S, a = lv == levels ? x - ov : x + 4, b = lv == levels ? x + TW - 1 + ov : x + TW - 5, h0 = hatchX(lv);
-        for (int xx = a; xx <= b; xx++)
-            for (int t = 0; t < 2; t++)
-            {
-                bool hatch = xx >= h0 && xx < h0 + 11;
-                place(xx, fy + t, hatch ? M::Platform : M::Wood);
-                if (!hatch) world.at(xx, fy + t).shade = (uint8_t)(t ? 30 : (xx % 6 == 0 ? 40 : 150 + irand(70)));
-            }
+        int fy = g - lv * S, a = lv == levels ? x - ov : x + 4, b = lv == levels ? x + TW - 1 + ov : x + TW - 5;
+        for (int xx = a; xx <= b; xx++) // one-way all across: jump up through anywhere
+            for (int t = 0; t < 2; t++) place(xx, fy + t, M::Platform);
     }
     int roofY = deck - 30; // the lookout's roof, high enough for archers to stand under it
     for (int sd : {-1, 1}) // braces under the overhang, the corner posts, and a torch on each
@@ -1147,40 +967,62 @@ static void placeWatchtower(int x, int TW)
 // A farmhouse of two or three storeys you walk straight through: doorways at both ends, plank floors you
 // climb by jumping up through stairwells (they swap sides), every room furnished and lit by oil lanterns
 // hung from the beams, and maybe a cellar under a trapdoor.
-static void placeHouse(int x, int w)
+// A window in a house's back wall: a timber frame round an opening onto the night sky (stars and all), a sill, and a
+// slanting beam of moonlight pouring in across the room to the floor, `len` units below the sill (drawn live: entities.cpp).
+static void hutWindow(int cx, int top, int w, int h, int len)
+{
+    for (int y = top - 1; y <= top + h; y++)
+        for (int dx = -w / 2 - 1; dx <= w / 2 + 1; dx++)
+        {
+            int x = cx + dx;
+            bool frame = std::abs(dx) > w / 2 || y < top || y >= top + h;
+            bool bar = !frame && (dx == 0 || y == top + h / 2); // a thin cross of glazing bars
+            if (frame || bar) bgPut(x, y, shadeC({96, 66, 40, 255}, (y >= top + h || dx < 0 ? 0.55f : 0.8f) + 0.08f * hash2(x, y, seed + 31)));
+            else { world.bgAt(x, y) = {52, 72, 128, 255}; world.skyAt(x, y) = 1; } // the sky shows through, as it does beyond the roof
+        }
+    for (int dx = -w / 2 - 2; dx <= w / 2 + 2; dx++) bgPut(cx + dx, top + h + 1, {120, 84, 52, 255}); // the sill
+    Lamp l{(float)cx, (float)top + h / 2.0f, 110, {170, 200, 255, 255}};
+    l.beam = (float)len;
+    l.w = (float)w;
+    l.wh = (float)h;
+    G.lamps.push_back(l);
+}
+
+static bool villageHouses = false; // Hearthwick's cottages: no clutter piled against the doors, no cellar
+// shop: -1 an ordinary farmhouse, else a TH_ theme for the ground floor (smithy, apothecary, armory); shops keep a
+// bedroom on the top floor, and the armory always has a basement and an upstairs.
+static void placeHouse(int x, int w, int shop = -1)
 {
     int g = surf[x + w / 2];
     levelGround(x - 8, x + w + 8, g);
     const int S = 26;
-    int storeys = w < 100 ? irange(1, 2) : irange(2, 3), wallTop = g - storeys * S - irange(3, 7);
-    Hall hall = paintHall(x, w, g, wallTop, true);
+    int storeys = shop == TH_ARMORY || shop == TH_PORT ? 2 : (w < 100 ? irange(1, 2) : irange(2, 3)), wallTop = g - storeys * S - irange(3, 7);
+    Hall hall = paintHall(x, w, g, wallTop, true, g - 24);
     int first = chance(2); // which side the first stairwell is on
     auto wellX = [&](int k) { return (k + first) % 2 ? x + 8 : x + w - 26; };
     for (int k = 0; k < storeys; k++)
     {
         int fy = g - k * S, ceil = k == storeys - 1 ? wallTop + 1 : fy - S + 2;
-        furnishRoom(x + 3, x + w - 2, fy, ceil, k == 0);
-        paintPost(x + 3, ceil + 2, fy);
-        paintPost(x + w - 5, ceil + 2, fy);
+        furnishRoom(x + 3, x + w - 2, fy, ceil, k == 0, shop < 0 ? TH_ANY : (k == 0 ? shop : (k == storeys - 1 ? TH_BED : shop == TH_APOTH ? TH_APOTH : TH_ANY)));
+        paintPost(x + 3, ceil + 2, k == 0 ? g - 24 : fy); // the ground floor's end posts stop at the top of the door frame
+        paintPost(x + w - 5, ceil + 2, k == 0 ? g - 24 : fy);
         if (k + 1 < storeys) // the floor above, and its stairwell
         {
             int up = fy - S, h0 = wellX(k + 1);
             paintLadder(h0 + 5, up + 2, fy);
-            for (int xx = x + 3; xx <= x + w - 3; xx++)
-                for (int t = 0; t < 2; t++)
-                {
-                    bool well = xx >= h0 && xx < h0 + 18;
-                    place(xx, up + t, well ? M::Platform : M::Wood);
-                    if (!well) world.at(xx, up + t).shade = (uint8_t)(t ? 30 : (xx % 7 == 0 ? 40 : 150 + irand(70)));
-                }
+            for (int xx = x + 3; xx <= x + w - 3; xx++) // the whole floor is one-way: jump up through it anywhere
+                for (int t = 0; t < 2; t++) place(xx, up + t, M::Platform);
             for (int lx = x + 16 + irand(10); lx < x + w - 14; lx += irange(34, 50)) // lanterns hung from its beams
                 if (lx + 3 < h0 || lx - 3 > h0 + 18) hangLantern(lx, up + 2, irange(2, 4));
         }
     }
     hangLantern(hall.mid, hall.apexY + 8, std::max(3, wallTop + 4 - (hall.apexY + 8))); // from the ridge, into the top room
-    Lamp hearthSmoke{(float)hall.mid, (float)hall.apexY + 2, 0, BLANK};
-    hearthSmoke.smoke = true;
-    G.lamps.push_back(hearthSmoke);
+    for (int k = 0; k < storeys; k++) // windows on every floor, the moon coming in through them
+    {
+        int fy = g - k * S, jit = irange(-3, 3);
+        for (int sd : {-1, 1})
+            if (w >= 64 || sd < 0) hutWindow(x + w / 2 + sd * std::max(16, w * 3 / 10) + jit, fy - 23, 9, 11, 12);
+    }
     for (int y = wallTop; y < g; y++) // end walls: doorways below, a window on every floor above
     {
         bool door = y >= g - 24, window = false;
@@ -1189,28 +1031,40 @@ static void placeHouse(int x, int w)
         for (int k = 0; k < 3; k++) { place(x + k, y, M::Wood); place(x + w - k, y, M::Wood); }
     }
     for (int xx = x; xx <= x + w; xx++) { place(xx, g, M::Wood); place(xx, g + 1, M::Wood); } // floorboards
-    bool blockL = chance(2), blockR = chance(2);
-    if (blockL) placeObstacle(x + 3, g, 12, 22); // clutter stacked against the doors: smash through
-    if (blockR) placeObstacle(x + w - 15, g, 12, 22);
+    bool blockL = !villageHouses && irand(3) > 0, blockR = !villageHouses && irand(3) > 0;
+    if (blockL) placeDoor(x, g, -1); // a closed door in either end wall: F opens it, or break it down
+    if (blockR) placeDoor(x + w - 2, g, 1);
     int sd = chance(2) ? -1 : 1;
-    paintPorch(sd < 0 ? x : x + w, sd, g, true);
-    paintYardProp(sd < 0 ? x + w + 2 : x - 12, g);
+    for (int side : {-1, 1}) // the way out of either door is left clear: nothing standing, hanging or piled in front of it
+    {
+        int e0 = side < 0 ? x - 18 : x + w + 1, e1 = side < 0 ? x - 1 : x + w + 18;
+        doorYards.push_back({e0, e1});
+        for (int yy = g - 34; yy < g; yy++)
+            for (int xx = e0; xx <= e1; xx++)
+                if (world.in(xx, yy) && world.at(xx, yy).material != M::Empty) world.at(xx, yy) = Cell{};
+        for (size_t i = 0; i < G.inter.size();) // and no props or yard clutter there either
+        {
+            const Interact& it = G.inter[i];
+            if ((it.type == IT_DECOR || it.type == IT_PROP || it.type == IT_TORCH) && it.x >= e0 - 4 && it.x <= e1 + 4 && it.y >= g - 3 && it.y <= g + 3) G.inter.erase(G.inter.begin() + i);
+            else i++;
+        }
+    }
     if (chance(2)) paintCobweb(x + 3, wallTop + 2, 1); // up in the rafters
     G.inter.push_back({IT_TORCH, (float)x + 10, (float)g});
-    if (chance(3)) return; // no cellar under this one
+    if (shop >= 0) // a sign by the door: a hammer, a sickle, a pair of shields
+    {
+        int dx = sd < 0 ? x - 4 : x + w + 4;
+        if (shop == TH_ARMORY) { paintShield(dx, g - 18, 5); paintShield(dx + sd * 8, g - 14, 5); }
+        else paintTool(dx, g - 20, shop == TH_SMITH ? 3 : shop == TH_PORT ? 4 : 2); // a hammer, a drinking horn, a sickle
+    }
+    if (villageHouses || (shop != TH_ARMORY && chance(3))) return; // no cellar under this one
     // the cellar, reached by a plank trapdoor
     int cf = g + irange(24, 32);
     for (int y = g + 2; y < cf; y++)
         for (int xx = x + 4; xx <= x + w - 4; xx++) world.at(xx, y) = Cell{};
     for (int y = g + 2; y < cf; y++)
-        for (int xx = x + 4; xx <= x + w - 4; xx++)
-            bgPut(xx, y, ((y - g) % 6 == 0 || ((xx + ((y - g) / 6) * 5) % 10 == 0)) ? Color{40, 36, 40, 255} : shadeC(Color{110, 104, 100, 255}, 0.45f));
-    for (int k = irange(1, 4); k > 0; k--) // barrels
-    {
-        int bx = x + 6 + irand(std::max(1, w - 18));
-        for (int y = cf - 10; y < cf; y++)
-            for (int xx = bx; xx < bx + 7; xx++) bgPut(xx, y, (y == cf - 7 || y == cf - 3) ? Color{60, 60, 64, 255} : Color{110, 72, 40, 255});
-    }
+        for (int xx = x + 4; xx <= x + w - 4; xx++) bgStyle(xx, y, shadeC(Color{112, 106, 100, 255}, 0.5f), WALL_COBBLE);
+    for (int k = irange(1, 4); k > 0; k--) addProp(x + 8 + irand(std::max(1, w - 18)), cf, chance(3) ? 0 : 1); // barrels and crates
     int td = x + irange(12, w - 12); // trapdoor
     for (int xx = td - 6; xx <= td + 6; xx++) { place(xx, g, M::Platform); place(xx, g + 1, M::Platform); }
     for (int xx = x + 2; xx <= x + w - 2; xx++) place(xx, cf, M::Stone);
@@ -1309,112 +1163,24 @@ static void latticeWindow(int cx, int top, int w, int h)
 }
 
 // A red pillar carved with interlaced dragons, on a dark plinth under a dark capital.
-static void dragonPillar(int cx, int y0, int y1, int hw = 4)
-{
-    for (int y = y0; y <= y1; y++)
-        for (int dx = -hw; dx <= hw; dx++)
-        {
-            int x = cx + dx;
-            bool capital = y < y0 + 4 || y > y1 - 5;
-            float edge = 1.0f - 0.35f * std::fabs(dx + 1.0f) / hw; // lit from the left
-            if (capital) { bgPut(x, y, shadeC({70, 46, 30, 255}, edge * (y == y0 + 3 || y == y1 - 4 ? 0.6f : 1.0f))); continue; }
-            float a = std::sin((y - y0) * 0.26f + dx * 0.55f), b = std::sin((y - y0) * 0.26f - dx * 0.55f + 1.6f);
-            bool carved = std::fabs(a) < 0.18f || std::fabs(b) < 0.18f; // two strands weaving round each other
-            Color c = carved ? Color{70, 14, 14, 255} : Color{156, 38, 30, 255};
-            if (std::abs(dx) == hw) c = Color{90, 20, 18, 255};
-            bgPut(x, y, shadeC(c, edge));
-        }
-}
+static void dragonPillar(int cx, int y0, int y1, int hw = 4) { (void)hw; addDecor(DK_DRAGONPILLAR, cx + 0.5f, (float)(y1 + 1), 0, y1 - y0 + 1); }
 
 // A post carved into a bearded god's face near its top.
-static void idolPillar(int cx, int y0, int y1)
-{
-    paintPost(cx - 1, y0 + 26, y1);
-    for (int y = y0; y < y0 + 26; y++)
-        for (int dx = -5; dx <= 5; dx++)
-        {
-            int x = cx + dx, ly = y - y0;
-            Color c = shadeC(OLDWOOD, 1.05f - 0.06f * std::abs(dx + 1));
-            if (ly < 3 && std::abs(dx) > 3) continue; // a rounded crown
-            bool brow = ly == 6 && std::abs(dx) <= 4, eye = ly >= 7 && ly <= 8 && (dx == -2 || dx == 2), nose = ly >= 8 && ly <= 12 && dx == 0;
-            bool mouth = ly == 14 && std::abs(dx) <= 2, beard = ly > 15 && (dx + ly) % 3 == 0;
-            if (brow || nose) c = shadeC(HEART, 1.1f);
-            if (eye || mouth || beard) c = SEAM;
-            bgPut(x, y, c);
-        }
-}
+static void idolPillar(int cx, int y0, int y1) { addDecor(DK_IDOL, cx + 0.5f, (float)y1, 0, y1 - y0); }
 
 // A black banner with a white triskele and a fringe.
-static void triskeleBanner(int cx, int top, int len)
-{
-    static const char* TRI[7] = {"..##...", ".#..#..", "....#..", "##.#.##", "#..#..#", ".#...#.", "..###.."};
-    for (int y = top; y < top + len; y++)
-        for (int dx = -4; dx <= 4; dx++)
-        {
-            if (y >= top + len - 3 && (dx + 4) % 2) continue; // fringe
-            bgPut(cx + dx, y, std::abs(dx) == 4 ? Color{40, 36, 34, 255} : Color{22, 20, 22, 255});
-        }
-    for (int j = 0; j < 7; j++)
-        for (int i = 0; i < 7; i++)
-            if (TRI[j][i] == '#') bgPut(cx - 3 + i, top + 6 + j, {214, 210, 200, 255});
-    for (int dx = -5; dx <= 5; dx++) bgPut(cx + dx, top - 1, {70, 46, 30, 255}); // its pole
-}
+static void triskeleBanner(int cx, int top, int len) { addDecor(DK_TAPESTRY, (float)cx, (float)(top - 1), 6 | (chance(2) ? 32 : 0), len); }
 
 // An elk skull with antlers, hung on the wall.
-static void antlerSkull(int cx, int cy)
-{
-    const Color bone = {214, 206, 184, 255};
-    for (int y = cy; y < cy + 6; y++)
-        for (int dx = -2 + (y - cy) / 3; dx <= 2 - (y - cy) / 3; dx++) bgPut(cx + dx, y, bone);
-    bgPut(cx - 1, cy + 1, SEAM); bgPut(cx + 1, cy + 1, SEAM);
-    for (int sd : {-1, 1})
-    {
-        for (int k = 0; k < 9; k++) bgPut(cx + sd * (2 + k), cy - k / 2, bone);
-        for (int k = 0; k < 4; k++) { bgPut(cx + sd * 5, cy - 2 - k, bone); bgPut(cx + sd * 9, cy - 4 - k, bone); }
-    }
-}
+static void antlerSkull(int cx, int cy) { addDecor(DK_ANTLERS, cx + 0.5f, (float)(cy + 1)); }
 
 // A trestle table laid for a feast, with benches either side.
-static void feastTable(int x0, int x1, int fy)
-{
-    const Color top = {120, 82, 50, 255}, leg = {80, 54, 32, 255};
-    for (int x = x0; x <= x1; x++) { bgPut(x, fy - 9, shadeC(top, 1.15f)); bgPut(x, fy - 8, top); bgPut(x, fy - 7, shadeC(top, 0.6f)); }
-    for (int lx : {x0 + 3, x1 - 3})
-        for (int k = 0; k < 7; k++) { bgPut(lx - 2 + k * 4 / 7, fy - 7 + k, leg); bgPut(lx + 2 - k * 4 / 7, fy - 7 + k, leg); } // X trestles
-    for (int x = x0 - 4; x <= x1 + 4; x++) if (x < x0 + 2 || x > x1 - 2) bgPut(x, fy - 4, shadeC(top, 0.8f)); // bench ends showing
-    for (int x = x0 + 5; x < x1 - 4; x += irange(5, 9)) // cups, plates and bread
-    {
-        int k = irand(3);
-        if (k == 0) { bgPut(x, fy - 11, {150, 150, 158, 255}); bgPut(x, fy - 10, {110, 110, 118, 255}); bgPut(x + 1, fy - 10, {110, 110, 118, 255}); }
-        else if (k == 1) { bgPut(x, fy - 10, {170, 166, 156, 255}); bgPut(x + 1, fy - 10, {170, 166, 156, 255}); bgPut(x + 2, fy - 10, {140, 136, 128, 255}); }
-        else { bgPut(x, fy - 10, {176, 128, 70, 255}); bgPut(x + 1, fy - 10, {150, 104, 56, 255}); bgPut(x, fy - 11, {196, 150, 90, 255}); }
-    }
-}
+static void feastTable(int x0, int x1, int fy) { addDecor(DK_TABLE, (x0 + x1) / 2.0f, (float)fy, -1, x1 - x0 + 1); }
 
 // A hearth pit with a cauldron hung from a crane of lashed poles over the flames.
 static void hearthCrane(int cx, int fy)
 {
-    const Color pole = {96, 66, 40, 255}, iron = {44, 44, 50, 255};
-    for (int x = cx - 9; x <= cx + 9; x++) // the stone ring, and embers
-    {
-        bgPut(x, fy - 1, (x + cx) % 3 ? Color{100, 96, 92, 255} : Color{70, 66, 64, 255});
-        bgPut(x, fy - 2, std::abs(x - cx) > 7 ? Color{100, 96, 92, 255} : Color{150, 60, 24, 255});
-    }
-    for (int sd : {-1, 1}) // an A-frame of two lashed poles at each end
-        for (int k = 0; k < 30; k++)
-        {
-            bgPut(cx + sd * (11 + k / 6), fy - 1 - k, pole);
-            bgPut(cx + sd * (21 - k / 6), fy - 1 - k, pole);
-        }
-    for (int x = cx - 15; x <= cx + 15; x++) bgPut(x, fy - 30, pole); // crossbar
-    for (int y = fy - 29; y < fy - 15; y++) bgPut(cx, y, iron); // chain
-    for (int y = fy - 15; y < fy - 8; y++) // the cauldron
-        for (int dx = -5; dx <= 5; dx++)
-        {
-            int ry = y - (fy - 15);
-            if (std::abs(dx) > 5 - (ry > 4 ? ry - 4 : 0)) continue;
-            bgPut(cx + dx, y, ry == 0 ? Color{70, 70, 76, 255} : shadeC(iron, 1.1f - 0.08f * std::abs(dx + 2)));
-        }
+    addDecor(DK_CRANE, (float)cx, (float)fy, 0);
     G.lamps.push_back({(float)cx, (float)(fy - 4), 90, LAMP_WARM, true});
 }
 
@@ -1502,8 +1268,22 @@ static void decorateRoom(const Room& r, bool grand)
     bool crypt = r.y0 > castleGround + 260;
     for (int wx = r.x0 + 18 + irand(12); wx < r.x1 - 12; wx += irange(36, 60))
     {
-        if (!crypt && (grand || chance(3))) latticeWindow(wx, r.y0 + 6, grand ? 15 : 11, std::min(h - 14, grand ? 44 : 28));
-        else if (chance(2)) triskeleBanner(wx, r.y0 + 8, std::min(30, h - 16));
+        if (!crypt && (grand || chance(3)))
+        {
+            int wh = std::min(h - 14, grand ? 44 : 28);
+            latticeWindow(wx, r.y0 + 6, grand ? 15 : 11, wh);
+            if (chance(2) && h >= 50) addDecor(DK_DRAPE, (float)wx, (float)(r.y0 + 3), irand(64), std::min(h - 8, wh + 16)); // old drapes either side of it
+        }
+        else if (int roll = irand(3); roll == 0) triskeleBanner(wx, r.y0 + 8, std::min(30, h - 16));
+        else if (roll == 1 && h >= 44) addDecor(DK_TAPESTRY, (float)wx, (float)(r.y0 + 4), irand(64), irange(24, std::min(56, h - 14)), chance(2)); // a tapestry
+    }
+    for (int cx = r.x0 + 14 + irand(20); cx < r.x1 - 10 && h >= 44; cx += irange(40, 90)) // chains from the ceiling, the way the lanterns hang
+        if (chance(3)) addDecor(DK_CHAIN, (float)cx, (float)r.y0, irand(64), irange(10, std::min(46, h - 24)));
+    for (int k = crypt ? irange(1, 5) : (chance(2) ? irange(1, 3) : 0); k > 0; k--) // old blood: on the walls, in pools on the floor
+    {
+        int bx = irange(r.x0 + 14, std::max(r.x0 + 15, r.x1 - 14)), v = irand(6) + 6 * irand(10);
+        if (v % 6 == 4) addDecor(DK_BLOOD, (float)bx, (float)(r.y1 + 1), v, irange(10, 20));
+        else addDecor(DK_BLOOD, (float)bx, (float)irange(r.y0 + 16, std::max(r.y0 + 17, r.y1 - 6)), v, irange(12, 22), chance(2));
     }
     if (crypt)
         for (int k = irange(1, 2), sx = r.x0 + irange(10, 40); k > 0 && sx < r.x1 - 30; k--, sx += irange(40, 70)) sarcophagus(sx, r.y1 + 1);
@@ -1533,7 +1313,7 @@ static void decorateRoom(const Room& r, bool grand)
 // to the crypt gate at the bottom. `g` is the ground level, matched to the gatehouse you came through.
 static LevelEnds castleLayout(const StageDef& d, int g)
 {
-    const int keepX0 = 380, keepX1 = 1220;
+    const int keepX0 = 380, keepX1 = W - 580; // the keep fills all but the crag at the far end
     castleGround = g;
     surf.assign(W, g);
     for (int x = 0; x < W; x++)
@@ -1558,6 +1338,12 @@ static LevelEnds castleLayout(const StageDef& d, int g)
     for (int x = keepX0; x < keepX1; x += 37) // arrow slits in the curtain wall
         for (int y = surf[x] + 18; y < surf[x] + 34; y++) world.at(x, y).shade = 0;
     buildBackground(d, true);
+    { // inside, the back wall is dark stone tile (see WALL_TILE): whatever is painted over it later keeps its own colours
+        NoiseGrid tn(W, H, 4, [&](float x, float y) { return fbm(x * 0.03f, y * 0.04f, seed + 55, 2); });
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                if (y >= surf[x] + 6 && !world.skyAt(x, y)) bgStyle(x, y, lerpColor({92, 82, 108, 255}, {124, 106, 130, 255}, tn.at(x, y)), WALL_TILE);
+    }
     for (int x = keepX0 + 30; x < keepX1 - 30; x += irange(44, 64)) // arched windows in the keep, some lit by candles
         for (int y = surf[x] + 40; y < g - 175; y += irange(46, 60))
         {
@@ -1608,6 +1394,9 @@ static LevelEnds castleLayout(const StageDef& d, int g)
         idolPillar(mid + 34, lobby.y1 - 70, lobby.y1);
         antlerSkull(mid, lobby.y0 + 30);
         hearthCrane(mid, lobby.y1 + 1);
+        for (int cx = lobby.x0 + 50; cx < lobby.x1 - 40; cx += irange(70, 110)) addDecor(DK_CHAIN, (float)cx, (float)(lobby.y0 + 4), irand(64), irange(26, 50)); // chains from the roof beam
+        for (int k = 0; k < 5; k++) addDecor(DK_BLOOD, (float)irange(lobby.x0 + 10, lobby.x0 + 90), (float)irange(lobby.y0 + 60, lobby.y1 - 10), irand(6) + 6 * irand(10), irange(14, 22), chance(2)); // a fight at the doors
+        addDecor(DK_BLOOD, (float)(lobby.x0 + irange(14, 60)), (float)(lobby.y1 + 1), 4 + 6 * irand(10), irange(14, 22));
         feastTable(lobby.x0 + 50, lobby.x0 + 120, lobby.y1 + 1);
         feastTable(lobby.x1 - 120, lobby.x1 - 50, lobby.y1 + 1);
         for (int tx = lobby.x0 + 12; tx < lobby.x1 - 8; tx += 60) G.inter.push_back({IT_TORCH, (float)tx, (float)(lobby.y1 + 1)});
@@ -1641,14 +1430,67 @@ static LevelEnds castleLayout(const StageDef& d, int g)
         }
     };
 
+    // the keep above ground: halls end to end across its whole length, a storey of rooms over them (reached by shafts of
+    // one-way ledges climbing out of the ground-floor halls), and at the far east end a vestibule where the grand staircase
+    // starts - it goes down and comes back west under the keep. The chain below starts from the vestibule.
+    std::vector<Room> upperRooms;
+    {
+        const int uf = g - 160; // the upper storey's floor
+        std::vector<Room> ground{lobby};
+        for (int x = lobby.x1 + 16; ; )
+        {
+            int w = irange(150, 290);
+            if (x + w > keepX1 - 130) break;
+            Room r{x, g - irange(120, 150), x + w, g - 1};
+            clearRect(r.x0, r.y0, r.x1, r.y1);
+            corridor(ground.back().x1 - 2, g - 1, r.x0 + 2, g - 1); // a doorway through the wall between halls
+            decorateRoom(r, true);
+            int sx = r.x0 + irange(20, std::max(21, w - 60)); // the climb: a shaft up through the ceiling, ledges every 26
+            for (int y = uf + 1; y <= r.y0; y++)
+                for (int xx = sx; xx <= sx + 40; xx++)
+                    if (world.at(xx, y).material != M::Bedrock) world.at(xx, y) = Cell{};
+            for (int y = g - 27; y > uf + 10; y -= 26)
+                for (int xx = sx; xx <= sx + 40; xx++) place(xx, y, M::Platform);
+            if (chance(2)) addChest(r.x0 + w / 2 + irange(-w / 4, w / 4), r.y1 + 1);
+            ground.push_back(r);
+            x += w + irange(16, 24);
+        }
+        for (auto& r : ground)
+        {
+            Room u{r.x0, uf - irange(46, 56), r.x1, uf};
+            clearRect(u.x0, u.y0, u.x1, u.y1);
+            if (!upperRooms.empty()) corridor(upperRooms.back().x1 - 2, uf, u.x0 + 2, uf);
+            decorateRoom(u, false);
+            upperRooms.push_back(u);
+        }
+        Room vest{ground.back().x1 + 16, g - 100, ground.back().x1 + 76, g - 1}; // undecorated: just torches and the stairs
+        clearRect(vest.x0, vest.y0, vest.x1, vest.y1);
+        corridor(ground.back().x1 - 2, g - 1, vest.x0 + 2, g - 1);
+        G.inter.push_back({IT_TORCH, (float)vest.x0 + 10, (float)g});
+        for (size_t i = 1; i < ground.size(); i++) rooms.push_back(ground[i]);
+        rooms.push_back(vest);
+    }
+    bool stairDone = false;
     int dir = 1;
-    for (int tries = 0; tries < 600 && rooms.size() < 16; tries++)
+    for (int tries = 0; tries < 1000 && rooms.size() < 26 + 12; tries++)
     {
         const Room a = rooms.back();
-        int w = irange(150, 300), h = irange(70, 150);
+        int w = irange(200, 380), h = irange(70, 150);
         Room b;
-        bool vertical = rooms.size() == 1 || chance(3); // the great hall opens straight down into the cellars
-        if (!vertical)
+        bool stair = !stairDone; // the grand staircase: from the vestibule at the keep's east end, down and back west into the cellars
+        bool vertical = !stair && chance(6);
+        if (stair)
+        {
+            int desc = 3 * irange(37, 56); // a drop in whole 3-unit steps, descending 1:1
+            h = irange(70, std::min(150, desc - 26));
+            b.y1 = a.y1 + desc;
+            b.y0 = b.y1 - h;
+            b.x1 = a.x1 - 10 - desc + 30; // the cellar's east end meets the foot of the stairs
+            b.x0 = b.x1 - w;
+            if (b.x0 < 20) continue;
+            dir = -1; // the cellars run on west, back under the keep
+        }
+        else if (!vertical)
         {
             int gap = irange(16, 50);
             b.x0 = dir > 0 ? a.x1 + gap : a.x0 - gap - w;
@@ -1668,7 +1510,21 @@ static LevelEnds castleLayout(const StageDef& d, int g)
         if (b.y1 > H - 40) break;
         if (overlaps(b)) { if (tries % 6 == 5) dir = -dir; continue; }
         clearRect(b.x0, b.y0, b.x1, b.y1);
-        if (vertical)
+        if (stair)
+        {
+            int xs = a.x1 - 10, n = b.y1 - a.y1; // a flight of 3x3 masonry steps from the vestibule floor to the cellar floor, under a high vault
+            stairDone = true;
+            for (int k = 0; k <= n; k++)
+            {
+                int x = xs - k, f = a.y1 + k / 3 * 3;
+                for (int y = f - 54; y <= f; y++)
+                    if (world.in(x, y) && world.at(x, y).material != M::Bedrock) world.at(x, y) = Cell{};
+                place(x, f + 1, M::Masonry);
+                world.at(x, f + 1).shade = (uint8_t)(k % 3 == 0 ? 220 : 150); // the lip of each tread catches the light
+                if (k % 36 == 18) G.inter.push_back({IT_TORCH, (float)x, (float)(f + 1)});
+            }
+        }
+        else if (vertical)
         {
             // a shaft through a's floor into b, capped with planks you drop through
             int s0 = std::max(a.x0, b.x0) + 6, s1 = std::min(a.x1, b.x1) - 6;
@@ -1693,9 +1549,59 @@ static LevelEnds castleLayout(const StageDef& d, int g)
         decorateRoom(b, w > 240 && h > 120);
         rooms.push_back(b);
     }
-    // down from the last hall to the crypt gate at the castle's foot
-    const Room& last = rooms.back();
-    int hf = std::min(H - 24, std::max(last.y1 + 1, (int)(H * 0.6f)));
+    // side halls: off any hall (side halls too), up, down, left or right - chains that wander off and end somewhere,
+    // most with something left behind. The way on stays the main chain above.
+    const Room last = rooms.back();
+    for (auto& u : upperRooms) rooms.push_back(u); // (after the chain, so `last` above is its end)
+    for (int tries = 0, added = 0; tries < 3000 && added < 34; tries++)
+    {
+        const Room a = rooms[1 + irand((int)rooms.size() - 1)]; // anything below the great hall
+        int w = irange(110, 260), h = irange(60, 130), side = irand(4); // 0 east, 1 west, 2 down, 3 up
+        Room b;
+        if (side < 2)
+        {
+            int gap = irange(30, 70);
+            b.x0 = side == 0 ? a.x1 + gap : a.x0 - gap - w;
+            b.x1 = b.x0 + w;
+            b.y1 = a.y1 + irange(-gap * 4 / 5, 50); // up no steeper than you can walk; down, any drop
+            b.y0 = b.y1 - h;
+        }
+        else
+        {
+            b.x0 = std::max(20, std::min(W - 300 - w, a.x0 + irange(-w / 2, a.x1 - a.x0 - w / 2)));
+            b.x1 = b.x0 + w;
+            if (side == 2) { b.y0 = a.y1 + irange(34, 80); b.y1 = b.y0 + h; }
+            else { b.y1 = a.y0 - irange(34, 80); b.y0 = b.y1 - h; }
+        }
+        if (b.x0 < 20 || b.x1 > W - 300 || b.y0 < g + 24 || b.y1 > H - 40 || overlaps(b)) continue;
+        if (side >= 2 && std::min(a.x1, b.x1) - std::max(a.x0, b.x0) < 42) continue; // too little overlap for a shaft
+        clearRect(b.x0, b.y0, b.x1, b.y1);
+        if (side < 2)
+        {
+            int xa = side == 0 ? a.x1 - 2 : a.x0 + 2, xb = side == 0 ? b.x0 + 2 : b.x1 - 2;
+            corridor(xa, a.y1, xb, b.y1);
+            if (std::abs(b.y1 - a.y1) > 40)
+                for (int x = std::min(xa, xb); x <= std::max(xa, xb); x++) place(x, (a.y1 + b.y1) / 2, M::Platform);
+        }
+        else // a planked shaft between them, the upper room's floor dropping into the lower
+        {
+            const Room& up = side == 2 ? a : b;
+            const Room& dn = side == 2 ? b : a;
+            int s0 = std::max(up.x0, dn.x0) + 6, s1 = std::min(s0 + 50, std::min(up.x1, dn.x1) - 6);
+            for (int y = up.y1 + 1; y < dn.y0; y++)
+                for (int x = s0; x <= s1; x++)
+                    if (world.at(x, y).material != M::Bedrock) world.at(x, y) = Cell{};
+            for (int x = s0; x <= s1; x++) { place(x, up.y1 + 1, M::Platform); place(x, up.y1 + 2, M::Platform); }
+            for (int ly = up.y1 + 26; ly < dn.y0 - 8; ly += 26)
+                for (int x = s0; x <= s1; x++) place(x, ly, M::Platform);
+        }
+        decorateRoom(b, w > 200 && h > 110);
+        if (chance(2)) addChest((b.x0 + b.x1) / 2 + irange(-w / 4, w / 4), b.y1 + 1); // what someone left down here
+        rooms.push_back(b);
+        added++;
+    }
+    // down from the last hall of the main chain to the crypt gate at the castle's foot
+    int hf = std::min(H - 24, std::max(last.y1 + 1, (int)(H * 0.68f)));
     carveRamp((float)last.x1 - 16, (float)last.y1 - 22, (float)(W - 236), (float)(hf - 22), 23);
     // line every hall and passage with masonry, three bricks deep
     {
@@ -2004,65 +1910,18 @@ static void paintArchery(int x, int fy)
 
 static void paintCactus(int x, int fy)
 {
-    const Color base = {64, 104, 58, 255}, rib = {44, 74, 42, 255}, lit = {96, 140, 80, 255}, spine = {196, 192, 150, 255};
-    auto stalk = [&](int x0, int y0, int y1, int w) { // a ribbed column from y0 (top) to y1, rounded at the top
-        for (int y = y0; y <= y1; y++)
-            for (int k = 0; k < w; k++)
-            {
-                if (y == y0 && (k == 0 || k == w - 1)) continue;
-                Color c = k == w - 1 ? lit : (k == 0 ? rib : ((k + y / 3) % 2 ? base : shadeC(base, 0.85f)));
-                if (hash2(x0 + k, y, seed + 41) > 0.93f) c = spine;
-                bgPut(x0 + k, y, c);
-            }
-    };
-    int h = irange(16, 30);
-    stalk(x - 2, fy - h, fy + 1, 5);
-    for (int sd : {-1, 1})
-    {
-        if (chance(3)) continue;
-        int ay = fy - irange(h / 3, h * 2 / 3), reach = irange(3, 5), up = irange(5, 10);
-        for (int k = 1; k <= reach; k++)
-            for (int yy = ay; yy < ay + 3; yy++) bgPut(x + sd * (2 + k), yy, yy == ay + 2 ? rib : base);
-        int ax = sd > 0 ? x + 2 + reach : x - 4 - reach;
-        stalk(ax, ay - up, ay + 2, 3);
-    }
+    G.inter.push_back({IT_DECOR, (float)x, (float)fy, false, DK_CACTUS, irand(64) | (chance(2) ? 64 : 0)});
 }
 
 static void paintDeadBush(int x, int fy)
 {
-    const Color twig = {110, 84, 56, 255};
-    for (int b = 0; b < 5; b++)
-    {
-        float a = -PI / 2 + frange(-1.0f, 1.0f), len = frange(3, 7);
-        for (int k = 0; k < len; k++) bgPut(x + (int)std::lround(std::cos(a) * k), fy - 1 + (int)std::lround(std::sin(a) * k), shadeC(twig, 0.8f + 0.1f * (k % 2)));
-    }
+    G.inter.push_back({IT_DECOR, (float)x, (float)fy, false, DK_BUSH, irand(64) | (chance(2) ? 64 : 0)});
 }
 
 // The bones of a giant, half swallowed by the sand: a skull, a spine and a cage of ribs.
 static void paintGiantBones(int x, int fy)
 {
-    const Color bone = {196, 190, 166, 255}, dark = {130, 124, 108, 255};
-    auto put = [&](int px, int py, Color c) { if (world.in(px, py) && world.at(px, py).material == M::Empty) bgPut(px, py, c); };
-    for (int k = 0; k < 90; k++) // spine, sagging into the dune
-        for (int t = 0; t < 3; t++) put(x + k, fy - 3 + (int)(std::sin(k * 0.035f) * 6) + t, k % 5 == 0 ? dark : bone);
-    for (int r = 0; r < 7; r++) // ribs arch up and over
-    {
-        int rx = x + 14 + r * 10, rh = 34 - std::abs(r - 2) * 4, base = fy - 2 + (int)(std::sin((rx - x) * 0.035f) * 6);
-        for (float a = 0; a < PI; a += 0.02f)
-        {
-            int px2 = rx - (int)(std::cos(a) * 8) - (int)(a * 3), py = base - (int)(std::sin(a) * rh);
-            put(px2, py, bone);
-            put(px2 + 1, py, a > PI / 2 ? dark : bone);
-        }
-    }
-    for (int dy = -12; dy <= 0; dy++) // the skull, eye socket to the sky
-        for (int dx = -16; dx <= 0; dx++)
-        {
-            float u = (dx + 8) / 9.0f, v = (dy + 6) / 7.0f;
-            if (u * u + v * v > 1) continue;
-            bool socket = (dx + 6) * (dx + 6) + (dy + 7) * (dy + 7) < 6;
-            put(x + dx, fy - 2 + dy, socket ? Color{20, 18, 22, 255} : (dy > -3 ? dark : bone));
-        }
+    G.inter.push_back({IT_DECOR, (float)x + 50, (float)fy + 4, false, DK_GIANT, irand(64)}); // a sprite, half sunk in the sand
 }
 
 // One of the levy that died before Dunmoor, painted on the back wall: sprawled in mail or a tunic, spears
@@ -2098,12 +1957,12 @@ static void paintFallen(int x, int g, float k)
 
 // The battlefield before Dunmoor: the dead lie thicker the nearer the walls, the ground drinks their blood,
 // and the levy that fell here has risen to hold the field.
-static void decorateBattlefield(int x0, int x1)
+static void decorateBattlefield(int x0, int x1, bool thinning = false, bool storm = true) // thinning: the dead are thickest at x0 and fade away towards x1 (the far side of the waystone)
 {
     int nextBody = x0;
     for (int x = x0; x < x1; x++)
     {
-        float k = clampf((x - x0) / (float)(x1 - x0) * 1.4f, 0, 1);
+        float k = thinning ? clampf(1.05f - (x - x0) / (float)(x1 - x0) * 0.85f, 0.15f, 1) : clampf((x - x0) / (float)(x1 - x0) * 1.4f, 0, 1);
         int gy = 5;
         while (gy < H - 5 && !isSolid(x, gy)) gy++;
         if (gy >= H - 5) continue;
@@ -2127,6 +1986,7 @@ static void decorateBattlefield(int x0, int x1)
             if (!boxSolid(mb.x, mb.y, mb.w, mb.h)) G.mobs.push_back(mb);
         }
     }
+    if (!storm) return;
     G.stormX0 = (float)x0 - 250;
     G.stormX1 = (float)x1 + 80;
 }
@@ -2179,6 +2039,44 @@ static const HavenTheme HAVEN_THEMES[] = {
     {"The Black Chapel", M::Obsidian, {30, 24, 40, 255}, {150, 90, 200, 255}},
 };
 
+// The first waystone is a chieftain's hall: one long timber hut with a thatched roof you walk straight through,
+// doorways at both ends, idols flanking the doors, trophies and shields on the walls, furs and a rack of spears.
+// The runestone, the anvil and the mead horn stand inside it.
+static void placeTribalHut(int x0, int x1, int floor)
+{
+    const int hx = x0 + 8, w = x1 - x0 - 24, wallTop = floor - 58;
+    Hall hall = paintHall(hx, w, floor, wallTop, true);
+    paintRoom(hx + 3, wallTop + 1, hx + w - 2, floor);
+    for (int x = hx + 24; x < hx + w - 40; x += irange(34, 50)) // trophies and shields on the long wall, banners between
+    {
+        int k = irand(4);
+        if (k == 0) antlerSkull(x, wallTop + irange(10, 18));
+        else if (k == 1) paintShield(x, wallTop + 14, 4);
+        else if (k == 2) triskeleBanner(x, wallTop + 4, 26);
+        else addDecor(DK_TAPESTRY, (float)x, (float)(wallTop + 5), irand(64), irange(26, 40), chance(2));
+    }
+    for (int x = hx + 20; x < hx + w - 20; x += irange(44, 64)) paintPost(x, wallTop + 2, floor);
+    for (int sd : {-1, 1}) // idols either side of each doorway
+    {
+        idolPillar(sd < 0 ? hx + 14 : hx + w - 14, floor - 70, floor);
+        paintRack(sd < 0 ? hx + 22 : hx + w - 44, floor);
+    }
+    for (int x = hx + 40; x < hx + w - 40; x += irange(60, 80)) addDecor(DK_CHAIN, (float)x, (float)(wallTop + 2), irand(64), irange(10, 20)); // pot-chains from the beams
+    for (int k = 0; k < 3; k++) addDecor(DK_BLOOD, (float)irange(hx + 30, hx + w - 30), (float)(floor + 1), 4 + 6 * irand(10), irange(10, 16)); // a hunt's worth of blood on the floor
+    paintYardProp(hx - 12, floor);
+    paintYardProp(hx + w + 3, floor);
+    for (int y = wallTop; y < floor; y++) // the end walls: a wide doorway below, a smoke hole above
+    {
+        if (y >= floor - 30) continue;
+        for (int k = 0; k < 3; k++) { place(hx + k, y, M::Wood); place(hx + w - k, y, M::Wood); }
+    }
+    for (int x = hx; x <= hx + w; x++) { place(x, floor, M::Wood); place(x, floor + 1, M::Wood); } // planked floor
+    Lamp smoke{(float)hall.mid, (float)hall.apexY + 2, 0, BLANK};
+    smoke.smoke = true;
+    G.lamps.push_back(smoke);
+    G.lamps.push_back({(float)hall.mid, (float)(floor - 6), 120, LAMP_WARM, true});
+}
+
 // No walls and no gates: the way simply runs on into the next biome, whose rock and back wall bleed into
 // this one's (see compose). At the seam stands a runestone, glowing in the stage's colour, an anvil, and a
 // horn of mead that heals you whole. Walking past it builds the biome after next. Only a guardian's
@@ -2187,10 +2085,10 @@ static void placeHaven(int s, int floor)
 {
     const HavenTheme& t = HAVEN_THEMES[std::min(s, 5)];
     const StageDef& d = STAGES[s];
-    const int x0 = W - 220, x1 = W - 1;
+    const int x0 = W - wingR - 220, x1 = W - wingR - 1; // (a deep biome carries on east past it, over the next)
     floor = std::max(120, std::min(floor, H - 16));
     int top = floor - 76;
-    if (d.surface) levelGround(x0 - 120, W - 1, floor);
+    if (d.surface) { levelGround(x0 - 120, W - 1, floor); placeTribalHut(x0, x1, floor); } // (the runestone, anvil and horn below stand inside it)
     else
     {
         if (roadValid) // a broad tunnel from wherever the road ended up
@@ -2204,7 +2102,7 @@ static void placeHaven(int s, int floor)
         }
     }
     for (int y = d.surface ? 5 : floor - HAVEN_DOOR; y < floor; y++) // the edge's bedrock gives way, to meet the next biome
-        for (int x = W - 6; x < W; x++) world.at(x, y) = Cell{};
+        for (int x = W - 6; x < W && !wingR; x++) world.at(x, y) = Cell{};
     int sx = x0 + 110; // the runestone, its carving lit from within
     for (int y = floor - 26; y < floor; y++)
         for (int x = sx - 6; x <= sx + 6; x++)
@@ -2234,6 +2132,15 @@ static void placeHaven(int s, int floor)
 // `entryFloor` asks for a particular entry height (the castle grounds meet the gatehouse's floor).
 static int pieceEntryX = 0, pieceEntryFloor = 0;
 // ---------------------------------------------------------------- dressing: the fine detail, added last
+
+// A floor cell whose neighbours are floor at the same height: loose powder laid on it stays put.
+static bool flatFloor(int x, int y)
+{
+    auto rock = [](int x, int y) { return props(world.at(x, y).material).kind == Kind::Solid; }; // (not powder: snow already laid next door is fine)
+    for (int dx : {-1, 1})
+        if (!rock(x + dx, y) || rock(x + dx, y - 1)) return false;
+    return true;
+}
 
 static bool plainRock(M m) { return m == M::Stone || m == M::Dirt || m == M::Basalt || m == M::Obsidian || m == M::Ice || m == M::Moss || m == M::Grass; }
 
@@ -2267,7 +2174,7 @@ static void dressCaves(const StageDef& d)
                     for (int dx = -1; dx <= 1; dx++) bgPut(x + dx, y - 5, brighten(cap, 30));
                     G.lamps.push_back({(float)x, (float)(y - 4), 22, cap});
                 }
-                if (frost && chance(3)) place(x, y - 1, M::Snow);
+                if (frost && chance(3) && flatFloor(x, y)) place(x, y - 1, M::Snow);
                 if (forge && chance(8)) place(x, y - 1, M::Gravel);
                 if (crypt && chance(40)) place(x, y - 1, M::Bone);
                 if (!frost && chance(25)) place(x, y - 1, M::Gravel); // loose pebbles
@@ -2387,7 +2294,9 @@ static void shadeBackWall(bool surface)
             float strata = std::sin(y * 0.11f + fbm(x * 0.008f, y * 0.01f, seed + 70, 2) * 9);
             float crack = fbm(x * 0.01f, y * 0.01f, seed + 72, 2) > 0.6f ? std::fabs(fbm(x * 0.03f, y * 0.03f, seed + 71, 3) - 0.5f) : 1.0f; // only in patches
             float k = (1 - 0.55f * clampf(occ[(size_t)y * W + x] * 1.6f, 0, 1)) * (0.93f + 0.07f * strata) * (crack < 0.008f ? 0.65f : 1.0f);
-            world.bgAt(x, y) = shadeC(c, std::min(1.0f, k));
+            Color sh = shadeC(c, std::min(1.0f, k));
+            sh.a = c.a; // (keep a wall pattern id)
+            world.bgAt(x, y) = sh;
         }
 }
 
@@ -2417,7 +2326,7 @@ static void castleCaves(int g)
     for (int y = g + 60; y < H - 4; y++)
         for (int x = 4; x < W - 4; x++)
             if (!nearOpen(x, y) && world.at(x, y).material != M::Bedrock)
-                cave[(size_t)y * W + x] = 1 + (caveN.at(x, y) > 0.64f || caveN2.at(x, y) > 0.77f);
+                cave[(size_t)y * W + x] = 1 + (caveN.at(x, y) > 0.63f || caveN2.at(x, y) > 0.76f);
     for (int x = 0; x < 170; x++) // the stub west, to meet the plains caves (through the bedrock rim)
         for (int dy = -13; dy <= 13; dy++)
         {
@@ -2498,6 +2407,12 @@ static void openPlainsJoint(int hf) // after the rock is laid: through the bedro
 // ponytail: an unseen damp chunk reads as solid rock to collision and light (World::get returns `fill`).
 // Fine while it's sealed; once there's a way in, allocate chunks around the player as well as the camera.
 static std::vector<Rectangle> pieceRects; // every biome in the live world, in cells
+std::vector<Rectangle> devPieceRects()
+{
+    std::vector<Rectangle> r;
+    for (auto& p : pieceRects) r.push_back({p.x / world.scale, p.y / world.scale, p.width / world.scale, p.height / world.scale});
+    return r;
+}
 static int dampSeed = 0, dampOX = 0, dampOY = 0; // noise origin, so the caves stay put when the world is re-cut
 enum { DZ_NONE, DZ_BARRIER, DZ_CAVE };
 
@@ -2614,15 +2529,19 @@ static bool dampPreview(int x, int y, Color& out)
 // tube tunnels, low-frequency noise for open caverns. Each level's floor is laid back down after, so the
 // noise can break into the way through but never cut it.
 static bool deepLayout = false; // the biome being built is one of these
-static const int DEEP_LEVELS = 5;
+static const int DEEP_LEVELS = 5; // odd: the levels alternate direction and the last must end at the haven, bottom right
 static int deepFloor[DEEP_LEVELS];               // each level's nominal floor row
 static std::vector<int> levelFloor[DEEP_LEVELS]; // each level's actual floor per column (-1 where it doesn't run)
 struct Shaft { int x, top, bottom; };            // mines: plank-capped, with a rope down
 static std::vector<Shaft> shafts;
 struct SideRoom { int x0, x1, floor; };
 static std::vector<SideRoom> sideRooms;
-struct Corridor { int x0, x1, floor; };          // crypts: for the tiled back wall
+struct Corridor { int x0, x1, floor, lvl; };     // crypts: for the tiled back wall
 static std::vector<Corridor> corridors;
+struct DeepHall { int x0, x1, floor, h; };       // crypts and mines: a tall room on the way (gets a mezzanine)
+static std::vector<DeepHall> deepHalls;
+struct PitCap { int x0, x1, floor; };            // a plank floor over a low chamber you drop into
+static std::vector<PitCap> pitCaps;
 
 static void airRect(int x0, int y0, int x1, int y1) // inclusive, kept off the bedrock rim
 {
@@ -2636,6 +2555,9 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
     shafts.clear();
     sideRooms.clear();
     corridors.clear();
+    deepHalls.clear();
+    pitCaps.clear();
+    bool structured = crypt || mines; // built like the castle: a chain of rooms, halls and passages whose floors step up and down
     // tunnels: 1 - |2n - 1| peaks along the creases of the noise, and warping its input bends them into
     // long winding tubes; caverns: the old low-frequency blobs, rarer than before. The crypts' stone is
     // mostly sound, the caves riddled.
@@ -2644,9 +2566,11 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
         return 1 - std::fabs(2 * fbm((x + wx) * 0.006f, (y + wy) * 0.008f, seed + 210, 3) - 1);
     });
     NoiseGrid cavern(W, H, 4, [&](float x, float y) { return fbm(x * 0.0055f, y * 0.009f, seed, 4); });
-    float tt = crypt ? 0.975f : (mines ? 0.95f : 0.93f), ct = crypt ? 0.67f : (mines ? 0.64f : 0.61f);
+    float tt = crypt ? 0.984f : (mines ? 0.945f : 0.923f), ct = crypt ? 0.75f : (mines ? 0.63f : 0.60f); // (tube width ~ 1 - tt)
     for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++) air[(size_t)y * W + x] = tube.at(x, y) > tt || cavern.at(x, y) > ct;
+        for (int x = 0; x < W; x++)
+            air[(size_t)y * W + x] = (tube.at(x, y) > tt || cavern.at(x, y) > ct) &&
+                                     !(x < wingL && y < 320) && !(x >= W - wingR && y >= H - 290); // under the last biome's floor / over the next's roof: its own rock
 
     const int xL = 120, xR = W - 300, N = DEEP_LEVELS; // room at both ends for a side room; the haven takes the last level's right end
     for (int i = 0; i < N; i++)
@@ -2658,20 +2582,40 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
     for (int i = 0; i < N; i++)
     {
         int dir = i % 2 ? -1 : 1, fy = deepFloor[i];
-        int xs = i == 0 ? 12 : (dir > 0 ? xL : xR), xe = i == N - 1 ? W - 250 : (dir > 0 ? xR : xL);
+        int xs = i == 0 ? 12 + wingL : (dir > 0 ? xL : xR), xe = i == N - 1 ? W - wingR - 250 : (dir > 0 ? xR : xL);
         std::fill(bottom.begin(), bottom.end(), -1.0f);
         int nextHall = xs + dir * irange(120, 200);
+        std::vector<int> off(W, 0), hgt(W, 0); // per column: how far this level's floor sits from its nominal row, and the room's height
+        int zoneEnd = i == N - 1 && d.boss >= 0 ? 420 : 130; // the ends stay level: the stairs, the haven and the arena meet them there
+        if (structured)
+            for (int a = xs, prev = 0; dir > 0 ? a < xe : a > xe;)
+            {
+                bool free = std::abs(a - xs) >= 130 && std::abs(xe - a) >= zoneEnd + 150;
+                bool hall = free && chance(3);
+                int len = hall ? irange(70, 110) : irange(90, 150);
+                int b = dir > 0 ? std::min(a + len, xe) : std::max(a - len, xe);
+                int cur = free && std::abs(xe - b) >= zoneEnd ? std::max(-45, std::min(45, prev + irange(-32, 32))) : 0;
+                int step = cur - prev, h = hall ? (crypt ? 62 : 52) : (crypt ? 36 : 38);
+                for (int x = a; x != b + dir; x += dir) // a ramp up or down at 45 degrees over the start of the room, then flat
+                {
+                    int k = std::min(std::abs(x - a), std::abs(step));
+                    off[x] = prev + (step > 0 ? k : -k);
+                    hgt[x] = h;
+                }
+                if (hall) deepHalls.push_back({std::min(a, b), std::max(a, b), fy + cur, h});
+                prev = cur;
+                a = b;
+            }
         for (int x = xs; dir > 0 ? x <= xe : x >= xe; x += 2 * dir)
         {
             float cy;
-            if (crypt) // a flat corridor, opening now and then into a tall hall
+            if (structured)
             {
-                bool hall = std::abs(x - nextHall) < 40;
-                if (dir > 0 ? x > nextHall + 40 : x < nextHall - 40) nextHall += dir * irange(150, 220);
-                airRect(x - 1, fy - (hall ? 76 : 38), x + 1, fy - 1);
-                cy = (float)(fy - 19);
+                int f = fy + off[x];
+                airRect(x - 1, f - hgt[x], x + 1, f - 1);
+                cy = (float)(f - 15);
                 for (int dx = -1; dx <= 1; dx++)
-                    if (x + dx >= 0 && x + dx < W) bottom[x + dx] = (float)fy - 1;
+                    if (x + dx >= 0 && x + dx < W) bottom[x + dx] = (float)f - 1;
             }
             else // a worm: it heads for the far end, nudged up and down by noise
             {
@@ -2695,13 +2639,24 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
             }
             path.push_back({(float)x, cy});
         }
-        if (crypt) corridors.push_back({std::min(xs, xe), std::max(xs, xe), fy});
+        if (crypt) corridors.push_back({std::min(xs, xe), std::max(xs, xe), fy, i});
         for (int x = 0; x < W; x++) // a guaranteed floor under the level, bridging any cavern it crosses
         {
             if (bottom[x] < 0) continue;
             int b = (int)bottom[x] + 1;
             levelFloor[i][x] = b;
             for (int y = b; y < b + 5 && y < H; y++) air[(size_t)y * W + x] = 0;
+        }
+        for (int px = xs + dir * irange(190, 260); structured && (dir > 0 ? px < xe : px > xe) && std::abs(xe - px) > zoneEnd + 60 && std::abs(px - xs) > 150; px += dir * irange(200, 300))
+        {
+            if (hgt[px] > 40 || off[px - 26] != off[px + 26] || hgt[px - 26] > 40 || hgt[px + 26] > 40 || off[px] != off[px - 26]) continue; // flat passage only
+            int f = levelFloor[i][px]; // a plank floor over a low chamber (22 high, so you can jump back up through it)
+            if (f < 0) continue;
+            airRect(px - 24, f + 2, px + 24, f + 23);
+            for (int x = px - 24; x <= px + 24; x++)
+                for (int y = f + 24; y < f + 29 && y < H; y++) air[(size_t)y * W + x] = 0;
+            pitCaps.push_back({px - 24, px + 24, f});
+            sideRooms.push_back({px - 24, px + 24, f + 24});
         }
     }
 
@@ -2751,7 +2706,7 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
 
     if (d.boss >= 0) // the guardian's arena on the last level, short of the haven
     {
-        arenaX = W - 460;
+        arenaX = W - wingR - 460;
         arenaFloor = pathFloor[arenaX];
         airRect(arenaX - 150, arenaFloor - 136, arenaX + 150, arenaFloor - 1);
     }
@@ -2773,21 +2728,34 @@ static void deepFinish(const StageDef& d)
         rope.data = sh.bottom;
         G.inter.push_back(rope);
     }
+    for (auto& p : pitCaps) // the plank floor over a chamber below: drop through with S, jump back up
+        for (int x = p.x0; x <= p.x1; x++) { place(x, p.floor, M::Platform); place(x, p.floor + 1, M::Platform); }
+    for (auto& h : deepHalls) // a tall room gets a mezzanine: one-way planks to hop up onto
+    {
+        int w = h.x1 - h.x0, lw = std::max(18, w / 2 - 10), lx = chance(2) ? h.x0 + 6 : h.x1 - 6 - lw;
+        for (int x = lx; x < lx + lw; x++) { place(x, h.floor - 24, M::Platform); place(x, h.floor - 23, M::Platform); }
+        if (h.h >= 60 && w >= 80) // another ledge on the opposite side
+        {
+            int rx = lx == h.x0 + 6 ? h.x1 - 6 - 18 : h.x0 + 6;
+            for (int x = rx; x < rx + 18; x++) { place(x, h.floor - 24, M::Platform); place(x, h.floor - 23, M::Platform); }
+        }
+    }
     for (auto& c : corridors) // dressed stone, with burial niches let into the wall
     {
         Color st = shadeC(d.bgB, 0.8f);
-        for (int y = c.floor - 76; y < c.floor; y++)
-            for (int x = c.x0; x <= c.x1; x++)
+        for (int x = c.x0; x <= c.x1; x++) // the floors step up and down, so follow each column's own
+        {
+            int fl = levelFloor[c.lvl][x] > 0 ? levelFloor[c.lvl][x] : c.floor;
+            for (int y = fl - 76; y < fl + 26; y++)
             {
                 if (!world.in(x, y) || world.at(x, y).material != M::Empty) continue;
-                int row = (c.floor - y) / 9;
-                bool mortar = (c.floor - y) % 9 == 0 || (x + row % 2 * 8) % 16 == 0;
-                world.bgAt(x, y) = mortar ? shadeC(st, 0.55f) : shadeC(st, 0.8f + 0.2f * hash2((x + row % 2 * 8) / 16, row, seed + 5));
+                bgStyle(x, y, shadeC(st, 1.15f + 0.2f * hash2(x / 24, (c.floor - y) / 14, seed + 5)), WALL_TILE);
             }
+        }
         for (int x = c.x0 + 10; x + 14 < c.x1; x += 26)
         {
-            int ny = c.floor - 26;
-            if (world.at(x, ny).material != M::Empty || world.at(x + 13, ny + 8).material != M::Empty) continue;
+            int ny = (levelFloor[c.lvl][x] > 0 ? levelFloor[c.lvl][x] : c.floor) - 20;
+            if (levelFloor[c.lvl][x + 13] != levelFloor[c.lvl][x] || world.at(x, ny).material != M::Empty || world.at(x + 13, ny + 8).material != M::Empty) continue;
             for (int y = ny; y < ny + 9; y++)
                 for (int xx = x; xx < x + 14; xx++) world.bgAt(xx, y) = shadeC(d.bgA, 0.35f);
             if (chance(2)) // a skull looking out
@@ -2834,9 +2802,10 @@ static void buildStage(int s, int entryFloor)
     // the first stage opens on the Whispering Dunes: a quiet walk up from the beach before the Greenmarch
     const int D = d.kind == SK_PLAINS && s == 0 ? 760 : 0;
     bool castle = d.kind == SK_CASTLE;
-    if (d.kind == SK_PLAINS) { W = 1800 + D; H = 1200; } // (its last 600 units are the battlefield before Dunmoor) // tall sky for the gatehouse; caves running down as deep as the castle's foundations
-    else if (castle) { W = 1800; H = 1300; }
-    else { W = 1100; H = 1400; } // the deep biomes: taller than they're wide - you go down through them
+    wingL = wingR = 0;
+    if (d.kind == SK_PLAINS) { W = 3000 + D; H = 1800; } // (its caves run as deep as the castle's) // (its last 600 units are the battlefield before Dunmoor) // tall sky for the gatehouse; caves running down as deep as the castle's foundations
+    else if (castle) { W = 3200; H = 2000; }
+    else { wingL = s >= 3 ? WING : 0; wingR = s + 1 < STAGE_COUNT ? WING : 0; W = 1400 + wingL + wingR; H = 1500; } // the deep biomes: taller than they're wide - you go down through them
     worldInit(W, H);
     seed = irand(1 << 30);
     air.assign((size_t)W * H, 0);
@@ -2847,6 +2816,7 @@ static void buildStage(int s, int entryFloor)
     lookouts.clear();
     fortZones.clear();
     cellars.clear();
+    doorYards.clear();
     keepZones.clear();
     mineX = -1;
     LevelEnds ends{};
@@ -2881,7 +2851,7 @@ static void buildStage(int s, int entryFloor)
             // big open caverns from low-frequency noise, smaller pockets from a finer layer
             float n = caveN.at(x, y);
             float n2 = caveN2.at(x, y);
-            bool cave = plains ? (x > D + 60 && y > surf[x] + 75 && (n > 0.64f || n2 > 0.77f)) : (n > 0.585f || n2 > 0.715f);
+            bool cave = plains ? (x > D + 60 && y > surf[x] + 75 && (n > 0.63f || n2 > 0.76f)) : (n > 0.575f || n2 > 0.705f);
             air[(size_t)y * W + x] = cave ? 1 : 0;
             if (d.surface && y < surf[x]) air[(size_t)y * W + x] = 1;
         }
@@ -2999,26 +2969,26 @@ static void buildStage(int s, int entryFloor)
     if (deepLayout) deepFinish(d);
     if (plains) // the road to Dunmoor: farmsteads, watchtowers and palisades, then the moat and gatehouse
     {
-        enum { B_HOUSE, B_TOWER, B_PALISADE, B_MINE };
-        std::vector<int> plan{B_MINE};
-        for (int k = irange(2, 3); k > 0; k--) plan.push_back(B_HOUSE);
+        enum { B_HOUSE, B_TOWER, B_PALISADE, B_MINE, B_SMITH, B_APOTH, B_ARMORY };
+        std::vector<int> plan{B_MINE, B_SMITH, B_APOTH, B_ARMORY}; // the trades scattered among the farmhouses
+        for (int k = irange(3, 4); k > 0; k--) plan.push_back(B_HOUSE);
         for (int k = irange(1, 2); k > 0; k--) plan.push_back(B_TOWER);
         for (int k = irange(1, 2); k > 0; k--) plan.push_back(B_PALISADE);
-        for (int i = (int)plan.size() - 1; i > 0; i--) std::swap(plan[i], plan[irand(i + 1)]);
-        int bx = D + irange(80, 110), mineAt = -1;
+        for (int i = (int)plan.size() - 1; i > 0; i--) std::swap(plan[i], plan[irand(i + 1)]);        int bx = D + irange(80, 110), mineAt = -1;
         for (int b : plan)
         {
-            int w = b == B_HOUSE ? irange(84, 156) : (b == B_TOWER ? irange(48, 64) : 0);
-            int span = b == B_HOUSE ? w + 16 : (b == B_TOWER ? w + 52 : (b == B_PALISADE ? 20 : 52));
+            bool house = b == B_HOUSE || b >= B_SMITH;
+            int w = house ? (b == B_ARMORY ? irange(112, 156) : irange(84, 156)) : (b == B_TOWER ? irange(48, 64) : 0);
+            int span = house ? w + 16 : (b == B_TOWER ? w + 52 : (b == B_PALISADE ? 20 : 52));
             if (bx + span + (mineAt < 0 && b != B_MINE ? 52 + 70 : 0) > W - 1020) continue; // out of road (always leaving room for the mine, after the widest gap, and the gatehouse)
-            if (b == B_HOUSE) placeHouse(bx + 8, w);
+            if (b >= B_SMITH) placeHouse(bx + 8, w, b == B_SMITH ? TH_SMITH : b == B_APOTH ? TH_APOTH : TH_ARMORY);
+            else if (b == B_HOUSE) placeHouse(bx + 8, w);
             else if (b == B_TOWER) placeWatchtower(bx + 26, w);
             else if (b == B_PALISADE) placePalisade(bx + 4);
             else mineAt = bx + 26;
             bx += span + irange(24, 70);
         }
-        linkCellars();
-        placeMine(mineAt); // dug after the cellars are linked, so their tunnels can't bridge its shaft
+        placeMine(mineAt);
     }
     connectPockets((int)path[3].x, (int)path[3].y, d.base, plains ? 300 : 600, plains); // plains: caves join the mine's network
     } // end of cave layout
@@ -3036,8 +3006,8 @@ static void buildStage(int s, int entryFloor)
                     for (int k = 0; k < depth; k++)
                         if (isRock(x, y + k)) place(x, y + k, M::Grass);
                 }
-                else
-                    for (int k = 1; k <= irange(2, 4); k++) place(x, y - k, d.top);
+                else if (flatFloor(x, y)) // a powder (snow) only lies where it won't slide: on a slope it avalanches as soon as it's seen
+                    for (int k = 1; k <= 2; k++) place(x, y - k, d.top);
             }
 
     // ore veins
@@ -3089,7 +3059,7 @@ static void buildStage(int s, int entryFloor)
         }
     dressCaves(d);
     if (d.kind == SK_CRYPT) for (int i = 0; i < 12 && next(sp); i++) paintCircle(sp.x, sp.y - 2, 3, M::Bone, true);
-    if (d.surface) for (int x = D + 30; x < W - 340; x += irange(24, 70)) { int fy; if (std::abs(x - mineX) > 34 && findFloor(x, 4, fy) && std::abs(fy - surf[x]) < 4) placeTree(x, fy); }
+    if (d.surface) for (int x = D + 30; x < W - 340; x += irange(24, 70)) { int fy; if (std::abs(x - mineX) > 34 && findFloor(x, 4, fy) && std::abs(fy - surf[x]) < 4 && std::none_of(doorYards.begin(), doorYards.end(), [&](const std::pair<int, int>& r) { return x >= r.first - 8 && x <= r.second + 8; })) placeTree(x, fy); }
 
     // liquids pool on floors, gas pockets float anywhere
     for (auto& l : findSpots(d.liquidCount * 3 / 2, D + 60, W - 260, 6, 10))
@@ -3105,7 +3075,7 @@ static void buildStage(int s, int entryFloor)
 
     if (s < STAGE_COUNT - 1) // the haven out of this biome, at its far edge
     {
-        int hf = castle ? ends.ey : (d.surface ? surf[W - 200] : pathFloor[W - 250]);
+        int hf = castle ? ends.ey : (d.surface ? surf[W - 200] : pathFloor[W - wingR - 250]);
         placeHaven(s, hf);
     }
 
@@ -3115,7 +3085,8 @@ static void buildStage(int s, int entryFloor)
         for (int t = 0, n = 0; t < 600 && n < 2; t++) n += placeSealedPocket();
 
     if (D) decorateDunes(D);
-    if (d.kind == SK_PLAINS) decorateBattlefield(W - 960, W - 350);
+    if (d.kind == SK_PLAINS) decorateBattlefield(W - 960, W - 232); // right up to the chieftain's hall at the waystone
+    else if (castle) decorateBattlefield(14, 350, true, false);   // and on into the castle grounds, thinning out
 
     // torches mark the road; easy to lose among the side caves, but always there
     for (size_t i = 30; deepLayout && i < path.size(); i += irange(45, 65)) // in the deep biomes, along the way down
@@ -3133,20 +3104,20 @@ static void buildStage(int s, int entryFloor)
 
     // the way in: from the beach, from the gatehouse, or a tunnel through the left wall from the last haven
     int fy;
-    int sx = castle ? ends.sx : (D ? 116 : 24);
+    int sx = castle ? ends.sx : (D ? 116 : 24 + wingL);
     if (castle) fy = ends.sy;
     else if (!findFloor(sx, D ? 10 : (int)path[6].y, fy)) fy = (int)path[6].y + 8;
     clearRect(sx - 8, fy - 26, sx + 8, fy - 1);
     if (!D && !castle)
     {
         for (int y = fy - 46; y < fy; y++)
-            for (int x = 0; x < sx + 10; x++) world.at(x, y) = Cell{};
+            for (int x = wingL; x < sx + 10; x++) world.at(x, y) = Cell{};
         for (int y = fy; y < fy + 6; y++)
-            for (int x = 0; x < sx + 10; x++) if (!isSolid(x, y)) place(x, y, d.base);
+            for (int x = wingL; x < sx + 10; x++) if (!isSolid(x, y)) place(x, y, d.base);
     }
     dressPlatforms();
     shadeBackWall(d.surface);
-    pieceEntryX = D ? sx : 8;
+    pieceEntryX = D ? sx : 8 + wingL;
     pieceEntryFloor = fy;
 
     if (d.boss >= 0)
@@ -3202,7 +3173,7 @@ static void buildStage(int s, int entryFloor)
         if (crowded || (d.kind == SK_PLAINS && c.y < surf[c.x] + 75)) continue; // plains chests lie in the caves, not on the road
         addChest(c.x, c.y);
         chestsPlaced.push_back(c);
-        if (chestsPlaced.size() >= (d.kind == SK_PLAINS ? 1u : 4u)) break;
+        if (chestsPlaced.size() >= (d.kind == SK_PLAINS ? 2u : 6u)) break;
     }
     // this stage's special weapon, displayed in a way that fits the place
     static const int styleFor[] = {DS_TARGET, DS_RACK, DS_GRAVE, DS_CART, DS_ICE, DS_ANVIL, DS_ALTAR};
@@ -3349,7 +3320,7 @@ struct Piece
     std::vector<Weapon> stoneLoot;
     std::vector<Haven> havens;
     std::vector<int> road;
-    int entryX = 0, entryFloor = 0, duneEnd = 0;
+    int entryX = 0, entryFloor = 0, duneEnd = 0, lead = 0; // lead: units it reaches west of where it's joined on
     float stormX0 = 0, stormX1 = 0;
 };
 static Rectangle aheadRect; // the newest biome, in live-world coordinates
@@ -3370,6 +3341,7 @@ static Piece takePiece(bool live)
     if (live) p.road.swap(worldRoad);
     else p.road = roadValid && !deepLayout ? pathFloor : std::vector<int>(p.w.wU(), -1); // the deep biomes' way winds back on itself: no single road
     p.entryX = pieceEntryX;
+    p.lead = live ? 0 : wingL;
     p.entryFloor = pieceEntryFloor;
     p.duneEnd = G.duneEnd;
     G.duneEnd = 0;
@@ -3388,7 +3360,7 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
     int bx0 = kx0, by0 = ky0, bx1 = kx1, by1 = ky1, ox = 0, oy = 0;
     if (next)
     {
-        ox = attachX * K;
+        ox = (attachX - next->lead) * K;
         oy = (attachFloor - next->entryFloor) * K;
         bx0 = std::min(bx0, ox); by0 = std::min(by0, oy);
         bx1 = std::max(bx1, ox + next->w.w); by1 = std::max(by1, oy + next->w.h);
@@ -3401,7 +3373,8 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
     worldInit(NW, NH, rock, {10, 10, 14, 255}, K); // whatever lies between the pieces is plain rock
     // Copies a source rectangle in, chunk by chunk. A whole chunk landing on the chunk grid just moves over,
     // and untouched chunks are skipped when their fill matches ours.
-    auto blit = [&](World& src, int sx0, int sy0, int sx1, int sy1, int dx, int dy) {
+    // Cells landing left of skipX and above skipY are left alone: a wing tucked under the live world never overwrites it.
+    auto blit = [&](World& src, int sx0, int sy0, int sx1, int sy1, int dx, int dy, int skipX = -1, int skipY = -1) {
         for (int cy = sy0 / CS; cy * CS < sy1; cy++)
             for (int cx = sx0 / CS; cx * CS < sx1; cx++)
             {
@@ -3409,7 +3382,8 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
                 int x0 = std::max(sx0, cx * CS), y0 = std::max(sy0, cy * CS);
                 int x1 = std::min(sx1, cx * CS + CS), y1 = std::min(sy1, cy * CS + CS);
                 if (!from && src.fill.material == world.fill.material) continue;
-                if (from && x1 - x0 == CS && y1 - y0 == CS && (x0 + dx) % CS == 0 && (y0 + dy) % CS == 0)
+                bool clear = x0 + dx >= skipX || y0 + dy >= skipY; // no part of this chunk is skipped
+                if (from && clear && x1 - x0 == CS && y1 - y0 == CS && (x0 + dx) % CS == 0 && (y0 + dy) % CS == 0)
                 {
                     world.chunks[(size_t)((y0 + dy) / CS) * world.cw + (x0 + dx) / CS] = std::move(from);
                     continue;
@@ -3417,6 +3391,7 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
                 for (int y = y0; y < y1; y++)
                     for (int x = x0; x < x1; x++)
                     {
+                        if (x + dx < skipX && y + dy < skipY) continue;
                         world.at(x + dx, y + dy) = src.get(x, y);
                         world.bgAt(x + dx, y + dy) = src.bgOf(x, y);
                         world.skyAt(x + dx, y + dy) = src.skyOf(x, y);
@@ -3430,7 +3405,7 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
     dampOX += (int)lx;
     dampOY += (int)ly;
     blit(live.w, kx0, ky0, kx1, ky1, (int)lx, (int)ly);
-    if (next) blit(next->w, 0, 0, next->w.w, next->w.h, (int)nx, (int)ny);
+    if (next) blit(next->w, 0, 0, next->w.w, next->w.h, (int)nx, (int)ny, (int)nx + next->lead * K, (int)ly + ky1);
     for (int x = 0; x < NW; x++) // above a piece that's open to the sky, the sky simply carries on upwards
     {
         int sx = x - (int)lx, top = -1;
@@ -3525,6 +3500,7 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
     if (live.stormX1 > 0) { G.stormX0 = live.stormX0 + ulx; G.stormX1 = live.stormX1 + ulx; }
     else if (next && next->stormX1 > 0) { G.stormX0 = next->stormX0 + unx; G.stormX1 = next->stormX1 + unx; }
     if (G.seaEnd) G.seaEnd += (int)ulx;
+    if (G.desert.width > 0) G.desert.x += ulx, G.desert.y += uly;
     if (next) aheadRect = {nx, ny, (float)next->w.w, (float)next->w.h};
     else aheadRect.x += lx, aheadRect.y += ly;
     G.playX0 = std::max(0, G.playX0 + (int)ulx);
@@ -3548,40 +3524,56 @@ static Piece buildPiece(int s, int entryFloor)
 // into the rock below. Kelpies hunt the open water; the drowned dead walk the terraces.
 static Piece buildOcean()
 {
-    const int SL = 300, FLOOR = 1300; // sea level is the plains' sea row, so the two line up
-    W = 1000; H = 1500;
+    // The open sea west of the landing: shallows and kelp off the beach, the floor falling away westward over long
+    // slopes and shelves to an abyss. The deeper it runs, the harder the things living there and the richer what
+    // lies on the bottom (a tier per sixth of the way out). Breath is the limit: temples and hollow sea stacks keep
+    // pockets of air all the way down.
+    // The shallows run a long way out, a gentle shelf under moonlit water; then the floor simply ends. A cliff of
+    // ledges falls away nearly a mile into the abyss, and the sunken city's second half lies on the bottom. Sea
+    // caves in the cliff face hold pockets of air to breathe in on the way down.
+    const int SL = 300; // sea level is the plains' sea row, so the two line up
+    W = 4000; H = 2500;
+    const int DEEP = H - 150, SHELF = 1900, DROP = 300; // the shelf reaches SHELF units out from the beach, then the floor falls away over DROP more
     worldInit(W, H);
     seed = irand(1 << 30);
     air.assign((size_t)W * H, 0);
     roadValid = false;
     deepLayout = false;
     int saved = G.stage;
-    G.stage = 2; // the deep is no place for a beginner
+    auto uOf = [&](int x) { return W - 1 - x; };                                      // units out from the beach
+    auto tOf = [&](int x) { return clampf(uOf(x) / (float)(W - 140), 0, 1); };        // 0 at the beach .. 1 far out
+    auto tierXY = [&](int y) { return std::min(5, std::max(0, (y - SL) * 6 / (DEEP - SL))); }; // what lives (and lies) at a depth
     std::vector<int> bed(W);
     for (int x = 0; x < W; x++)
     {
-        float n = fbm(x * 0.012f, 7.7f, seed, 3) - 0.5f, b;
-        if (x >= W - 140) b = 324 + (W - 1 - x) * 0.6f; // the shelf off the beach
-        else if (x >= W - 300) { float t = (W - 140 - x) / 160.0f; b = 408 + (FLOOR - 408) * t * t * (3 - 2 * t) + n * 90 * t * (1 - t) * 4; } // over the edge
-        else if (x < 150) { float t = x / 150.0f; b = SL - 40 + (FLOOR - SL + 40) * t * t * (3 - 2 * t) + n * 40; } // a headland walls it off in the west
-        else b = FLOOR + n * 140;
-        bed[x] = std::min(H - 30, (int)b);
+        float uw = uOf(x) + (fbm(x * 0.004f, 3.3f, seed + 5, 2) - 0.5f) * 140; // the lip wanders
+        float t = clampf((uw - SHELF) / DROP, 0, 1), k = t * 8, f = k - std::floor(k);
+        float stairs = (std::floor(k) + f * f * (3 - 2 * f)) / 8; // ledges with steep faces between
+        float b = 330 + 280 * std::pow(clampf(uw / SHELF, 0, 1), 1.3f) + (DEEP - 610) * (0.35f * t * t * (3 - 2 * t) + 0.65f * stairs);
+        b += (fbm(x * 0.008f, 5.5f, seed + 2, 3) - 0.5f) * 90 * clampf(uOf(x) / 400.0f, 0, 1) * (1 - t) + (fbm(x * 0.005f, 7.7f, seed, 3) - 0.5f) * 160 * t
+             + (fbm(x * 0.03f, 2.2f, seed + 1, 2) - 0.5f) * 18;
+        if (x >= W - 140) b = std::min(b, 324 + (W - 1 - x) * 0.6f); // the shelf off the beach
+        if (x < 140) { float u = x / 140.0f; b = (SL - 40) + (b - SL + 40) * u * u * (3 - 2 * u); } // a headland walls it off in the west
+        bed[x] = std::max(SL - 40, std::min(H - 30, (int)b));
     }
-    for (int k = 0; k < 7; k++) // jagged spires off the abyss floor
+    auto onCliff = [&](int x) { return uOf(x) > SHELF - 60 && uOf(x) < SHELF + DROP + 60; };
+    auto flatAt = [&](int x, int r, int tol) { return x - r >= 0 && x + r < W && std::abs(bed[x - r] - bed[x + r]) < tol && !onCliff(x - r) && !onCliff(x + r); };
+    for (int k = 0; k < 16; k++) // jagged spires and ridges off the floor, taller the deeper
     {
-        int x = irange(180, W - 340), h = irange(80, 260), r = irange(8, 18);
+        int x = irange(200, W - 400), r = irange(10, 22), h = (int)(irange(60, 200) * (0.4f + tOf(x)));
+        if (onCliff(x)) continue;
         for (int dx = -r * 2; dx <= r * 2; dx++)
         {
             if (x + dx < 0 || x + dx >= W) continue;
-            float t = 1 - std::fabs((float)dx) / (r * 2);
-            bed[x + dx] = std::min(bed[x + dx], bed[x] - (int)(h * t * t));
+            float u = 1 - std::fabs((float)dx) / (r * 2);
+            bed[x + dx] = std::max(SL + 30, std::min(bed[x + dx], bed[x] - (int)(h * u * u)));
         }
     }
     // caves: worms burrowing from the sea floor down into the rock, a chamber at the end of each
     std::vector<Vector2> caveEnds;
-    for (int k = 0; k < 5; k++)
+    for (int k = 0; k < 14; k++)
     {
-        float x = (float)irange(170, W - 330), y = (float)bed[(int)x] + 2, ang = frange(0.6f, 2.5f);
+        float x = (float)irange(200, W - 400), y = (float)bed[(int)x] + 2, ang = frange(0.6f, 2.5f);
         int len = irange(160, 320);
         for (int i = 0; i < len; i++)
         {
@@ -3589,11 +3581,30 @@ static Piece buildOcean()
             ang = clampf(ang, 0.3f, PI - 0.3f); // always downward-ish
             x = clampf(x + std::cos(ang) * 2, 20, (float)W - 20);
             y = clampf(y + std::sin(ang) * 2, 20, (float)H - 40);
-            carve(x, y, 7 + (int)(fbm(i * 0.05f, (float)k, seed + 3, 2) * 6));
+            carve(x, y, 8 + (int)(fbm(i * 0.05f, (float)k, seed + 3, 2) * 6));
             if (i % 90 == 89) carve(x, y, irange(16, 24)); // a grotto on the way
         }
         carve(x, y, irange(22, 30));
         caveEnds.push_back({x, y});
+    }
+    // sea caves in the cliff face: a tunnel in from open water ending in a round chamber whose upper half holds air
+    struct Dome { int cx, cy, r, level; };
+    std::vector<Dome> domes;
+    for (int k = 0; k < 9; k++)
+    {
+        int yc = SL + 420 + k * (DEEP - SL - 560) / 8 + irange(-40, 40), x0 = std::max(30, W - 1 - SHELF - DROP - 250);
+        while (x0 < W - 200 && bed[x0] > yc) x0++; // the cliff face at this depth
+        float x = (float)x0 + 2, y = (float)yc, ang = frange(-0.12f, 0.12f);
+        for (int i = 0, len = irange(150, 230); i < len; i++)
+        {
+            ang = clampf(ang + frange(-0.08f, 0.08f), -0.3f, 0.3f);
+            x += std::cos(ang) * 2; y += std::sin(ang) * 2;
+            carve(x, y, 8);
+        }
+        int r = irange(24, 30), cy = (int)y - 10;
+        carve(x, (float)cy, r);
+        domes.push_back({(int)x, cy, r, cy - 2});
+        caveEnds.push_back({x, (float)cy + r - 6});
     }
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
@@ -3607,11 +3618,27 @@ static Piece buildOcean()
                 bool rests = x > 0 && x < W - 1 && std::abs(bed[x + 1] - bed[x - 1]) <= 2;
                 for (int k = 1; k < 16 && rests; k++) rests = y + k >= H || !air[(size_t)(y + k) * W + x];
                 place(x, y, rests && y < bed[x] + 4 + (int)(n * 6) ? (y > SL ? M::WetSand : M::Sand) : (n > 0.6f ? M::Basalt : M::Stone));
-                if (y >= bed[x] + 4 && hash2(x / 5, y / 5, seed + 33) > 0.985f) place(x, y, M::Glowmoss);
+                if (y >= bed[x] + 4 && hash2(x / 5, y / 5, seed + 33) > 0.985f - 0.01f * tOf(x)) place(x, y, M::Glowmoss); // more of it in the dark
             }
             else if (y >= SL) place(x, y, M::Water);
             else world.at(x, y) = Cell{};
         }
+    for (auto& d : domes) // the air in a sea cave's chamber: dry above its water line, a glowing roof over it
+    {
+        for (int y = d.cy - d.r; y < d.level; y++)
+            for (int x = d.cx - d.r; x <= d.cx + d.r; x++)
+                if (world.in(x, y) && air[(size_t)y * W + x] && (x - d.cx) * (x - d.cx) + (y - d.cy) * (y - d.cy) <= d.r * d.r) world.at(x, y) = Cell{};
+        for (int a = 0; a < 60; a++) // moss in the ceiling
+        {
+            float t = PI + a * (PI / 59);
+            for (int r = d.r - 2; r < d.r + 6; r++)
+            {
+                int x = d.cx + (int)(std::cos(t) * r), y = d.cy + (int)(std::sin(t) * r);
+                if (world.in(x, y) && isRock(x, y)) { place(x, y, M::Glowmoss); break; }
+            }
+        }
+        G.lamps.push_back({(float)d.cx, (float)d.cy - 8, 96, {110, 220, 190, 255}}); // seen from afar in the dark water
+    }
     for (auto& e : caveEnds) // glowing moss lines the grottoes at the bottom of the caves
         for (int a = 0; a < 40; a++)
         {
@@ -3622,11 +3649,11 @@ static Piece buildOcean()
                 if (world.in(x, y) && isRock(x, y)) { place(x, y, M::Glowmoss); break; }
             }
         }
-    // the back wall: night sky above the waves, darkening blue-green water below
+    // the back wall: night sky above the waves; below, green-blue water darkening to black in the abyss
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
         {
-            float t = fbm(x * 0.05f, y * 0.05f, seed + 51, 2);
+            float n = fbm(x * 0.05f, y * 0.05f, seed + 51, 2);
             if (y < SL && y < bed[x])
             {
                 float k = clampf((float)y / SL, 0, 1);
@@ -3634,34 +3661,31 @@ static Piece buildOcean()
                 world.skyAt(x, y) = 1;
                 continue;
             }
-            float d = clampf((y - SL) / (float)(FLOOR - SL), 0, 1);
-            world.bgAt(x, y) = brighten(lerpColor(Color{22, 52, 70, 255}, Color{4, 10, 18, 255}, std::sqrt(d)), (int)((t - 0.5f) * 14));
+            float d = clampf((y - SL) / (float)(DEEP - SL), 0, 1);
+            world.bgAt(x, y) = brighten(lerpColor(lerpColor(Color{26, 70, 74, 255}, Color{14, 40, 58, 255}, std::min(1.0f, d * 2)), Color{3, 6, 12, 255}, std::sqrt(d)), (int)((n - 0.5f) * 14));
             world.skyAt(x, y) = 0;
         }
-    for (int x = 170; x < W - 320; x += irange(60, 140)) // far-off towers of the drowned city, ghostly on the back wall
+    for (int x = 150; x < W - 20; x += irange(2, 9)) // kelp swaying up off the bottom: a forest in the shallows, wisps further out
     {
-        int w = irange(14, 30), top = irange(FLOOR - 520, FLOOR - 220);
-        Color c = {14, 34, 48, 255};
-        for (int y = top; y < bed[x]; y++)
-            for (int dx = 0; dx < w; dx++)
-                if (!(y - top < 10 && dx > w / 3 && dx < w * 2 / 3) && hash2(x + dx, y / 3, seed) > 0.08f) bgPut(x + dx, y, c);
-    }
-    for (int x = 150; x < W - 20; x += irange(3, 9)) // kelp swaying up off the bottom
-    {
-        int len = irange(20, std::max(21, std::min(160, bed[x] - SL - 10)));
+        if (uOf(x) > SHELF - 100 && !chance(4)) continue;
+        int len = irange(20, std::max(21, std::min(220, bed[x] - SL - 10)));
         for (int k = 0; k < len; k++)
             bgPut(x + (int)(std::sin(k * 0.12f + x) * 3), bed[x] - k, shadeC(Color{40, 110, 60, 255}, 0.6f + 0.4f * (k % 5 == 0)));
     }
-    // the sunken city: terraces stepping down into the abyss, each on columns, some bearing a domed temple
-    struct Terrace { int x0, x1, y; };
-    std::vector<Terrace> terr;
-    for (int t = 0, y = FLOOR - 470; t < 7 && y < FLOOR - 40; t++, y += irange(55, 90))
-    {
-        int w = irange(90, 170), band = (W - 530 - w) / 3, x0 = 190 + (t * 2 % 3) * band + irange(0, band); // zig-zag across the abyss
-        terr.push_back({x0, x0 + w, y});
-    }
     auto block = [&](int x0, int y0, int x1, int y1, M m) { for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) if (world.in(x, y) && world.at(x, y).material != M::Bedrock) place(x, y, m); };
     std::vector<Spot> floors; // where things stand
+    // the sunken city: terraces on columns, first out on the shelf and then, far below, on the abyss floor
+    struct Terrace { int x0, x1, y; };
+    std::vector<Terrace> terr;
+    for (int band = 0; band < 2; band++)
+        for (int x = W - 1 - (band ? SHELF + DROP + 260 : 420); x > W - 1 - (band ? SHELF + DROP + 1500 : SHELF - 150); x -= irange(150, 260))
+        {
+            int w = irange(90, 170);
+            if (x < 0 || x + w >= W || onCliff(x) || onCliff(x + w)) continue;
+            int y = std::min(bed[x], bed[x + w]) - (band ? irange(60, 200) : irange(40, 110));
+            if (y < SL + 70) continue;
+            terr.push_back({x, x + w, y});
+        }
     for (auto& tr : terr)
     {
         for (int x = tr.x0; x <= tr.x1; x++) // the slab, its ends broken off
@@ -3679,13 +3703,12 @@ static Piece buildOcean()
         if (chance(2)) block(tr.x0 + 6, tr.y - 1, tr.x0 + 14, tr.y - 1, M::Glowmoss);
         floors.push_back({(tr.x0 + tr.x1) / 2, tr.y});
     }
-    // temples: walls with a door at the foot and a dome on top. Water can't climb, so the dome keeps its air
-    int temples = 0;
-    for (auto& tr : terr)
-    {
-        if (tr.x1 - tr.x0 < 110 || temples >= 3) continue;
-        int cx = (tr.x0 + tr.x1) / 2, hw = 30, wallH = 50, door = 26, fl = tr.y;
-        for (int y = fl - wallH - hw; y < fl; y++) // clear inside, to air above the doorway's top
+    // air: a temple or a hollow sea stack every few hundred units of the way out. Water can't climb, so a chamber
+    // above its doorway keeps its air; a dais (or ledge) just under the water line lets you stand with your head in it.
+    auto temple = [&](int cx, int fl) {
+        int hw = 30, wallH = 50, door = 26;
+        block(cx - hw - 4, fl, cx + hw + 4, fl + 6, M::Masonry); // its footing
+        for (int y = fl - wallH - hw; y < fl; y++)
             for (int x = cx - hw; x <= cx + hw; x++)
             {
                 float dy = (float)(y - (fl - wallH)), dx = (float)(x - cx);
@@ -3696,30 +3719,54 @@ static Piece buildOcean()
                 else if (shell) place(x, y, M::Masonry);
                 else if (inDome) place(x, y, y >= fl - door ? M::Water : M::Empty);
             }
-        block(cx - 12, fl - door + 6, cx + 12, fl - 1, M::Masonry); // a dais just under the water line: stand on it and your head is in the air
+        block(cx - 12, fl - door + 6, cx + 12, fl - 1, M::Masonry);
         block(cx - 14, fl - wallH - hw + 2, cx + 14, fl - wallH - hw + 3, M::Glowmoss);
         addChest(cx, fl - door + 6);
         addSconce(cx - hw + 5, fl - wallH + 10, 1);
-        temples++;
-    }
-    for (auto& e : caveEnds) { int fy; if (findFloor((int)e.x, (int)e.y - 10, fy)) addChest((int)e.x, fy); }
-    // ledges jut from the cliffs on the way down: somewhere to stand and get your bearings
-    for (int y = SL + 70; y < FLOOR - 80; y += irange(70, 120))
-        for (int side : {0, 1})
+    };
+    auto stack = [&](int cx) { // a sea stack: a rock pillar off the floor with a cave of air inside, its mouth at the foot
+        int fl = bed[cx], hw = irange(26, 36), h = irange(120, 200);
+        for (int y = fl - h; y < fl + 6; y++)
+            for (int x = cx - hw; x <= cx + hw; x++)
+            {
+                float u = (float)(x - cx) / hw, v = (float)(fl - y) / h;
+                if (u * u < 1 - v * v * 0.6f) place(x, y, hash2(x / 3, y / 3, seed + 90) > 0.7f ? M::Basalt : M::Stone);
+            }
+        int top = fl - h + 30, door = 22;
+        for (int y = top; y < fl; y++) // the hollow: air above the doorway's top, water below it
+            for (int x = cx - hw + 9; x <= cx + hw - 9; x++)
+            {
+                float u = (float)(x - cx) / (hw - 9), v = (float)(y - top) / (fl - top);
+                if (u * u + (v < 0.3f ? (0.3f - v) * (0.3f - v) * 11 : 0) > 1) continue;
+                place(x, y, y >= fl - door ? M::Water : M::Empty);
+            }
+        for (int y = fl - door; y < fl; y++) for (int x = cx + hw - 10; x <= cx + hw + 1; x++) place(x, y, M::Water); // its mouth, facing the beach
+        block(cx - 10, fl - door + 5, cx + 4, fl - 1, M::Stone); // a ledge under the air
+        for (int x = cx - hw + 12; x < cx + hw - 12; x += 3) if (isRock(x, top - 1)) place(x, top - 1, M::Glowmoss); // its roof glows
+        if (chance(2)) addChest(cx - 3, fl - door + 5);
+    };
+    int nextAir = W - 260, temples = 0;
+    while (nextAir > 300) // (the cliff has its own air, in the sea caves)
+    {
+        for (int pass = 0; pass < 3; pass++) // never under a sunken terrace: its slab and columns would wall the doorways in
+            for (auto& t : terr)
+                if (nextAir + 70 > t.x0 && nextAir - 70 < t.x1) nextAir = (nextAir - t.x0 < t.x1 - nextAir) ? t.x0 - 75 : t.x1 + 75;
+        if (nextAir <= 300 || nextAir >= W - 100) break;
+        G.stage = tierXY(bed[nextAir]);
+        if (!onCliff(nextAir) && flatAt(nextAir, 34, 90))
         {
-            int xc = -1;
-            if (side) { for (int x = W - 300; x < W - 140 && xc < 0; x++) if (bed[x] <= y) xc = x; }
-            else { for (int x = 150; x > 10 && xc < 0; x--) if (bed[x] <= y) xc = x; }
-            if (xc < 0 || chance(4)) continue;
-            int len = irange(18, 40), th = irange(5, 9), dir = side ? -1 : 1;
-            for (int k = 0; k < len + 6; k++) // rooted a little way into the rock, tapering underneath
-                for (int j = 0; j < th + 2; j++)
-                    if (j <= th * (1 - (float)k / (len + 6)) + 2) place(xc + dir * (k - 6), y + j, hash2(xc + k, y + j, seed + 8) > 0.9f ? M::Basalt : M::Stone);
-            if (chance(3)) addCoins((float)(xc + dir * len / 2), (float)y - 6, irange(1, 3), 1);
-            if (chance(4)) place(xc + dir * irange(2, len / 2), y - 1, M::Glowmoss);
+            if (flatAt(nextAir, 34, 30) && temples < 6 && chance(2)) { temple(nextAir, std::min(bed[nextAir - 34], bed[nextAir + 34])); temples++; }
+            else stack(nextAir);
+            floors.push_back({nextAir, bed[nextAir]});
         }
-    // wrecks: a longship that never made the shore, and one long since sunk into the deep
+        nextAir -= irange(260, 380);
+    }
+    for (auto& e : caveEnds) { int fy; G.stage = tierXY((int)e.y); if (findFloor((int)e.x, (int)e.y - 10, fy)) addChest((int)e.x, fy); }
+    // wrecks: a longship that never made the shore, and others sunk further out
+    std::vector<int> wrecks;
     auto wreck = [&](int cx) {
+        wrecks.push_back(cx);
+        G.stage = tierXY(bed[cx]);
         int hw = irange(34, 48), depth = irange(13, 18);
         float tilt = frange(-0.12f, 0.12f);
         int deck = bed[cx] - depth + 4; // settled into the sand
@@ -3731,50 +3778,488 @@ static Piece buildOcean()
             for (int y = y0; y <= yb; y++)
                 if (hash2(dx / 3, y / 4, seed + 70) > 0.18f) place(cx + dx, y, M::Wood); // sprung planks
         }
-        float a = frange(-0.6f, 0.6f); // the mast, snapped and leaning
-        int len = irange(28, 50);
-        for (int k = 0; k < len; k++)
-            for (int t = 0; t < 2; t++) place(cx + (int)(std::sin(a) * k) + t, deck + depth - 3 - (int)(std::cos(a) * k), M::Wood);
-        addChest(cx + irange(-hw / 3, hw / 3), deck + depth - 2);
-        addCoins((float)cx, (float)deck, irange(2, 5), 1);
+        int sdir = chance(2) ? -1 : 1; // an anchor lost over the side, half sunk in the sand at 45 degrees
+        int ax = std::max(8, std::min(W - 8, cx + sdir * (hw + irange(8, 14))));
+        {
+            const float ang = sdir * 0.785f, cs = std::cos(ang), sn = std::sin(ang);
+            auto cell = [&](float u, float v) { // u up the shank from the crown, v across it; only the part standing out of the sand is built
+                int x = ax + (int)std::lround(u * sn + v * cs), y = bed[ax] + 3 - (int)std::lround(u * cs - v * sn);
+                if (world.in(x, y) && (world.at(x, y).material == M::Empty || world.at(x, y).material == M::Water)) { place(x, y, M::Metal); world.at(x, y).shade = (uint8_t)(120 + irand(80)); }
+            };
+            for (float u = 0; u <= 17; u += 0.5f) { cell(u, 0); cell(u, 1); }                       // the shank
+            for (float v = -5; v <= 5; v += 0.5f) { cell(13, v); cell(14, v); }                      // the stock, a bar across the top
+            cell(13, -6); cell(14, -6); cell(13, 6); cell(14, 6);                                    // its knobs
+            for (float a2 = 0; a2 < 6.3f; a2 += 0.25f) cell(19.5f + 2.2f * std::sin(a2), 0.5f + 2.2f * std::cos(a2)); // the ring
+            for (int sd = -1; sd <= 1; sd += 2)                                                      // the arms: a crescent sweeping up from the crown to a fluke
+                for (float t = 0; t <= 1; t += 0.04f)
+                {
+                    float v = sd * (7.5f * t) + 0.5f, u = 6.5f * t * t;
+                    cell(u, v); cell(u + 1, v);
+                    if (t > 0.88f) { cell(u + 2, v - sd); cell(u + 3, v - sd * 2); cell(u + 2, v - sd * 2); } // the fluke's point
+                }
+        }
+        { // a sea chest on the sand beside the wreck: it is drawn half buried (entities.cpp:drawEntities)
+            int chx = std::max(12, std::min(W - 12, cx - sdir * (hw + irange(10, 18))));
+            addChest(chx, bed[chx]);
+        }
+        addCoins((float)cx, (float)deck, irange(2, 5) + G.stage, 1);
     };
     wreck(W - 80); // in the shallows, a stone's throw from where you land
-    {
-        int best = 200; // the deep wreck: the flattest stretch of the abyss floor
-        for (int x = 200; x < W - 360; x += 7) if (std::abs(bed[x + 30] - bed[x - 30]) < std::abs(bed[best + 30] - bed[best - 30])) best = x;
-        wreck(best);
+    for (int k = 0; k < 5; k++)
+        for (int tries = 0; tries < 60; tries++) { int cx = irange(300, W - 700); if (flatAt(cx, 48, 22)) { wreck(cx); break; } }
+    { // broken planks adrift on the surface, the wrecks' remains: rigid bodies that float, bob and drift (entities.cpp:rigidStep with buoyancy), clustered round each wreck
+        std::vector<int> spots;
+        for (int w : wrecks) for (int k = 0; k < 6; k++) spots.push_back(w + irange(-120, 120));
+        for (int k = 0; k < 16; k++) spots.push_back(irange(300, W - 200));
+        for (int x : spots)
+        {
+            if (x < 20 || x >= W - 20 || bed[x] < SL + 8) continue;
+            addProp(x, SL + 2, 3 * irange(1, 3));
+            G.inter.back().ang = frange(-0.18f, 0.18f);
+        }
     }
+    for (int k = 0; k < 3; k++)
     {
-        int cx = irange(220, W - 380), fy = bed[cx]; // a whale's bones, picked clean
+        int cx = 0;
+        for (int tries = 0; tries < 60 && !cx; tries++) { int c = irange(320, W - 1000); if (flatAt(c + 70, 90, 20)) cx = c; }
+        if (!cx) continue;
+        int fy = bed[cx]; // a whale's bones, picked clean
         for (int dx = -70; dx <= 70; dx++)
         {
             int sy = fy - 16 + (int)(std::sin(dx * 0.03f) * 4);
             for (int t = 0; t < 3; t++) place(cx + dx, sy + t, M::Bone); // the spine
             if ((dx + 70) % 9 == 0 && std::abs(dx) < 56) // ribs arching down to the sand
-                for (int k = 0; k < 18; k++) place(cx + dx + (int)(std::sin(k * 0.12f) * 6), sy + 2 + k, M::Bone);
+                for (int k2 = 0; k2 < 18; k2++) place(cx + dx + (int)(std::sin(k2 * 0.12f) * 6), sy + 2 + k2, M::Bone);
         }
         for (int dy = -9; dy <= 9; dy++) // the skull
             for (int dx = 0; dx < 26; dx++)
                 if (dx * dx / 676.0f + dy * dy / 81.0f < 1 && !(dx > 14 && dx < 20 && dy < -2)) place(cx + 70 + dx, fy - 14 + dy, M::Bone);
         addCoins((float)cx, (float)fy - 24, irange(2, 4), 1);
     }
-    // the dead and the hungry
-    for (size_t i = 0; i < floors.size(); i++)
+    // the dead walk the bottom; the hungry swim. What lives here gets worse the further out you go.
+    for (auto& f : floors)
     {
-        Mob m = makeEnemy(chance(2) ? E_DRAUGR : E_SKELETON, (float)floors[i].x + irange(-30, 30), (float)floors[i].y);
-        if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m);
-        if (chance(2)) addCoins((float)floors[i].x, (float)floors[i].y - 6, irange(2, 5), 1);
-    }
-    for (int k = 0; k < 9; k++)
-    {
-        int x = irange(170, W - 200), y = irange(SL + 80, std::max(SL + 81, bed[x] - 30));
-        Mob m = makeEnemy(E_KELPIE, (float)x, (float)y);
+        G.stage = tierXY(f.y);
+        int type = G.stage >= 3 ? (chance(2) ? E_DRAUGR : E_SERPENT) : (chance(2) ? E_DRAUGR : E_SKELETON);
+        Mob m = makeEnemy(type, (float)f.x + irange(-40, 40), (float)f.y - (type == E_SERPENT ? 30 : 0));
         if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m);
     }
-    for (int k = 0; k < 6; k++) { int x = irange(160, W - 320); addCoins((float)x, (float)bed[x] - 10, irange(1, 3), 1); }
+    for (int x = W - 260; x > 200; x -= irange(70, 130)) // the hungry swim: out over the shelf, and thick along the cliff and the abyss
+    {
+        int y = irange(SL + 40, std::max(SL + 41, bed[x] - 30));
+        G.stage = tierXY(y);
+        int t = G.stage;
+        int type = t >= 2 && chance(t >= 4 ? 2 : 4) ? E_SERPENT : E_KELPIE;
+        Mob m = makeEnemy(type, (float)x, (float)y);
+        if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m);
+    }
+    for (int k = 0; k < 18; k++) { int x = irange(160, W - 320); G.stage = tierXY(bed[x]); addCoins((float)x, (float)bed[x] - 10, irange(1, 3) + G.stage, 1); }
+    { // nothing may be sealed away: every chest must be swimmable from the beach. Whatever isn't gets the shortest tunnel (water-filled) to open water
+        std::vector<uint8_t> seen((size_t)W * H, 0);
+        std::vector<int> q;
+        auto open = [&](int x, int y) { return x >= 0 && y >= 0 && x < W && y < H && !isSolid(x, y); };
+        q.push_back(SL * W + W - 6);
+        seen[q[0]] = 1;
+        for (size_t i = 0; i < q.size(); i++)
+        {
+            int x = q[i] % W, y = q[i] / W;
+            const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+            for (int d = 0; d < 4; d++)
+            {
+                int nx = x + dx[d], ny = y + dy[d];
+                if (open(nx, ny) && !seen[(size_t)ny * W + nx]) { seen[(size_t)ny * W + nx] = 1; q.push_back(ny * W + nx); }
+            }
+        }
+        for (auto& it : G.inter)
+        {
+            if (it.type != IT_CHEST) continue;
+            int cx = (int)it.x, cy = (int)it.y - 4;
+            bool ok = false;
+            for (int dy = -4; dy <= 4 && !ok; dy++) for (int dx = -5; dx <= 5 && !ok; dx++) ok = open(cx + dx, cy + dy) && seen[(size_t)(cy + dy) * W + cx + dx];
+            if (ok || !world.in(cx, cy)) continue;
+            std::vector<int> from((size_t)W * H, -1), bq{cy * W + cx}; // breadth-first through anything, to the nearest open water
+            from[bq[0]] = bq[0];
+            int hit = -1;
+            for (size_t i = 0; i < bq.size() && hit < 0; i++)
+            {
+                int x = bq[i] % W, y = bq[i] / W;
+                const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+                for (int d = 0; d < 4 && hit < 0; d++)
+                {
+                    int nx = x + dx[d], ny = y + dy[d];
+                    if (nx < 5 || ny < 5 || nx >= W - 5 || ny >= H - 5 || from[(size_t)ny * W + nx] >= 0) continue;
+                    from[(size_t)ny * W + nx] = bq[i];
+                    bq.push_back(ny * W + nx);
+                    if (seen[(size_t)ny * W + nx]) hit = ny * W + nx;
+                }
+            }
+            for (int k = hit; k >= 0 && from[k] != k; k = from[k])
+                for (int dy = -3; dy <= 3; dy++)
+                    for (int dx = -3; dx <= 3; dx++)
+                        if (dx * dx + dy * dy <= 10 && world.in(k % W + dx, k / W + dy) && isSolid(k % W + dx, k / W + dy) && world.at(k % W + dx, k / W + dy).material != M::Bedrock) place(k % W + dx, k / W + dy, M::Water);
+        }
+    }
+    for (auto& m : G.mobs) m.sea = true; // what lives out here may carry Önd
+    for (auto& it : G.inter) if (it.type == IT_CHEST) it.style = 1; // and the sea's chests too
     G.stage = saved;
     pieceEntryX = W - 1;
     pieceEntryFloor = SL;
+    upscaleWorld(2);
+    return takePiece(false);
+}
+
+// ---------------------------------------------------------------- the Scorched Reach: the desert east of Dunmoor
+// Wind-shaped dunes over banded sandstone, mesas you can walk up, a stepped temple with a chamber inside, an oasis
+// under palms, the bones of something enormous, and a raider camp. Giant scorpions hunt the surface and lair in
+// burrows under it. Stitched onto Dunmoor's crag at ground level; it runs a long way east and ends at a cliff.
+static Piece buildDesert()
+{
+    W = 3200; H = 1650; // (the crypts lie below its west end, from y 1700 on: stop short of them)
+    const int G0 = 380; // the ground at the west edge, where it meets the crag
+    worldInit(W, H);
+    seed = irand(1 << 30);
+    air.assign((size_t)W * H, 0);
+    roadValid = false;
+    deepLayout = false;
+    int saved = G.stage;
+    G.stage = 2;
+    std::vector<int> s(W);
+    float ph = frange(0, 6.28f);
+    for (int x = 0; x < W; x++)
+    {
+        float r = clampf(x / 220.0f, 0, 1); // level where it meets the crag
+        float dune = std::sin(x * 0.011f + ph) * 24 + std::sin(x * 0.0047f + ph * 2) * 36 + (fbm(x * 0.004f, 3.3f, seed, 3) - 0.5f) * 70;
+        s[x] = G0 + (int)(dune * r);
+    }
+    auto raise = [&](int mx, int hw, int mh) { // a mesa: a flat top, flanks no steeper than you can walk
+        int base = s[mx];
+        for (int x = std::max(0, mx - hw - mh * 2); x < std::min(W, mx + hw + mh * 2); x++)
+        {
+            float k = clampf((hw + mh * 1.4f - std::abs(x - mx)) / (mh * 1.4f), 0, 1);
+            s[x] = std::min(s[x], base + 10 - (int)(mh * k));
+        }
+    };
+    for (int k = 0; k < 3; k++) raise(irange(500 + k * 850, 800 + k * 850), irange(60, 130), irange(50, 110));
+    for (int x = W - 160; x < W; x++) s[x] = std::min(s[x], s[W - 161] - (int)((x - (W - 160)) * 1.6f)); // the cliff it ends at
+    auto flatten = [&](int x0, int x1) { int y = s[(x0 + x1) / 2]; for (int x = std::max(0, x0); x < std::min(W, x1); x++) s[x] = y; return y; };
+    int templeX = irange(1150, 1450), campX = irange(1900, 2200), oasisX = irange(650, 900);
+    int templeY = flatten(templeX - 130, templeX + 130), campY = flatten(campX - 140, campX + 140);
+    int oasisY = flatten(oasisX - 90, oasisX + 90);
+    for (int pass = 0; pass < 2; pass++) // nothing steeper than a walkable 45 degrees: the high side gives way
+    {
+        for (int x = 1; x < W - 160; x++) s[x] = std::max(s[x], s[x - 1] - 1);
+        for (int x = W - 162; x >= 0; x--) s[x] = std::max(s[x], s[x + 1] - 1);
+    }
+    templeY = s[templeX]; campY = s[campX]; oasisY = s[oasisX];
+    for (int x = oasisX - 70; x < oasisX + 70; x++) { float u = (x - oasisX) / 70.0f; s[x] = oasisY + (int)(26 * (1 - u * u)); } // the oasis' hollow
+    for (auto& v : s) v = std::max(80, std::min(H - 220, v));
+    // scorpion burrows: tunnels in from the surface, winding down to a lair (connected by construction)
+    std::vector<Vector2> lairs;
+    for (int k = 0; k < 6; k++)
+    {
+        int x0 = irange(300, W - 300);
+        if (std::abs(x0 - templeX) < 200 || std::abs(x0 - campX) < 200 || std::abs(x0 - oasisX) < 150) continue;
+        float x = (float)x0, y = (float)s[x0] - 4, ang = frange(0.9f, 2.2f);
+        int len = irange(140, 260);
+        for (int i = 0; i < len; i++)
+        {
+            ang = clampf(ang + frange(-0.2f, 0.2f), 0.35f, PI - 0.35f);
+            x = clampf(x + std::cos(ang) * 2, 30, (float)W - 200);
+            y = clampf(y + std::sin(ang) * 1.6f, 0, (float)H - 60);
+            carve(x, y, 9 + (int)(fbm(i * 0.04f, (float)k, seed + 5, 2) * 4));
+            if (i == len / 2) { carve(x, y, irange(18, 24)); lairs.push_back({x, y + 16}); }
+        }
+        carve(x, y, irange(24, 32));
+        lairs.push_back({x, y + 24});
+    }
+    // The underground desert: wind-carved galleries and wide caverns under the dunes, down to the foot of the map,
+    // and two dressed-stone vaults deep in it. The caves are joined to the burrows above by connectPockets.
+    struct Vault { int x0, y0, x1, y1; };
+    std::vector<Vault> vaults;
+    surf = s;
+    keepZones.clear();
+    {
+        NoiseGrid tube(W, H, 4, [&](float x, float y) { // long winding galleries: ridges of warped noise
+            float wx = (fbm(x * 0.004f, y * 0.004f, seed + 300, 2) - 0.5f) * 260, wy = (fbm(x * 0.004f, y * 0.004f, seed + 301, 2) - 0.5f) * 260;
+            return 1 - std::fabs(2 * fbm((x + wx) * 0.005f, (y + wy) * 0.011f, seed + 310, 3) - 1);
+        });
+        NoiseGrid cav(W, H, 4, [&](float x, float y) { return fbm(x * 0.0045f, y * 0.0095f, seed + 320, 4); }); // wide, flat-bottomed halls
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                if (y > s[x] + 60 && y < H - 40 && x > 24 && x < W - 40 && (tube.at(x, y) > 0.935f || cav.at(x, y) > 0.625f)) air[(size_t)y * W + x] = 1;
+        for (int k = 0; k < 2; k++) // the vaults: one in the middle depths, one near the bottom
+        {
+            int w = irange(190, 250), h = irange(64, 80), x0 = k ? irange(1900, W - 600) : irange(500, 1400), y0 = k ? H - 190 : irange(760, 980);
+            vaults.push_back({x0, y0, x0 + w, y0 + h});
+            for (int y = y0; y <= y0 + h; y++) for (int x = x0; x <= x0 + w; x++) air[(size_t)y * W + x] = 1;
+        }
+    }
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+        {
+            if (x >= W - 4 || y >= H - 4 || (x < 4 && y >= s[x] + 14)) { place(x, y, M::Bedrock); continue; }
+            if (y < s[x]) { world.at(x, y) = Cell{}; continue; }
+            if (air[(size_t)y * W + x]) { world.at(x, y) = Cell{}; continue; } // (the burrows' mouths open onto the sand)
+            int depth = y - s[x];
+            bool gentle = x > 0 && x < W - 1 && std::abs(s[x + 1] - s[x - 1]) <= 2;
+            if (depth < 4 + (int)(fbm(x * 0.05f, 1.1f, seed + 3, 2) * 4) && gentle) { place(x, y, M::Sand); continue; }
+            place(x, y, depth > 300 && fbm(x * 0.01f, y * 0.01f, seed + 9, 2) > (depth > 800 ? 0.45f : 0.55f) ? M::Stone : M::Sandstone);
+            if (world.at(x, y).material == M::Sandstone) // strata: bands that wander a little, darker the deeper they lie
+                world.at(x, y).shade = (uint8_t)clampf((130 + 70 * std::sin(y * 0.33f + fbm(x * 0.006f, 0.5f, seed + 4, 2) * 9) + irand(40) - 20) * (1 - 0.3f * clampf(depth / 1200.0f, 0, 1)), 0, 255);
+        }
+    for (int x = oasisX - 70; x < oasisX + 70; x++) // the oasis
+        for (int y = oasisY + 3; y < s[x]; y++) place(x, y, M::Water);
+    // the back wall: the night sky, and below ground the sandstone's own darker bands
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+        {
+            if (y < s[x])
+            {
+                float k = clampf((float)y / G0, 0, 1);
+                world.bgAt(x, y) = lerpColor(Color{4, 6, 16, 255}, Color{40, 34, 52, 255}, k * k);
+                world.skyAt(x, y) = 1;
+                continue;
+            }
+            float band = 0.5f + 0.5f * std::sin(y * 0.2f + fbm(x * 0.01f, 0.3f, seed + 6, 2) * 6);
+            world.bgAt(x, y) = lerpColor(Color{56, 38, 24, 255}, Color{86, 60, 36, 255}, band * 0.6f);
+            world.skyAt(x, y) = 0;
+        }
+    // far dunes, silhouetted against the sky
+    for (int x = 0; x < W; x++)
+    {
+        int top = G0 - 60 + (int)(std::sin(x * 0.003f + ph) * 40 + (fbm(x * 0.002f, 9.9f, seed, 3) - 0.5f) * 80);
+        for (int y = top; y < s[x]; y++) bgPut(x, y, lerpColor(Color{30, 24, 34, 255}, Color{46, 36, 40, 255}, clampf((y - top) / 120.0f, 0, 1)));
+    }
+    auto sandstoneBlock = [&](int x, int y) { // dressed blocks for the temple
+        place(x, y, M::Sandstone);
+        int row = y / 6, col = (x + (row % 2) * 7) / 14;
+        bool mortar = y % 6 == 0 || (x + (row % 2) * 7) % 14 == 0;
+        world.at(x, y).shade = mortar ? (uint8_t)irange(0, 25) : (uint8_t)(90 + hash2(col, row, seed + 12) * 120 + irand(30));
+    };
+    { // the temple: four stepped tiers, a door on its west face into a chamber, a shrine on top
+        for (int k = 0; k < 4; k++)
+        {
+            int hw = 120 - k * 26, y0 = templeY - 26 * (k + 1), y1 = templeY - 26 * k;
+            for (int y = y0; y < y1; y++)
+                for (int x = templeX - hw; x <= templeX + hw; x++) sandstoneBlock(x, y);
+        }
+        clearRect(templeX - 70, templeY - 46, templeX + 70, templeY - 1); // the chamber
+        clearRect(templeX - 125, templeY - 26, templeX - 70, templeY - 1); // its door and passage
+        addChest(templeX + 20, templeY);
+        G.stage = 3; addChest(templeX - 20, templeY); G.stage = 2; // an older offering, richer
+        addSconce(templeX - 60, templeY - 30, 1);
+        addSconce(templeX + 60, templeY - 30, -1);
+        G.lamps.push_back({(float)templeX, (float)(templeY - 26 * 4 - 6), 70, {255, 190, 110, 255}, true}); // a fire on the summit
+        for (int k = 0; k < 2; k++) { Mob m = makeEnemy(E_SCORPION, (float)(templeX + irange(-50, 50)), (float)templeY); if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m); }
+    }
+    { // the oasis: palms leaning over the water
+        for (int k = 0; k < 3; k++)
+        {
+            int px = oasisX + irange(-80, 80), base = s[std::max(0, std::min(W - 1, px))];
+            float lean = frange(-0.4f, 0.4f);
+            int h = irange(50, 80);
+            for (int j = 0; j < h; j++) for (int t = 0; t < 3; t++) bgPut(px + (int)(lean * j * j / h) + t, base - j, shadeC({110, 78, 46, 255}, 0.7f + 0.3f * (j % 4 == 0)));
+            int tx = px + (int)(lean * h), ty = base - h;
+            for (int f = 0; f < 7; f++)
+            {
+                float a = -2.8f + f * 0.93f;
+                for (int j = 0; j < 26; j++) bgPut(tx + (int)(std::cos(a) * j), ty + (int)(std::sin(a) * j * 0.6f + j * j * 0.02f), shadeC({60, 120, 52, 255}, 0.8f + 0.2f * (j % 3 == 0)));
+            }
+        }
+    }
+    { // the raider camp: hide tents, a fire, banners on poles, their stores
+        for (int t = 0; t < 3; t++)
+        {
+            int tx = campX - 100 + t * 90, hw = irange(26, 36), th = irange(30, 40);
+            Color cloth = t % 2 ? Color{140, 96, 60, 255} : Color{120, 70, 50, 255};
+            for (int y = campY - th; y < campY; y++)
+            {
+                int half = (int)((y - (campY - th)) * hw / (float)th);
+                for (int x = tx - half; x <= tx + half; x++) bgPut(x, y, shadeC(cloth, 0.75f + 0.25f * ((x / 5) % 2) - ((x - tx) > 0 ? 0.15f : 0)));
+            }
+            for (int y = campY - th - 6; y < campY; y++) bgPut(tx, y, {70, 50, 34, 255}); // the tent pole
+        }
+        G.lamps.push_back({(float)campX, (float)campY - 3, 90, {255, 150, 70, 255}, true}); // the fire
+        for (int x = campX - 6; x <= campX + 6; x++) place(x, campY - 1, M::Gravel);
+        for (int b = 0; b < 2; b++) // banners
+        {
+            int bx = campX + (b ? 125 : -135);
+            for (int y = campY - 70; y < campY; y++) bgPut(bx, y, {80, 60, 40, 255});
+            for (int y = campY - 68; y < campY - 40; y++) for (int x = bx + 1; x < bx + 14 - (y % 7 == 0); x++) bgPut(x, y, {150, 40, 34, 255});
+        }
+        placeStores(campX + 40, campY, 50);
+        for (int k = 0; k < 5; k++) { Mob m = makeEnemy(E_RAIDER, (float)(campX + irange(-120, 120)), (float)campY); if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m); }
+        addChest(campX - 40, campY);
+    }
+    { // the bones of something enormous, half in the sand
+        int cx = irange(2350, 2800), fy = s[cx];
+        for (int dx = -90; dx <= 90; dx++)
+        {
+            int sy = fy - 24 + (int)(std::sin(dx * 0.025f) * 6);
+            for (int t = 0; t < 4; t++) place(cx + dx, sy + t, M::Bone);
+            if ((dx + 90) % 12 == 0 && std::abs(dx) < 76)
+                for (int k = 0; k < 30; k++) place(cx + dx + (int)(std::sin(k * 0.1f) * 8), sy + 3 + k, M::Bone);
+        }
+        addCoins((float)cx, (float)fy - 30, irange(3, 6), 1);
+    }
+    // ---- under the dunes: the vaults' dressed stone, then the caves joined up, then what lives and lies in them
+    for (auto& v : vaults)
+    {
+        for (int y = v.y0 - 4; y <= v.y1 + 4; y++)
+            for (int x = v.x0 - 4; x <= v.x1 + 4; x++)
+                if (world.in(x, y) && isRock(x, y)) sandstoneBlock(x, y);
+        for (int y = v.y0; y <= v.y1; y++) // the vault's own back wall, tiled in dark sandstone
+            for (int x = v.x0; x <= v.x1; x++) { world.bgAt(x, y) = Color{58, 42, 34, 255}; world.bgAt(x, y).a = WALL_TILE; }
+        for (int x = v.x0 + 4; x < v.x1 - 8; x += irange(26, 40)) // pillars: stumps off the floor, and stubs hanging from the roof
+        {
+            int top = v.y1 - irange(12, 30), len = irange(10, 24);
+            for (int dx = 0; dx < 7; dx++)
+            {
+                for (int y = top; y <= v.y1; y++) sandstoneBlock(x + dx, y);
+                if (chance(2)) for (int y = v.y0; y < v.y0 + len; y++) sandstoneBlock(x + 14 + dx, y);
+            }
+        }
+        for (int x = v.x0 + 8; x < v.x1 - 12; x += irange(40, 70)) // a ledge of planks to climb by
+        {
+            int ly = v.y1 - irange(20, 30);
+            for (int dx = 0; dx < 24; dx++) { place(x + dx, ly, M::Platform); place(x + dx, ly + 1, M::Platform); }
+        }
+    }
+    connectPockets(8, s[8] - 6, M::Sandstone, 250, true);
+    for (int k = 0; k < (int)vaults.size(); k++)
+    {
+        const Vault& v = vaults[k];
+        G.stage = k ? 4 : 3;
+        for (int x = v.x0 + 14; x < v.x1 - 30; x += irange(48, 70)) sarcophagus(x, v.y1 + 1);
+        for (int c = 0; c < 3; c++) addChest(irange(v.x0 + 20, v.x1 - 20), v.y1 + 1);
+        for (int x = v.x0 + 12; x < v.x1 - 8; x += irange(50, 70)) G.inter.push_back({IT_TORCH, (float)x, (float)(v.y1 + 1)});
+        paintSkeleton(irange(v.x0 + 30, v.x1 - 40), v.y1 + 1, chance(2) ? 1 : -1);
+        for (int m = 0; m < 5; m++)
+        {
+            Mob e = makeEnemy(m < 3 ? E_DRAUGR : (m == 3 ? E_SCORPION : E_RAIDER), (float)irange(v.x0 + 20, v.x1 - 20), (float)(v.y1 + 1));
+            if (!boxSolid(e.x, e.y, e.w, e.h)) G.mobs.push_back(e);
+        }
+    }
+    auto tierOf = [&](int x, int y) { int d = y - s[x]; return d < 350 ? 2 : (d < 800 ? 3 : 4); };
+    { // columns of the cave floors and ceilings: stalactites, stalagmites, drifts of sand, hanging lanterns
+        std::vector<int> lanternAt;
+        for (int x = 40; x < W - 40; x++)
+        {
+            int skip = 0;
+            for (int y = s[x] + 70; y < H - 60; y++)
+            {
+                if (skip > 0) { skip--; continue; }
+                bool here = world.get(x, y).material != M::Empty && isRock(x, y), below = world.get(x, y + 1).material == M::Empty, above = world.get(x, y - 1).material == M::Empty;
+                if (here && below && hash2(x, y, seed + 330) < 0.045f) // a ceiling: a stalactite
+                {
+                    int L = 5 + (int)(hash2(x, y, seed + 331) * 14), clear = 0;
+                    while (clear < L + 30 && world.get(x, y + 1 + clear).material == M::Empty) clear++;
+                    if (clear < L + 30) continue;
+                    int hw = 2 + (int)(hash2(x, y, seed + 332) * 2.5f);
+                    for (int k = 0; k <= L; k++)
+                        for (int dx = -hw; dx <= hw; dx++)
+                            if (std::abs(dx) <= (int)std::lround(hw * (1 - k / (float)(L + 1))) && world.get(x + dx, y + 1 + k).material == M::Empty) place(x + dx, y + 1 + k, M::Sandstone);
+                    skip = 6;
+                    continue;
+                }
+                if (here && above && hash2(x, y, seed + 340) < 0.035f) // a floor: a stalagmite
+                {
+                    int L = 4 + (int)(hash2(x, y, seed + 341) * 11), clear = 0;
+                    while (clear < L + 30 && world.get(x, y - 1 - clear).material == M::Empty) clear++;
+                    if (clear < L + 30) continue;
+                    int hw = 2 + (int)(hash2(x, y, seed + 342) * 2.5f);
+                    for (int k = 0; k <= L; k++)
+                        for (int dx = -hw; dx <= hw; dx++)
+                            if (std::abs(dx) <= (int)std::lround(hw * (1 - k / (float)(L + 1))) && world.get(x + dx, y - 1 - k).material == M::Empty) place(x + dx, y - 1 - k, M::Sandstone);
+                    skip = 8;
+                    continue;
+                }
+                if (here && above && world.get(x - 3, y).material != M::Empty && world.get(x + 3, y).material != M::Empty && world.get(x - 3, y - 1).material == M::Empty
+                    && world.get(x + 3, y - 1).material == M::Empty && world.get(x, y - 1).material == M::Empty && hash2(x / 24, y / 9, seed + 350) < 0.55f) // a flat floor: a drift of sand
+                {
+                    bool solidUnder = true;
+                    for (int k = 1; k < 8 && solidUnder; k++) solidUnder = isRock(x, y + k);
+                    if (solidUnder) for (int k = 0; k < 2 + (int)(fbm(x * 0.05f, 4.4f, seed, 2) * 3); k++) place(x, y + k, M::Sand);
+                }
+                if (here && below && x % 240 == 11 && hash2(x, y, seed + 360) < 0.5f) lanternAt.push_back(x * H + y);
+            }
+        }
+        for (int k : lanternAt) { int x = k / H, y = k % H; hangLantern(x, y + 1, irange(3, 9)); }
+    }
+    { // gold in the walls, glinting, and the light it throws back
+        int veins = 0;
+        for (int tries = 0; tries < 20000 && veins < 70; tries++)
+        {
+            int x = irange(60, W - 60), y = irange(s[x] + 110, H - 60);
+            if (!isRock(x, y) || (world.get(x - 7, y).material != M::Empty && world.get(x + 7, y).material != M::Empty && world.get(x, y - 7).material != M::Empty && world.get(x, y + 7).material != M::Empty)) continue;
+            int r = irange(2, 4);
+            for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++) if (dx * dx + dy * dy <= r * r + 1 && isRock(x + dx, y + dy) && hash2(x + dx, y + dy, seed + 370) < 0.8f) place(x + dx, y + dy, M::GoldOre);
+            G.lamps.push_back({(float)x, (float)y, 34, {255, 196, 96, 255}});
+            veins++;
+        }
+    }
+    auto floorSpot = [&](int minDepth, int& fx, int& fy) { // somewhere to stand in the caves, with headroom
+        for (int t = 0; t < 400; t++)
+        {
+            int x = irange(60, W - 60), y = irange(s[x] + minDepth, H - 70);
+            if (findFloor(x, y, fy) && fy > s[x] + minDepth && !boxSolid(x - 8, fy - 28, 16, 25) && !isLiquidAt(x, fy - 1)) { fx = x; return true; }
+        }
+        return false;
+    };
+    for (int k = 0; k < 44; k++) // scorpions, thicker and meaner the deeper you go; bats in the dark between
+    {
+        int fx, fy;
+        if (!floorSpot(100, fx, fy)) continue;
+        G.stage = tierOf(fx, fy);
+        Mob m = makeEnemy(E_SCORPION, (float)fx, (float)fy - 2);
+        if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m);
+    }
+    for (int k = 0; k < 16; k++)
+    {
+        int fx, fy;
+        if (!floorSpot(120, fx, fy)) continue;
+        G.stage = tierOf(fx, fy);
+        Mob m = makeEnemy(E_BAT, (float)fx, (float)fy - 30);
+        if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m);
+    }
+    for (int k = 0; k < 16; k++) // what was left behind: caches, bones, a few coins
+    {
+        int fx, fy;
+        if (!floorSpot(110, fx, fy)) continue;
+        G.stage = tierOf(fx, fy);
+        if (k < 11) { addChest(fx, fy); G.inter.push_back({IT_TORCH, (float)fx + 14, (float)fy}); }
+        else paintSkeleton(fx, fy, chance(2) ? 1 : -1);
+        addCoins((float)fx, (float)fy - 8, irange(1, 3) + G.stage - 2, 1);
+    }
+    for (int k = 0; k < 3; k++) // a fossil beast, half out of the wall of a great cavern
+    {
+        int fx, fy;
+        for (int t = 0; t < 60; t++)
+            if (floorSpot(160, fx, fy) && !boxSolid(fx - 10, fy - 70, 140, 66)) { paintGiantBones(fx, fy); break; }
+    }
+    G.stage = 2;
+    // scorpions in their lairs and out on the sand; raiders on the prowl
+    for (auto& l : lairs) { int fy; if (findFloor((int)l.x, (int)l.y - 20, fy)) { Mob m = makeEnemy(E_SCORPION, l.x, (float)fy); if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m); if (chance(2)) addChest((int)l.x + 14, fy); } }
+    for (int k = 0; k < 8; k++)
+    {
+        int x = irange(400, W - 300), type = chance(2) ? E_SCORPION : E_RAIDER;
+        if (std::abs(x - campX) < 200) continue;
+        G.stage = x > W / 2 ? 3 : 2; // the far end is meaner
+        Mob m = makeEnemy(type, (float)x, (float)s[x]);
+        if (!boxSolid(m.x, m.y, m.w, m.h)) G.mobs.push_back(m);
+    }
+    G.stage = 2;
+    for (int k = 0; k < 10; k++) { int x = irange(300, W - 300); addCoins((float)x, (float)s[x] - 6, irange(1, 3), 1); }
+    for (int x = 120; x < W - 200; x += irange(50, 130)) // cacti, scrub, and the ones who didn't cross it
+    {
+        if (std::abs(x - templeX) < 140 || std::abs(x - campX) < 150 || std::abs(x - oasisX) < 80 || std::abs(s[x + 3] - s[x - 3]) > 3) continue;
+        int r = irand(10);
+        if (r < 6) paintCactus(x, s[x]); else if (r < 9) paintDeadBush(x, s[x]); else paintSkeleton(x, s[x], chance(2) ? 1 : -1);
+    }
+    shadeBackWall(true);
+    G.stage = saved;
+    pieceEntryX = 8;
+    pieceEntryFloor = s[8];
     upscaleWorld(2);
     return takePiece(false);
 }
@@ -3785,13 +4270,18 @@ void startRun()
     pieceRects.clear();
     dampOX = dampOY = 0;
     dampSeed = irand(1 << 30);
+    loadStep(0.02f, "Laying the Greenmarch...");
     Piece first = buildPiece(0, -1);
+    loadStep(0.22f, "Raising Castle Dunmoor...");
     const Haven out = first.havens.back();
     Piece second = buildPiece(1, out.floor);
+    loadStep(0.40f, "Joining the road to the castle...");
     Vector2 o = compose(first, {0, 0, (float)first.w.w, (float)first.w.h}, &second, out.x1 + 1, out.floor);
     Piece live = takePiece(true); // and the open sea, west of where you land
     Rectangle ahead = aheadRect;
+    loadStep(0.46f, "Filling the Drowned Deep...");
     Piece sea = buildOcean();
+    loadStep(0.70f, "Joining sea and shore...");
     Vector2 o2 = compose(live, {0, 0, (float)live.w.w, (float)live.w.h}, &sea, (int)o.x - sea.w.wU() + 4, 300 + (int)o.y);
     aheadRect = {ahead.x + o2.x * world.scale, ahead.y + o2.y * world.scale, ahead.width, ahead.height};
     G.seaEnd = (int)(o.x + o2.x) + 110; // the beach: west of here is open water, not dunes
@@ -3813,6 +4303,22 @@ void startRun()
                     world.skyAt(x, y) = 0;
                 }
     }
+    { // the Scorched Reach: east of Dunmoor's crag, at ground level
+        int K = world.scale;
+        Rectangle cr = aheadRect; // the castle, in cells
+        int ex = (int)((cr.x + cr.width) / K) - 1, gy = (int)(cr.y / K);
+        while (gy < world.hU() - 1 && !isSolid(ex - 6, gy)) gy++;
+        Piece live2 = takePiece(true);
+        loadStep(0.76f, "Burying the Scorched Reach...");
+        Piece sand = buildDesert();
+        loadStep(0.92f, "Stitching the desert on...");
+        Vector2 o3 = compose(live2, {0, 0, (float)live2.w.w, (float)live2.w.h}, &sand, ex + 1, gy);
+        aheadRect = {cr.x + o3.x * K, cr.y + o3.y * K, cr.width, cr.height}; // the next biome still joins at the castle
+        Rectangle d = pieceRects.back();
+        G.desert = {d.x / K, d.y / K, d.width / K, d.height / K};
+        o2.x += o3.x; o2.y += o3.y;
+    }
+    loadStep(1.0f, "Landing...");
     placePlayer(first.entryX + (int)(o.x + o2.x), first.entryFloor + (int)(o.y + o2.y));
     G.stage = 0;
     G.sanctuary = false;
@@ -3848,11 +4354,11 @@ void generateVillage()
     resetLevelState();
     pieceRects.clear();
     roadValid = false;
-    W = 1200; H = 560; // bigger than a fullscreen view, so you never see past the edge of the world
+    W = 1400; H = 800; // bigger than a fullscreen view, with ground enough below the street that it sits mid-screen at 1440p
     worldInit(W, H);
     seed = irand(1 << 30);
     surf.assign(W, 0);
-    const int quay = W - 300, top = H - 300; // the land ends at the quay; past it is the harbour. `top`: the extra sky
+    const int quay = W - 300, top = 260; // the land ends at the quay; past it is the harbour. `top`: the extra sky
     for (int x = 0; x < W; x++)
     {
         surf[x] = top + 228 + (int)(fbm(x * 0.01f, 2.0f, seed, 2) * 6);
@@ -3874,7 +4380,7 @@ void generateVillage()
     for (int hx = 50, i = 0; i < 3; i++)
     {
         const int S = 26;
-        int w = irange(118, 156), base = surf[hx + w / 2], wallTop = base - 2 * S - irange(6, 14);
+        int w = irange(110, 140), base = surf[hx + w / 2], wallTop = base - 2 * S - irange(6, 14);
         levelGround(hx - 6, hx + w + 6, base);
         Hall hall = paintHall(hx, w, base, wallTop, true);
         halls.push_back({hx - 30, hx + w + 30});
@@ -3886,6 +4392,7 @@ void generateVillage()
         furnishRoom(g1, hx + w - 2, base - S, wallTop + 1, false);
         for (int x : {hx + 3, g0 - 2, g1, hx + w - 5}) paintPost(x, wallTop + 2, base);
         hearthCrane(hall.mid, base);
+        for (int sd : {-1, 1}) hutWindow(hall.mid + sd * 46, wallTop + 9, 11, 16, std::min(base - S - (wallTop + 25), 30)); // tall windows in the high middle
         antlerSkull(hall.mid, wallTop + 8);
         for (int sd : {-1, 1}) triskeleBanner(hall.mid + sd * 24, wallTop + 4, 20);
         for (int sd : {-1, 1}) // the galleries: plank floors, open to the middle where you jump up
@@ -3914,10 +4421,28 @@ void generateVillage()
         int sd = chance(2) ? -1 : 1;
         paintPorch(sd < 0 ? hx : hx + w, sd, base, true);
         paintYardProp(sd < 0 ? hx + w + 3 : hx - 13, base);
-        int gap = irange(84, 100);
+        int gap = irange(70, 84);
         stalls.push_back(hx + w + gap / 2);
         hx += w + gap;
     }
+    // the rest of the land: a cottage or two, then the port building by the quay (a chandlery with its stores, and rooms above)
+    villageHouses = true;
+    const int limit = quay - 300;
+    for (int cx = halls.back().second + 40; cx + 100 < limit;)
+    {
+        int w = irange(84, 104);
+        placeHouse(cx, w);
+        halls.push_back({cx - 12, cx + w + 12});
+        cx += w + irange(22, 40);
+        if (cx + 30 < limit) { paintYardProp(cx - 18, surf[cx - 14]); }
+    }
+    {
+        int px = quay - 250, pw = 132;
+        placeHouse(px, pw, TH_PORT);
+        halls.push_back({px - 14, px + pw + 14});
+        paintYardProp(px - 22, surf[px - 18]);
+    }
+    villageHouses = false;
     // on the open ground: a well at the near end, a runestone by the pier, and fish drying on a rack
     for (int g = 0; g < 2; g++)
     {
@@ -3959,7 +4484,7 @@ void generateVillage()
                     if (y > 0 || k == 0) bgPut(x + k * (y > 1 && y < 5), base - 18 + y, y == 5 ? Color{90, 96, 104, 255} : shadeC({172, 178, 184, 255}, 0.8f + 0.1f * k));
         halls.push_back({rx - 6, rx + 36});
     }
-    for (int x = 30; x < quay - 40; x += irange(30, 60)) // trees in the gaps between the halls
+    for (int x = 30; x < quay - 40; x += irange(16, 34)) // trees in the gaps between the buildings
     {
         bool clear = true;
         for (auto& h : halls) clear = clear && (x < h.first || x > h.second);
@@ -3988,6 +4513,7 @@ void generateVillage()
         G.lamps.push_back({sx - 21, sy - 25, 44, LAMP_WARM}); // the stall's lantern
     }
     for (int x : stalls) G.inter.push_back({IT_TORCH, (float)x + 32, (float)surf[x + 32]});
+    G.inter.erase(std::remove_if(G.inter.begin(), G.inter.end(), [](const Interact& it) { return it.type == IT_LANTERN || it.type == IT_PROP; }), G.inter.end()); // a tidy village: nothing hung to swing into or left lying about
     upscaleWorld(2, true); // the village keeps its painted back wall at full detail
     G.roamX0 = 6; // the world runs on past these, so a big screen never shows its edge
     G.roamX1 = (float)(quay + 172);
@@ -4124,6 +4650,7 @@ void dumpStages(const char* dir)
         ExportImage(img, (std::string(dir) + "/world" + std::to_string(step) + ".png").c_str());
         UnloadImage(img);
         std::printf("world %d: stage %d  %dx%d  mobs %zu  havens %zu  player %.0f,%.0f\n", step, G.stage, ww, wh, G.mobs.size(), G.havens.size(), G.p.m.x, G.p.m.y);
+        for (auto& r : pieceRects) std::printf("    piece x %.0f..%.0f  y %.0f..%.0f (units)\n", r.x / 2, (r.x + r.width) / 2, r.y / 2, (r.y + r.height) / 2);
         Haven* h = nullptr;
         for (auto& o : G.havens)
             if (!o.sealed && o.stage == G.stage) h = &o;

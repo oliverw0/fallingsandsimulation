@@ -1,4 +1,4 @@
-#include "game.h"
+﻿#include "game.h"
 #include "util.h"
 #include "sprites.h"
 #include <cmath>
@@ -30,7 +30,7 @@ const EnemyDef ENEMIES[ENEMY_COUNT] = {
     {"Fire Imp", 10, 13, 20, 1.0f, 8, AI_FLYCAST, EL_FIRE, {1, 0, 2, 1, 1}, 150, 90, false, {255, 140, 40, 255}, M::Fire},
     {"Frost Wraith", 12, 20, 34, 0.8f, 10, AI_FLYCAST, EL_ICE, {0.7f, 2, 0, 1, 0}, 160, 110, true, {170, 220, 255, 255}, M::Snow},
     {"Rock Golem", 18, 23, 150, 0.4f, 22, AI_WALK, EL_PHYS, {0.6f, 0.5f, 0.8f, 0.5f, 0}, 13, 70, false, {130, 126, 120, 255}, M::Gravel},
-    {"Dire Wolf", 16, 10, 18, 1.5f, 6, AI_WALK, EL_PHYS, {1, 1, 1, 1, 1}, 8, 35, false, FLESH, M::Blood},
+    {"Dire Wolf", 22, 14, 18, 1.5f, 6, AI_WALK, EL_PHYS, {1, 1, 1, 1, 1}, 8, 35, false, FLESH, M::Blood},
     {"Redcap", 8, 16, 26, 1.15f, 10, AI_WALK, EL_PHYS, {1, 1, 1, 1, 1}, 8, 38, false, FLESH, M::Blood},
     {"Draugr", 10, 23, 60, 0.55f, 14, AI_WALK, EL_ICE, {0.8f, 1.3f, 0, 1, 0}, 10, 55, false, {120, 150, 170, 255}, M::Bone},
     {"Troll", 20, 27, 220, 0.5f, 26, AI_WALK, EL_PHYS, {0.8f, 1.5f, 1, 1, 0.7f}, 16, 80, false, {90, 130, 60, 255}, M::Blood},
@@ -38,6 +38,9 @@ const EnemyDef ENEMIES[ENEMY_COUNT] = {
     {"Kelpie", 18, 14, 55, 1.0f, 14, AI_WALK, EL_ICE, {1, 1.2f, 0.5f, 2, 1}, 10, 45, false, {60, 90, 140, 255}, M::Water},
     {"Castle Guard", 10, 23, 45, 0.7f, 12, AI_WALK, EL_PHYS, {0.8f, 1, 1, 1.2f, 1}, 12, 50, false, FLESH, M::Blood},
     {"Risen Levy", 10, 22, 30, 0.55f, 9, AI_WALK, EL_PHYS, {1, 1.4f, 1, 1, 0}, 10, 50, false, {110, 30, 30, 255}, M::Blood},
+    {"Sea Serpent", 30, 11, 80, 1.1f, 16, AI_WALK, EL_PHYS, {1, 1.2f, 0.6f, 2, 1}, 14, 55, false, {50, 90, 110, 255}, M::Blood},
+    {"Giant Scorpion", 34, 16, 75, 0.85f, 14, AI_WALK, EL_POISON, {0.7f, 1, 1.3f, 1, 0}, 16, 50, false, {150, 190, 80, 255}, M::Blood},
+    {"Sand Raider", 10, 23, 45, 0.8f, 13, AI_WALK, EL_PHYS, {0.9f, 0.8f, 1.2f, 1, 1}, 14, 50, false, FLESH, M::Blood},
     {"The Black Knight", 20, 27, 900, 0.75f, 25, AI_BOSS_KNIGHT, EL_PHYS, {0.6f, 0.8f, 1, 1.3f, 1}, 14, 60, false, FLESH, M::Blood},
     {"The Lich King", 16, 23, 1500, 0.9f, 20, AI_BOSS_LICH, EL_ICE, {0.8f, 1, 0.5f, 1, 0}, 220, 70, true, BONEC, M::Bone},
 };
@@ -132,13 +135,36 @@ static bool platformRow(float x, int w, int row)
         if (world.matU(xx, row) == M::Platform) return true;
     for (auto& it : G.inter) // a chest's lid is a one-way platform too: hop up and stand on it
     {
-        if (it.type != IT_CHEST) continue;
+        if (it.type != IT_CHEST || it.fade) continue;
         Vector2 hb = bodyHalf(it);
         float cs = std::fabs(std::cos(it.ang)), sn = std::fabs(std::sin(it.ang));
         float ex = hb.x * cs + hb.y * sn, ey = hb.x * sn + hb.y * cs, cx = it.x, cy = it.y - hb.y;
         if (row == (int)std::floor(cy - ey) && x + w > cx - ex + 1 && x < cx + ex - 1) return true;
     }
     return false;
+}
+
+// Reads the selected scroll: its spell is cast once from the player's hand toward the aim, and the scroll is spent.
+bool readScroll()
+{
+    Player& P = G.p;
+    Mob& m = P.m;
+    if (P.scrolls.empty()) return false;
+    P.scrollSel = std::max(0, std::min(P.scrollSel, (int)P.scrolls.size() - 1));
+    int id = P.scrolls[P.scrollSel];
+    float hx = m.cx() + std::cos(P.aim) * 6, hy = m.cy() - 2 + std::sin(P.aim) * 6;
+    if (!castScroll(id, hx, hy, P.aim)) return false;
+    P.scrolls.erase(P.scrolls.begin() + P.scrollSel);
+    P.scrollSel = std::max(0, std::min(P.scrollSel, (int)P.scrolls.size() - 1));
+    P.readT = 22;
+    P.combatT = std::max(P.combatT, 40);
+    G.shake = std::max(G.shake, 3.0f);
+    message(std::string(SCROLLS[id].name) + " crumbles to ash.");
+    Color c = SCROLLS[id].col;
+    for (int k = 0; k < 24; k++) // the scroll burns away in the hand: motes of its colour
+        spawnParticle(hx + frange(-3, 3), hy + frange(-3, 3), frange(-0.8f, 0.8f), frange(-1.4f, 0.1f), irange(18, 38), lerpColor(c, WHITE, frand() * 0.5f), -0.02f);
+    playSfx(SFX_CAST, 0.8f, 0.8f);
+    return true;
 }
 
 bool onPlatform(const Mob& m) { return platformRow(m.x, m.w, (int)std::floor(m.y + m.h + 0.05f)); }
@@ -206,21 +232,43 @@ static int moveBy(Mob& m, float dx, float dy, bool step)
     return res;
 }
 
+// Move a wedged box to the nearest place it fits (within 48 units). False if there's none.
+static bool unstick(Mob& m)
+{
+    static std::vector<std::pair<int, int>> rings; // offsets, nearest first
+    const int R = 48;
+    if (rings.empty())
+    {
+        for (int dy = -R; dy <= R; dy++)
+            for (int dx = -R; dx <= R; dx++)
+                if (dx * dx + dy * dy <= R * R) rings.push_back({dx, dy});
+        std::stable_sort(rings.begin(), rings.end(), [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+            return a.first * a.first + a.second * a.second < b.first * b.first + b.second * b.second;
+        });
+    }
+    for (auto& d : rings)
+        if (!boxSolid(m.x + d.first, m.y + d.second, m.w, m.h))
+        {
+            m.x += d.first; m.y += d.second;
+            m.stuckT = 0;
+            return true;
+        }
+    return false;
+}
+
 static void moveMob(Mob& m)
 {
     if (boxSolid(m.x, m.y, m.w, m.h))
     {
-        // buried by sand or rubble: pop up if there is room, otherwise wriggle through
+        // buried by sand or rubble: pop up if a cell or two frees it; otherwise hold still a moment (it may
+        // pour away) and then go to the nearest open space, never up through the rock
         bool ok = false;
-        for (int up = 1; up <= 6 && !ok; up++)
+        for (int up = 1; up <= 2 && !ok; up++)
             if (!boxSolid(m.x, m.y - up, m.w, m.h)) { m.y -= up; ok = true; }
-        if (!ok)
-        {
-            m.x += m.vx * 0.5f;
-            m.y += std::min(m.vy, 0.0f) * 0.5f - 0.2f;
-            return;
-        }
+        if (!ok && ++m.stuckT >= 15) ok = unstick(m);
+        if (!ok) { m.vx = m.vy = 0; return; }
     }
+    m.stuckT = 0;
     float vx = m.vx, vy = m.vy;
     bool wasIn = m.inLiquid;
     int r = moveBy(m, m.vx, m.vy, m.onGround);
@@ -257,10 +305,10 @@ void addPickup(float x, float y, int kind)
     p.b.vx = frange(-1, 1); p.b.vy = frange(-2.5f, -1);
     G.pickups.push_back(p);
 }
-void addPickupSpell(float x, float y, int spell)
+void addPickupScroll(float x, float y, int scroll)
 {
-    addPickup(x, y, PU_SPELL);
-    G.pickups.back().spell = spell;
+    addPickup(x, y, PU_SCROLL);
+    G.pickups.back().spell = scroll;
 }
 void addPickupWeapon(float x, float y, const Weapon& w)
 {
@@ -283,27 +331,27 @@ static int stageOre()
     return (int)M::CopperOre;
 }
 
-void spawnOreBurst(float x, float y, int count)
+void spawnOreBurst(float x, float y, int count, float power)
 {
     M ore = (M)stageOre();
     for (int i = 0; i < count; i++)
     {
         if (chance(4)) ore = (M)stageOre();
-        spawnCellParticle(x + frange(-2, 2), y + frange(-2, 2), frange(-1.5f, 1.5f), frange(-3, -0.5f), ore, CF_LOOSE);
+        spawnCellParticle(x + frange(-2, 2), y + frange(-2, 2), frange(-1.5f, 1.5f) * power, frange(-3, -0.5f) * power, ore, CF_LOOSE);
     }
 }
 
-static void dropLoot(float x, float y, bool rich)
+static void dropLoot(float x, float y, bool rich, int tier)
 {
-    int tier = G.stage;
-    if (rich || chance(3)) spawnOreBurst(x, y, rich ? irange(50, 90) : irange(6, 16));
-    if (rich || chance(8)) addPickupSpell(x, y, randomSpell(tier));
-    if (rich) addPickupSpell(x, y, randomSpell(tier + 1));
+    if (rich || chance(2)) spawnOreBurst(x, y, rich ? irange(50, 90) : irange(14, 30) + tier * 4); // foes carry the ore you forge with
+    if (rich || chance(30)) addPickupScroll(x, y, randomScroll(tier)); // scrolls are rare finds, not the default
+    if (rich) addPickupScroll(x, y, randomScroll(tier + 1));
     if (chance(9)) addPickup(x, y, PU_HEART);
     if (chance(90)) addPickup(x, y, PU_POTION);
+    if (rich || chance(45)) addPickup(x, y, PU_BOMB);
     if (rich || chance(170)) addPickupWeapon(x, y, randomWeapon(tier + (rich ? 1 : 0)));
     if (rich || chance(400)) { addPickup(x, y, PU_AMULET); G.pickups.back().spell = randomAmulet(); }
-    if (G.stage >= 1 && (rich ? chance(2) : chance(300))) addPickupWeapon(x, y, rollLegendary(tier + 1, false));
+    if (tier >= 1 && (rich ? chance(2) : chance(300))) addPickupWeapon(x, y, rollLegendary(tier + 1, false));
 }
 
 void addCoins(float x, float y, int count, int value)
@@ -371,6 +419,39 @@ void hitCrateAt(int x, int y, int dmg, float kx)
         if (it.type == IT_CRATE && !it.used && inCrate(it, x, y)) { damageCrate(it, dmg, kx); return; }
 }
 
+// Dart traps: a stone wyrm's head on the wall face, firing from its jaws 9.5 units out. Weapons, bolts or
+// mining out the rock it's set in break the head off.
+static float trapFace(const Trap& t) { return t.x + (t.dir > 0 ? 1.0f : 0.0f); }
+static Vector2 trapHead(const Trap& t) { return {trapFace(t) + t.dir * 5.0f, t.y - 1.0f}; }
+static void breakTrap(Trap& t, float kx)
+{
+    t.done = true;
+    Vector2 h = trapHead(t);
+    for (int k = 0; k < 14; k++) spawnCellParticle(h.x + frange(-3, 3), h.y + frange(-3, 3), kx * frange(0.3f, 1.2f) + frange(-0.8f, 0.8f), frange(-2.0f, -0.3f), M::Gravel, 0);
+    for (int k = 0; k < 10; k++) spawnParticle(h.x, h.y, frange(-1, 1), frange(-1, 0), irange(30, 60), {120, 120, 110, 140}, -0.01f);
+    playAt(SFX_SMASH, h.x, h.y, 0.9f, 0.8f);
+    G.shake = std::max(G.shake, 3.0f);
+}
+static void damageTrap(Trap& t, int dmg, float kx)
+{
+    t.hp -= dmg;
+    t.hit = 8;
+    if (t.hp <= 0) { breakTrap(t, kx); return; }
+    Vector2 h = trapHead(t);
+    playAt(SFX_CLANG, h.x, h.y, 0.7f, frange(0.7f, 0.85f));
+    for (int k = 0; k < 6; k++) spawnParticle(h.x, h.y, kx * frange(0.2f, 1) + frange(-0.8f, 0.8f), frange(-1.5f, 0.2f), irange(8, 18), {170, 172, 156, 255}, 0.1f); // chips of stone
+}
+static bool hitTrapAt(float x, float y, int dmg, float kx)
+{
+    for (auto& t : G.traps)
+    {
+        if (t.type != TR_ARROW || t.done) continue;
+        Vector2 h = trapHead(t);
+        if (std::fabs(x - h.x) < 5 && std::fabs(y - h.y) < 5) { damageTrap(t, dmg, kx); return true; }
+    }
+    return false;
+}
+
 // A weapon drawn in the world (on racks, in graves...): grip at `g`, pointing along `ang`.
 void drawWorldWeapon(const Weapon& w, Vector2 g, float ang, float len)
 {
@@ -405,25 +486,17 @@ void newGameKit(bool sandbox)
 
     Weapon sword; sword.type = W_SWORD; sword.metal = M_COPPER;
     Weapon xb; xb.type = W_CROSSBOW; xb.metal = M_COPPER;
-    Weapon st; st.type = W_STAFF;
-    st.staff.name = "Apprentice's Staff";
-    st.staff.manaMax = st.staff.mana = 120;
-    st.staff.regen = 40 / 60.0f;
-    st.staff.delay = 8; st.staff.recharge = 25; st.staff.spread = 3;
-    st.staff.slots = {makeCard(SP_SPARK), makeCard(SP_SPARK), SpellCard{}, SpellCard{}};
-    st.staff.gem = SKYBLUE;
-    G.p.hotbar = {sword, xb, st};
-    G.p.bag = {makeCard(SP_DIG), makeCard(SP_BOMB)};
-    if (!sandbox) applyLoadout(); // real runs start with a frying pan plus whatever you've unlocked
+    G.p.hotbar = {sword, xb};
+    G.p.bag.clear();
+    G.p.scrolls.clear();
+    G.p.scrollSel = 0;
+    G.p.hasMap = false;
+    if (!sandbox) applyLoadout(); // real runs start with a weathered Norse sword plus whatever you've unlocked
     else
     {
-        G.p.hotbar.insert(G.p.hotbar.begin(), fryingPan());
-        G.p.hotbar[2].staff.slots.assign(10, SpellCard{});
-        G.p.hotbar[2].staff.slots[0] = makeCard(SP_SPARK);
-        G.p.hotbar[2].staff.manaMax = G.p.hotbar[2].staff.mana = 600;
-        G.p.hotbar[2].staff.regen = 4;
-        G.p.bag.clear();
-        for (int s = 0; s < SPELL_COUNT; s++) { G.p.bag.push_back(makeCard(s)); G.p.bag.push_back(makeCard(s)); }
+        G.p.hotbar.insert(G.p.hotbar.begin(), starterSword());
+        for (int s = 0; s < SCROLL_CASE; s++) G.p.scrolls.push_back(s % SC_COUNT);
+        G.p.hasMap = true;
         for (int r = 0; r < RES_COUNT; r++) G.p.res[r] = 999;
         G.p.potions = 9;
     }
@@ -442,9 +515,10 @@ Mob makeEnemy(int type, float x, float y)
     m.w = d.w * sc; m.h = d.h * sc;
     m.x = x - m.w / 2.0f; m.y = y - m.h;
     bool boss = type == E_BLACKKNIGHT || type == E_LICH;
-    float scale = boss ? 1.0f : 1.0f + 0.35f * G.stage;
+    float scale = boss ? 1.0f : 1.0f + 0.25f * G.stage; // a gentle climb: each biome a step, not a wall
     m.hp = m.maxHp = d.hp * scale;
-    m.dmg = d.dmg * (boss ? 1.0f : 1.0f + 0.2f * G.stage);
+    m.tier = G.stage;
+    m.dmg = d.dmg * (boss ? 1.0f : 1.0f + 0.14f * G.stage);
     m.boss = boss;
     m.timer = irand(200);
     m.state = irand(2) ? 1 : -1;
@@ -472,7 +546,7 @@ void damageMob(Mob& m, float dmg, Element el, float kx, float ky, int flags)
     if (!m.alive)
         return;
     bool isP = &m == &G.p.m;
-    if (isP && (flags & DMG_HIT) && m.iframes > 0)
+    if (isP && (((flags & DMG_HIT) && m.iframes > 0) || G.devGod))
         return;
     float mult = 1;
     bool immune = false;
@@ -593,6 +667,11 @@ static void hitProp(Interact& it, int dmg, float kx, float ky)
 {
     if (it.used) return;
     if ((it.data -= dmg) <= 0) { breakProp(it, kx); return; }
+    it.hit = 10;
+    Vector2 hb = bodyHalf(it);
+    for (int k = 0; k < 6 + dmg * 4; k++) // splinters off the struck side
+        spawnParticle(it.x - (kx > 0 ? hb.x : -hb.x) * frange(0.3f, 1), it.y - hb.y + frange(-hb.y, hb.y), kx * frange(0.2f, 0.8f) + frange(-0.8f, 0.8f), frange(-1.8f, -0.2f), irange(25, 50),
+                      k % 2 ? Color{150, 108, 62, 255} : Color{86, 58, 32, 255}, 0.15f);
     it.vx += kx; it.vy += ky;
     it.va += (kx > 0 ? 1 : -1) * frange(0.02f, 0.06f) * std::fabs(kx);
     it.rest = 0;
@@ -897,6 +976,7 @@ static void stepProj(Proj& p)
         float nx = p.x + p.vx / n, ny = p.y + p.vy / n;
         int cx = (int)std::floor(nx), cy = (int)std::floor(ny);
         if (!world.inU(cx, cy)) { p.alive = false; return; }
+        if (p.friendly && hitTrapAt(nx, ny, 1, p.vx > 0 ? 1.0f : -1.0f)) { projImpact(p, nx, ny); return; }
         const Cell& c = world.get(cx * world.scale, cy * world.scale);
         Kind k = props(c.material).kind;
         bool solid = isSolid(cx, cy);
@@ -988,7 +1068,7 @@ static void stepProj(Proj& p)
         default: spawnParticle(p.x, p.y, frange(-0.25f, 0.25f), frange(-0.25f, 0.25f), irange(8, 16), lerpColor(p.col, WHITE, frand() * 0.6f), 0); break;
         }
     if (p.fuse && G.frame % 4 == 0)
-        spawnParticle(p.x + 3, p.y - 14, frange(-0.3f, 0.3f), -0.4f, 8, {255, 200, 80, 255}, 0);
+        spawnParticle(p.x + (p.kind == PK_BOMB ? 0 : 3), p.y - (p.kind == PK_BOMB ? 4 : 14), frange(-0.3f, 0.3f), -0.4f, 8, {255, 200, 80, 255}, 0);
 }
 
 // ================================================================ structural collapse
@@ -998,8 +1078,23 @@ static void stepProj(Proj& p)
 // one block. It crushes whatever it lands on, and shatters into rubble if it fell far. Planks are left
 // out of it: they're held up by their own posts and ropes.
 
-struct Body { std::vector<std::pair<int, int>> cells; float vy = 0, fall = 0; int dropped = 0; };
+// A piece that broke free leaves the grid and falls as a rigid body (rigidStep, like a chest): it tips off
+// ledges and tumbles, then is written back into the grid where it comes to rest.
+struct Body
+{
+    RigidBody rb;                     // centre in units
+    int x0 = 0, y0 = 0, w = 0, h = 0; // the cells it was lifted from
+    float offX = 0, offY = 0;         // its centre within that box, in cells
+    std::vector<Cell> cells;          // w*h, Empty where it isn't
+    std::vector<Vector2> pts;         // outline, in units from the centre
+    float I = 1, R = 0, peak = 0;     // inertia per unit mass, reach from the centre, fastest it went
+    int n = 0, age = 0;
+    Vector3 snap{};                   // x, y, angle a moment ago (a big body creeps where it lies instead of sleeping)
+    bool hit = false;                 // it struck someone: it comes apart on them
+    Texture2D tex{};                  // made the first time it's drawn
+};
 static std::vector<Body> bodies;
+int fallingBodies() { return (int)bodies.size(); }
 static int anchorCells() { return 3000 * world.scale * world.scale; } // a piece bigger than this is a wall, not a loose block
 
 static long long cellKey(int x, int y) { return (long long)y * 1048576LL + x; }
@@ -1008,6 +1103,56 @@ static bool structural(int x, int y)
     if (!world.in(x, y)) return false;
     const Cell& c = world.get(x, y);
     return props(c.material).kind == Kind::Solid && !(c.flags & CF_LOOSE) && c.material != M::Platform && c.material != M::Bedrock;
+}
+static bool passable(const Cell& t)
+{
+    Kind k = props(t.material).kind;
+    return t.material == M::Empty || k == Kind::Liquid || k == Kind::Gas || k == Kind::Fire;
+}
+
+// Lift a free piece out of the grid, unless it's resting on something (sand, rubble) already.
+static void liftBody(const std::vector<std::pair<int, int>>& q)
+{
+    std::unordered_set<long long> mine;
+    for (auto& p : q) mine.insert(cellKey(p.first, p.second));
+    for (auto& p : q)
+        if (!mine.count(cellKey(p.first, p.second + 1)) && (!world.in(p.first, p.second + 1) || !passable(world.get(p.first, p.second + 1)))) return;
+    Body b;
+    int x1 = -1, y1 = -1;
+    b.x0 = b.y0 = 1 << 30;
+    float sx = 0, sy = 0;
+    for (auto& p : q)
+    {
+        b.x0 = std::min(b.x0, p.first); x1 = std::max(x1, p.first);
+        b.y0 = std::min(b.y0, p.second); y1 = std::max(y1, p.second);
+        sx += p.first + 0.5f; sy += p.second + 0.5f;
+    }
+    b.w = x1 - b.x0 + 1; b.h = y1 - b.y0 + 1; b.n = (int)q.size();
+    b.cells.assign((size_t)b.w * b.h, Cell{});
+    float sc = (float)world.scale, cx = sx / b.n, cy = sy / b.n;
+    b.offX = cx - b.x0; b.offY = cy - b.y0;
+    b.rb.x = cx / sc; b.rb.y = cy / sc;
+    float I = 0;
+    for (auto& p : q)
+    {
+        b.cells[(size_t)(p.second - b.y0) * b.w + (p.first - b.x0)] = world.get(p.first, p.second);
+        world.at(p.first, p.second) = Cell{};
+        float rx = (p.first + 0.5f - cx) / sc, ry = (p.second + 0.5f - cy) / sc;
+        I += rx * rx + ry * ry;
+        b.R = std::max(b.R, std::sqrt(rx * rx + ry * ry) + 1);
+    }
+    b.I = std::max(1.0f, I / b.n);
+    // outline points, one per 2x2 units, so a big slab doesn't test thousands
+    std::unordered_set<long long> taken;
+    auto inside = [&](int i, int j) { return i >= 0 && j >= 0 && i < b.w && j < b.h && b.cells[(size_t)j * b.w + i].material != M::Empty; };
+    for (int j = 0; j < b.h; j++)
+        for (int i = 0; i < b.w; i++)
+        {
+            if (!inside(i, j) || (inside(i - 1, j) && inside(i + 1, j) && inside(i, j - 1) && inside(i, j + 1))) continue;
+            Vector2 r = {(i + 0.5f - b.offX) / sc, (j + 0.5f - b.offY) / sc};
+            if (taken.insert(cellKey((int)std::floor(r.x / 2) + 4096, (int)std::floor(r.y / 2) + 4096)).second) b.pts.push_back(r);
+        }
+    bodies.push_back(std::move(b));
 }
 
 // Trace the pieces touching the edge of a disturbed area; any that hang free start to fall.
@@ -1042,104 +1187,86 @@ static void checkSupport(int cx, int cy, int r)
                 }
             }
             anchored.push_back(held);
-            if (!held)
-            {
-                Body b;
-                b.cells = std::move(q);
-                bodies.push_back(std::move(b));
-            }
+            if (!held) liftBody(q);
         }
 }
 
-// Drop a falling block one cell. False when something solid (or someone) is in the way.
-static bool stepBody(Body& b)
+// The cell of the body at a world point (in cells), or null.
+static const Cell* bodyCellAt(const Body& b, float wx, float wy)
 {
-    // pieces of it may have burnt or been blasted away while it fell
-    b.cells.erase(std::remove_if(b.cells.begin(), b.cells.end(), [](const std::pair<int, int>& p) { return !structural(p.first, p.second); }), b.cells.end());
-    if (b.cells.empty()) return false;
-    std::unordered_set<long long> mine;
-    for (auto& p : b.cells) mine.insert(cellKey(p.first, p.second));
-    int bx0 = 1 << 30, bx1 = -1, by0 = 1 << 30, by1 = -1;
-    for (auto& p : b.cells) { bx0 = std::min(bx0, p.first); bx1 = std::max(bx1, p.first); by0 = std::min(by0, p.second); by1 = std::max(by1, p.second); }
-    float sc = (float)world.scale;
-    std::vector<Mob*> near; // only foes around the block can be hit by it (they're in units, the block in cells)
-    for (auto& m : G.mobs)
-        if (m.alive && m.x < bx1 / sc + 2 && m.x + m.w > bx0 / sc - 1 && m.y < by1 / sc + 2 && m.y + m.h > by0 / sc) near.push_back(&m);
-    bool blocked = false;
-    for (auto& p : b.cells)
-    {
-        int x = p.first, y = p.second + 1;
-        float ux = x / sc, uy = y / sc;
-        if (mine.count(cellKey(x, y))) continue;
-        if (!world.in(x, y)) return false;
-        const Cell& t = world.get(x, y);
-        Kind k = props(t.material).kind;
-        if ((t.material != M::Empty && !(k == Kind::Liquid || k == Kind::Gas || k == Kind::Fire)) || t.material == M::Platform) return false;
-        for (Mob* m : {&G.p.m}) // a falling block lands on you
-            if (m->alive && ux >= m->x && ux < m->x + m->w && uy >= m->y && uy < m->y + m->h) blocked = true;
-        for (Mob* m : near)
-            if (m->alive && ux >= m->x && ux < m->x + m->w && uy >= m->y && uy < m->y + m->h)
-            {
-                if (b.vy > sc) damageMob(*m, b.vy / sc * 6 + b.cells.size() / (sc * sc) * 0.02f, EL_PHYS, 0, 1.5f, DMG_HIT);
-                blocked = true;
-            }
-    }
-    if (blocked)
-    {
-        Mob& pm = G.p.m;
-        if (b.vy > sc && pm.alive) damageMob(pm, b.vy / sc * 4 + b.cells.size() / (sc * sc) * 0.01f, EL_PHYS, 0, 1.5f, DMG_HIT);
-        b.dropped = 99; // whatever hit someone comes apart on them
-        return false;
-    }
-    // shift every column of the block down one; whatever filled the gap beneath (air, water) moves up
-    std::map<int, std::vector<int>> cols;
-    for (auto& p : b.cells) cols[p.first].push_back(p.second);
-    for (auto& kv : cols)
-    {
-        auto& ys = kv.second;
-        std::sort(ys.begin(), ys.end());
-        int x = kv.first;
-        for (size_t i = 0; i < ys.size();)
-        {
-            size_t j = i;
-            while (j + 1 < ys.size() && ys[j + 1] == ys[j] + 1) j++;
-            int top = ys[i], bot = ys[j];
-            Cell under = world.at(x, bot + 1);
-            for (int y = bot; y >= top; y--) world.at(x, y + 1) = world.at(x, y);
-            world.at(x, top) = under;
-            i = j + 1;
-        }
-    }
-    for (auto& p : b.cells) p.second++;
-    b.dropped++;
-    return true;
+    float sc = (float)world.scale, cs = std::cos(b.rb.ang), sn = std::sin(b.rb.ang);
+    float dx = wx - b.rb.x * sc, dy = wy - b.rb.y * sc;
+    int i = (int)std::floor(dx * cs + dy * sn + b.offX), j = (int)std::floor(-dx * sn + dy * cs + b.offY);
+    if (i < 0 || j < 0 || i >= b.w || j >= b.h) return nullptr;
+    const Cell& c = b.cells[(size_t)j * b.w + i];
+    return c.material == M::Empty ? nullptr : &c;
 }
 
+static bool inAnyMob(float ux, float uy)
+{
+    auto in = [&](const Mob& m) { return m.alive && ux >= m.x && ux < m.x + m.w && uy >= m.y && uy < m.y + m.h; };
+    if (in(G.p.m)) return true;
+    for (auto& m : G.mobs) if (in(m)) return true;
+    return false;
+}
+
+// Write it back into the grid where it lies (around anyone it landed on); a hard landing shatters it.
 static void landBody(Body& b)
 {
     float sc = (float)world.scale;
-    if (b.dropped < 10 * sc || b.cells.empty()) return; // a short drop: it just settles where it stops
-    int n = (int)b.cells.size();
-    float sx = 0, sy = 0;
-    for (auto& p : b.cells)
-    {
-        sx += p.first; sy += p.second;
-        Cell& c = world.at(p.first, p.second);
-        if (chance(3)) c.flags |= CF_LOOSE; // shattered into rubble that pours like gravel
-        if (chance(12 * (int)(sc * sc))) spawnParticle(p.first / sc, p.second / sc, frange(-1, 1), frange(-1.5f, -0.3f), irange(20, 50), cellColor(c, p.first, p.second), 0.12f);
-    }
-    float cxu = sx / b.cells.size() / sc, cyu = sy / b.cells.size() / sc; // the block's middle, in units
-    n = std::max(1, (int)(n / (sc * sc)));                                 // and its size in units
+    int r = (int)std::ceil(b.R * sc) + 1, bx = (int)(b.rb.x * sc), by = (int)(b.rb.y * sc);
+    bool shatter = b.hit || b.peak > 1.4f;
+    int put = 0;
+    for (int y = by - r; y <= by + r; y++)
+        for (int x = bx - r; x <= bx + r; x++)
+        {
+            const Cell* c = bodyCellAt(b, x + 0.5f, y + 0.5f);
+            if (!c || !world.in(x, y) || !passable(world.get(x, y)) || inAnyMob((x + 0.5f) / sc, (y + 0.5f) / sc)) continue;
+            Cell& t = world.at(x, y);
+            t = *c;
+            put++;
+            if (!shatter) continue;
+            if (chance(3)) t.flags |= CF_LOOSE; // shattered into rubble that pours like gravel
+            if (chance(12 * (int)(sc * sc))) spawnParticle(x / sc, y / sc, frange(-1, 1), frange(-1.5f, -0.3f), irange(20, 50), cellColor(t, x, y), 0.12f);
+        }
+    if (b.tex.id) UnloadTexture(b.tex);
+    b.cells.clear();
+    if (!shatter || !put) return;
+    int n = std::max(1, (int)(b.n / (sc * sc))); // its size in units
     for (int k = 0; k < std::min(40, n / 8 + 4); k++)
-        spawnParticle(cxu + frange(-n * 0.05f, n * 0.05f), cyu, frange(-1.2f, 1.2f), frange(-0.8f, -0.1f), irange(30, 70), {120, 112, 100, 140}, -0.01f);
-    playAt(SFX_SMASH, cxu, cyu, std::min(1.0f, 0.3f + n / 600.0f), 0.6f);
+        spawnParticle(b.rb.x + frange(-n * 0.05f, n * 0.05f), b.rb.y, frange(-1.2f, 1.2f), frange(-0.8f, -0.1f), irange(30, 70), {120, 112, 100, 140}, -0.01f);
+    playAt(SFX_SMASH, b.rb.x, b.rb.y, std::min(1.0f, 0.3f + n / 600.0f), 0.6f);
     G.shake = std::max(G.shake, (float)std::min(10, 2 + n / 150));
+}
+
+// Anyone it moves into is struck (not someone riding down on top of it), and it comes apart on them.
+static void bodyHits(Body& b)
+{
+    float sc = (float)world.scale, spd = std::fabs(b.rb.vx) + std::fabs(b.rb.vy);
+    auto check = [&](Mob& m, float k) {
+        if (!m.alive || std::fabs(m.cx() - b.rb.x) > b.R + m.w || std::fabs(m.cy() - b.rb.y) > b.R + m.h) return;
+        if ((m.cx() - b.rb.x) * b.rb.vx + (m.cy() - b.rb.y) * b.rb.vy <= 0) return;
+        bool touch = false;
+        for (float fy : {0.1f, 0.5f, 0.9f})
+            for (float fx : {0.1f, 0.5f, 0.9f})
+                touch = touch || bodyCellAt(b, (m.x + m.w * fx) * sc, (m.y + m.h * fy) * sc);
+        if (!touch) return;
+        if (spd > 1) damageMob(m, k * (spd * 6 + b.n / (sc * sc) * 0.02f), EL_PHYS, 0, 1.5f, DMG_HIT);
+        b.hit = true;
+    };
+    check(G.p.m, 0.66f);
+    for (auto& m : G.mobs) check(m, 1);
 }
 
 static void updateStructures()
 {
     static int bodiesGen = -1;
-    if (bodiesGen != world.gen) { bodies.clear(); bodiesGen = world.gen; } // a rebuilt world leaves blocks where they are
+    if (bodiesGen != world.gen) // a rebuilt world loses whatever was mid-fall
+    {
+        for (auto& b : bodies) if (b.tex.id) UnloadTexture(b.tex);
+        bodies.clear();
+        bodiesGen = world.gen;
+    }
     std::vector<Disturbance> todo;
     todo.swap(world.disturbed);
     std::unordered_set<long long> done;
@@ -1152,20 +1279,43 @@ static void updateStructures()
     }
     for (auto& b : bodies)
     {
-        b.vy = std::min(b.vy + 0.15f * world.scale, 4.0f * world.scale); // in cells per frame
-        b.fall += b.vy;
-        bool moving = true;
-        while (b.fall >= 1 && moving)
+        rigidStep(b.rb, b.pts, b.I, true);
+        b.peak = std::max(b.peak, std::fabs(b.rb.vx) + std::fabs(b.rb.vy));
+        bodyHits(b);
+        bool still = false;
+        if (++b.age % 30 == 0)
         {
-            b.fall -= 1;
-            moving = stepBody(b);
+            still = std::fabs(b.rb.x - b.snap.x) + std::fabs(b.rb.y - b.snap.y) < 1.2f && std::fabs(b.rb.ang - b.snap.z) < 0.03f;
+            b.snap = {b.rb.x, b.rb.y, b.rb.ang};
         }
-        if (!moving) { landBody(b); b.cells.clear(); }
+        if (b.hit || still || b.rb.rest > 40 || b.age > 900 || !world.inU((int)b.rb.x, (int)b.rb.y)) landBody(b);
     }
     bodies.erase(std::remove_if(bodies.begin(), bodies.end(), [](const Body& b) { return b.cells.empty(); }), bodies.end());
 }
 
-// --selftest: a slab on two pillars stays up; blow one pillar away and it falls, and settles on the ground.
+static void drawBodies(int camX, int camY)
+{
+    float sc = (float)world.scale;
+    for (auto& b : bodies)
+    {
+        if (!b.tex.id)
+        {
+            Image img = GenImageColor(b.w, b.h, BLANK);
+            for (int j = 0; j < b.h; j++)
+                for (int i = 0; i < b.w; i++)
+                {
+                    const Cell& c = b.cells[(size_t)j * b.w + i];
+                    if (c.material != M::Empty) ImageDrawPixel(&img, i, j, cellColor(c, b.x0 + i, b.y0 + j));
+                }
+            b.tex = LoadTextureFromImage(img);
+            UnloadImage(img);
+        }
+        DrawTexturePro(b.tex, {0, 0, (float)b.w, (float)b.h}, {b.rb.x - camX, b.rb.y - camY, b.w / sc, b.h / sc}, {b.offX / sc, b.offY / sc}, b.rb.ang * RAD2DEG, WHITE);
+    }
+}
+
+// --selftest: a slab on two pillars stays up; take one away and it still holds; cut the other and the
+// piece falls as a body, and is written back into the grid once it settles.
 void collapseSelfTest()
 {
     worldInit(120, 80);
@@ -1181,10 +1331,22 @@ void collapseSelfTest()
     if (world.at(55, 36).material != M::Stone) { std::printf("collapse: FAIL - fell while still held\n"); return; }
     for (int y = 60; y < 70; y++) world.at(80, y) = Cell{}; // cut the second at its foot
     disturb(80, 64, 5);
-    for (int i = 0; i < 60; i++) updateStructures();
+    updateStructures();
+    bool lifted = bodies.size() == 1 && world.at(55, 36).material == M::Empty;
+    int frames = 0;
+    for (; frames < 1200 && !bodies.empty(); frames++) updateStructures();
     int below = 0;
-    for (int y = 40; y < 70; y++) below += world.at(55, y).material == M::Stone;
-    std::printf("collapse: %s\n", world.at(55, 36).material == M::Empty && below ? "ok - the slab came down" : "FAIL - the slab still hangs");
+    for (int y = 40; y < 70; y++) for (int x = 0; x < 120; x++) below += world.at(x, y).material == M::Stone;
+    std::printf("collapse: %s (%d of 224 cells back in the grid after %d frames)\n",
+                lifted && bodies.empty() && world.at(55, 36).material == M::Empty && below > 180 ? "ok - the slab came down and settled" : "FAIL - the slab didn't come down cleanly", below, frames);
+
+    // unstick: a mob wedged in rock with a cave 10 to its right and open sky 30 above goes to the cave
+    worldInit(120, 80, Cell{M::Stone});
+    for (int y = 0; y < 10; y++) for (int x = 0; x < 120; x++) world.at(x, y) = Cell{};  // sky
+    for (int y = 40; y < 60; y++) for (int x = 60; x < 80; x++) world.at(x, y) = Cell{}; // the cave
+    Mob m; m.x = 44; m.y = 40; m.w = 6; m.h = 10; m.alive = true;
+    for (int i = 0; i < 20; i++) moveMob(m);
+    std::printf("unstick: %s (at %.0f, %.0f)\n", !boxSolid(m.x, m.y, m.w, m.h) && m.x >= 60 && m.y >= 40 ? "ok - out into the cave" : "FAIL", m.x, m.y);
 }
 
 static void updateProjectiles()
@@ -1309,11 +1471,13 @@ static AttackDef attackFor(int type, int combo)
     bool fin = combo == 2;
     switch (type)
     {
-    case W_DAGGER: return fin ? AttackDef{ATK_SLASH, 9, 2} : AttackDef{ATK_STAB, 7, 2};
-    case W_SPEAR: return fin ? AttackDef{ATK_THRUST, 16, 6} : AttackDef{ATK_THRUST, 12, 4};
-    case W_AXE: return {ATK_CHOP, 22, 10};
-    case W_MACE: return {ATK_SLAM, 26, 12};
-    default: return fin ? AttackDef{ATK_SLASH, 15, 4} : AttackDef{ATK_SLASH, 11, 3};
+    case W_DAGGER: return fin ? AttackDef{ATK_SLASH, 12, 3} : AttackDef{ATK_STAB, 9, 3};
+    case W_SPEAR: return fin ? AttackDef{ATK_THRUST, 20, 8} : AttackDef{ATK_THRUST, 15, 5};
+    case W_PAN: return fin ? AttackDef{ATK_SLASH, 21, 7} : AttackDef{ATK_SLASH, 16, 5}; // the pan comes over the top
+    // axes and hammers chain a left swing, a right swing, then the overhead blow; all strike where you aim
+    case W_AXE: return fin ? AttackDef{ATK_CHOP, 22, 10} : AttackDef{ATK_SLASH, 19, 8};
+    case W_MACE: return fin ? AttackDef{ATK_SLAM, 26, 12} : AttackDef{ATK_SLASH, 22, 9};
+    default: return fin ? AttackDef{ATK_SLASH, 21, 7} : AttackDef{ATK_SWEEP, 16, 5}; // the sword sweeps, and the third blow comes over the top
     }
 }
 
@@ -1345,14 +1509,14 @@ static void meleeStrike(const Weapon& w, bool impact)
     Mob& pm = G.p.m;
     float ox = pm.cx(), oy = pm.y + pm.h * 0.45f;
     float aim = P.aim, f = (float)pm.facing;
-    bool fin = P.combo == 2, heavy = P.atkStyle == ATK_CHOP || P.atkStyle == ATK_SLAM;
+    bool fin = P.combo == 2, heavy = P.atkStyle == ATK_CHOP || P.atkStyle == ATK_SLAM || w.type == W_AXE || w.type == W_MACE;
     float arc = (t.arc + (fin ? 20 : 0)) * DEG2RAD, R = t.range * (fin ? 1.15f : 1.0f), mult = fin ? 1.35f : 1.0f;
     if (P.atkStyle == ATK_STAB) arc = 20 * DEG2RAD;
     float sx = 0, sy = 0, sr = 0; // the slam's point of impact
     if (P.atkStyle == ATK_SLAM)
     {
-        sx = ox + f * R * 0.75f;
-        sy = oy;
+        sx = ox + std::cos(aim) * R * 0.75f;
+        sy = oy + std::max(0.0f, std::sin(aim)) * R * 0.5f; // the ground in front, or where you aim down toward it
         while (sy < oy + 24 && !isSolid((int)sx, (int)sy + 1)) sy++;
         sr = R * 0.55f + 4;
     }
@@ -1412,6 +1576,14 @@ static void meleeStrike(const Weapon& w, bool impact)
         if (!inShape(it.x + it.w * 0.5f, it.y - it.h * 0.5f, std::max(it.w, it.h) * 0.5f)) continue;
         damageCrate(it, heavy ? 2 : 1, (P.atkStyle == ATK_SLAM ? (it.x > sx ? 1 : -1) : std::cos(aim)) * 2);
         if (heavy) G.hitstop = std::max(G.hitstop, 2);
+    }
+    for (auto& t : G.traps) // dart traps: knock their heads off
+    {
+        if (t.type != TR_ARROW || t.done) continue;
+        Vector2 h = trapHead(t);
+        if (!inShape(h.x, h.y, 5)) continue;
+        damageTrap(t, heavy ? 2 : 1, (P.atkStyle == ATK_SLAM ? (h.x > sx ? 1 : -1) : std::cos(aim)) * 2);
+        G.hitstop = std::max(G.hitstop, 2);
     }
     for (auto& c : G.corpses) // the dead: knocked about
     {
@@ -1542,10 +1714,19 @@ static void updatePlayer()
     float cx = m.cx(), cy = m.y + m.h * 0.45f;
     P.aim = std::atan2(mw.y - cy, mw.x - cx);
     m.facing = std::cos(P.aim) >= 0 ? 1 : -1;
+    if (G.devFly) // dev: straight through anything
+    {
+        float sp = IsKeyDown(KEY_LEFT_SHIFT) ? 10.0f : 3.5f;
+        m.x = clampf(m.x + (IsKeyDown(KEY_D) - IsKeyDown(KEY_A)) * sp, 4, world.wU() - 4.0f - m.w);
+        m.y = clampf(m.y + (IsKeyDown(KEY_S) - (IsKeyDown(KEY_W) || IsKeyDown(KEY_SPACE))) * sp, 4, world.hU() - 4.0f - m.h);
+        m.vx = m.vy = 0;
+        m.onGround = false;
+        return;
+    }
 
     bool L = IsKeyDown(KEY_A), R = IsKeyDown(KEY_D), U = IsKeyDown(KEY_W);
     bool jumpPressed = IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_W);
-    bool sandboxPaint = G.sandbox && IsKeyDown(KEY_LEFT_CONTROL);
+    bool sandboxPaint = (G.sandbox || G.dev) && IsKeyDown(KEY_LEFT_CONTROL);
 
     int dir = (R ? 1 : 0) - (L ? 1 : 0);
 
@@ -1683,8 +1864,9 @@ static void updatePlayer()
     // dodge roll (Shift): quick burst with invulnerability
     if (IsKeyPressed(KEY_LEFT_SHIFT) && P.rollT == 0 && P.rollCd == 0 && P.stamina >= 15 && !m.inLiquid && !P.crouch && !P.climb)
     {
-        P.rollT = 20;
+        P.rollT = 24;
         P.rollDir = dir ? dir : m.facing;
+        if (m.onGround) m.vy = -1.3f; // the dive: a spring off the ground, tucking as it lands
         P.stamina -= 15;
         P.hook = 0;
         playSfx(SFX_ROLL, 0.6f);
@@ -1692,7 +1874,10 @@ static void updatePlayer()
     if (P.rollT > 0)
     {
         P.rollT--;
-        m.vx = P.rollDir * 1.9f;
+        m.vx = P.rollDir * (P.rollT > 8 ? 2.6f : 1.2f + P.rollT * 0.18f); // a hard burst, then the skid back to a stand
+        if (m.onGround && (P.rollT == 18 || P.rollT == 1)) // dust kicked up as it digs in, and as it comes up
+            for (int i = 0; i < 6; i++)
+                spawnParticle(m.cx() - P.rollDir * (P.rollT == 1 ? -3 : 3), m.y + m.h - 1, -P.rollDir * frange(0.3f, 1.2f) * (P.rollT == 1 ? -0.6f : 1), frange(-0.7f, -0.1f), irange(10, 18), {150, 140, 120, 200}, 0.02f);
         m.iframes = std::max(m.iframes, 2);
         m.facing = P.rollDir;
         if (P.rollT == 0) P.rollCd = 12;
@@ -1785,14 +1970,16 @@ static void updatePlayer()
     if (m.onGround)
     {
         float before = P.runPhase;
-        P.runPhase += std::fabs(m.vx) * 0.32f;
+        P.runPhase += std::fabs(m.vx) * 0.24f; // a long stride: fewer steps for the ground covered
         if ((int)(before / PI) != (int)(P.runPhase / PI) && std::fabs(m.vx) > 0.3f) playSfx(SFX_STEP, 0.35f);
     }
     static bool wasWet = false;
     if (m.inLiquid && !wasWet) playSfx(SFX_SPLASH, 0.6f);
     wasWet = m.inLiquid;
+    if (m.inLiquid && std::fabs(m.vx) > 0.4f && G.frame % 5 == 0) spawnParticle(m.cx() - m.facing * 4, m.cy() + frange(-3, 3), -m.vx * 0.1f, -0.4f, 30, {200, 232, 255, 170}, -0.01f); // a trail of bubbles behind a swimmer
     G.underwater = isLiquidAt((int)m.cx(), (int)m.y + 1);
-    if (G.underwater && P.amulet != AM_NJORD) // head under: about 14 seconds of air
+    if (P.ondT > 0) { P.ondT--; P.breath = 100; if (G.frame % 6 == 0) spawnParticle(m.cx() + frange(-3, 3), m.y + 2, 0, -0.4f, 30, {170, 240, 250, 160}, -0.01f); } // Önd: no need of air
+    else if (G.underwater && P.amulet != AM_NJORD) // head under: about 14 seconds of air
     {
         P.breath = std::max(0.0f, P.breath - 0.12f);
         if (G.frame % 9 == 0) spawnParticle(m.cx() + m.facing * 2, m.y + 2, frange(-0.2f, 0.2f), -0.7f, 40, {200, 230, 255, 200}, -0.01f);
@@ -1844,6 +2031,8 @@ static void updatePlayer()
         if (melee) meleeStrike(P.hotbar[P.sel], at == P.atkHitAt);
     }
     if (P.recoil > 0) P.recoil--;
+    if (n > 0 && P.rollT > 0 && P.rollT <= 7 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !sandboxPaint)
+        P.rollT = 0, P.rollCd = 0; // the end of a roll cancels into a blow, carrying its momentum
     if (n > 0 && P.rollT == 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !sandboxPaint)
     {
         Weapon& w = P.hotbar[P.sel];
@@ -1884,6 +2073,9 @@ static void updatePlayer()
         }
     }
 
+    if (IsKeyPressed(KEY_T) && P.scrolls.size() > 1) { P.scrollSel = (P.scrollSel + 1) % (int)P.scrolls.size(); playSfx(SFX_CLICK, 0.5f, 1.3f); }
+    if (IsKeyPressed(KEY_R) && !P.scrolls.empty() && !G.inVillage && P.rollT == 0) readScroll();
+    if (P.readT > 0) P.readT--;
     if (IsKeyPressed(KEY_Q) && P.potions > 0 && m.hp < m.maxHp)
     {
         P.potions--;
@@ -1891,6 +2083,18 @@ static void updatePlayer()
         m.burn = m.poison = 0;
         addText(m.cx(), m.y - 4, "+50", {120, 255, 120, 255});
         playSfx(SFX_POTION, 0.7f);
+    }
+    if (IsKeyPressed(KEY_B) && P.bombs > 0 && !G.inVillage) // a rune bomb, lobbed toward the mouse: it bounces, then goes off
+    {
+        P.bombs--;
+        Proj b;
+        b.kind = PK_BOMB;
+        b.x = m.cx(); b.y = m.y + 4;
+        b.vx = std::cos(P.aim) * 3.6f + m.vx * 0.5f; b.vy = std::sin(P.aim) * 3.6f - 1.2f;
+        b.grav = 0.15f; b.fuse = true; b.life = 80;
+        b.dmg = 60 + 15.0f * G.stage; b.el = EL_FIRE; b.blast = 14; b.power = 5;
+        G.projs.push_back(b);
+        playSfx(SFX_SWING, 0.6f, 0.7f);
     }
     if (IsKeyPressed(KEY_G) && n > 1)
     {
@@ -1918,13 +2122,13 @@ static int attackKind(int type)
 {
     switch (type)
     {
-    case E_WOLF: case E_KELPIE: return AK_LUNGE; // a leap and a bite
+    case E_WOLF: case E_KELPIE: case E_SERPENT: return AK_LUNGE; // a leap and a bite
     case E_SLIME: return AK_POUNCE;
     case E_BAT: return AK_DIVE;
     default: return AK_SWING; // blades, clubs, claws: a strike in front of them
     }
 }
-static int windupFor(int type)
+int windupFor(int type)
 {
     switch (type)
     {
@@ -2122,9 +2326,9 @@ static void updateEnemy(Mob& m)
         if (G.frame % 9 == 0) spawnCellParticle(m.cx(), m.cy(), frange(-0.5f, 0.5f), 0.3f, ENEMIES[m.type].gore, 0);
     }
     m.timer++;
-    float pace = G.stage == 0 ? 0.55f : 1.0f; // the Greenmarch's foes are slower: you're still finding your feet
+    float pace = G.stage == 0 ? 0.55f : G.stage == 1 ? 0.8f : 1.0f; // the Greenmarch's foes are slower, Dunmoor's a step up: you're still finding your feet
     float spd = d.speed * pace * (m.chill > 0 ? 0.45f : 1.0f);
-    if (m.type == E_KELPIE && m.inLiquid) spd *= 2.2f;               // kelpies are deadly in the water
+    if ((m.type == E_KELPIE || m.type == E_SERPENT) && m.inLiquid) spd *= 2.2f;               // kelpies are deadly in the water
     if (m.type == E_TROLL && m.burn == 0 && m.hp < m.maxHp && !(G.p.amulet == AM_TROLLCROSS && std::fabs(m.cx() - G.p.m.cx()) < 120)) m.hp += 0.04f; // trolls regenerate unless burned (or warded)
     if (m.shock > 0) spd *= 0.2f;
     int fdir = dx > 0 ? 1 : -1;
@@ -2375,7 +2579,7 @@ static void updateEnemy(Mob& m)
         {
             m.vy = std::min(m.vy + 0.06f, 1.0f);
             m.vx *= 0.9f;
-            if (m.type == E_KELPIE && m.aggro) m.vy = clampf(m.vy - 0.06f + clampf((py - cy) * 0.02f, -0.3f, 0.3f), -2.2f, 2.2f); // kelpies hunt through the water, up or down
+            if ((m.type == E_KELPIE || m.type == E_SERPENT) && m.aggro) m.vy = clampf(m.vy - 0.06f + clampf((py - cy) * 0.02f, -0.3f, 0.3f), -2.2f, 2.2f); // kelpies hunt through the water, up or down
             else if (m.aggro && py < cy) m.vy -= 0.12f;
         }
         else
@@ -2417,7 +2621,9 @@ static void killMob(Mob& m)
     else if (chance(2)) addCoins(m.cx(), m.cy(), irange(1, 2) + G.stage / 3, 1); // not every foe carries coin
     if (m.type == E_SLIME) paintCircle((int)m.cx(), (int)m.cy(), 2, M::Acid, true);
     if (m.type == E_BOMBER) explode(m.cx(), m.cy(), 5, 10, EL_FIRE, false, 3);
-    dropLoot(m.cx(), m.cy(), m.boss);
+    if (m.type == E_BOMBER && chance(5)) addPickup(m.cx(), m.cy(), PU_BOMB); // one he never lit
+    dropLoot(m.cx(), m.cy(), m.boss, m.tier);
+    if (m.sea && chance(m.type == E_SERPENT ? 5 : 10)) addPickup(m.cx(), m.cy(), PU_OND); // the sea's creatures sometimes carry a breath
     if (m.boss)
     {
         G.shake = 14;
@@ -2437,7 +2643,7 @@ static void killMob(Mob& m)
 // ================================================================ the folk of Hearthwick
 // A few villagers and hens potter about between the halls: they wander, stop, turn to look at you, and
 // have a word to say when you come close.
-struct Villager { float x = 0, y = 0, anim = 0; int kind = 0, dir = 1, walk = 0, wait = 0, talkCd = 0; Color coat = WHITE; };
+struct Villager { float x = 0, y = 0, anim = 0; int kind = 0, dir = 1, walk = 0, wait = 0, talkCd = 0, look = 0; Color coat = WHITE; };
 static std::vector<Villager> folk;
 static int folkGen = -1;
 static const char* FOLK_SAY[] = {"Skal!", "Fair winds to you.", "Mind the oil down there. It burns hot.", "Water puts a fire out. Remember that.",
@@ -2462,10 +2668,12 @@ static void updateVillagers()
         folk.clear();
         static const Color COATS[] = {{128, 44, 38, 255}, {52, 82, 132, 255}, {74, 104, 62, 255}, {150, 116, 64, 255}, {104, 72, 124, 255}, {156, 146, 124, 255}};
         static const int KINDS[] = {0, 0, 1, 1, 1, 2, 2, 3, 3, 3, 3};
+        int seen[3] = {0, 0, 0}, start[3] = {irand(4), irand(4), irand(4)};
         for (int k : KINDS)
         {
             Villager v;
             v.kind = k;
+            v.look = k < 3 ? (start[k] + seen[k]++) % folkLooks(k) : 0; // different looks within a kind, until they run out
             v.x = (float)irange(x0, x1);
             v.y = groundUnder(v.x, G.p.m.y + G.p.m.h - 10); // on the ground, not the roofs
             v.coat = COATS[irand(6)];
@@ -2499,7 +2707,7 @@ static void updateVillagers()
             if (v.talkCd == 0 && d < 18)
             {
                 const char* line = v.kind == 2 ? CHILD_SAY[irand(4)] : FOLK_SAY[irand(10)];
-                addText(v.x, v.y - (v.kind == 2 ? 13 : 19), line, {236, 222, 190, 255});
+                addText(v.x, v.y - (v.kind == 2 ? 17 : 25), line, {236, 222, 190, 255});
                 v.talkCd = irange(900, 1500);
             }
         }
@@ -2512,9 +2720,9 @@ static void drawVillagers(int camX, int camY)
     {
         float x = v.x - camX, y = v.y - camY;
         if (x < -20 || x > G.vw + 20 || y < -30 || y > G.vh + 30) continue;
+        if (v.kind < 3) { drawFolk(v.kind, v.look, v.anim, v.wait == 0 && v.walk > 0, v.dir, x, y, v.coat, (int)(&v - &folk[0])); continue; }
         bool b = ((int)v.anim) & 1;
-        const Sprite& s = v.kind == 0 ? (b ? SPR_MAN_B : SPR_MAN_A) : v.kind == 1 ? (b ? SPR_WOMAN_B : SPR_WOMAN_A) : v.kind == 2 ? (b ? SPR_CHILD_B : SPR_CHILD_A) : (b ? SPR_HEN_B : SPR_HEN_A);
-        drawSpriteTint(s, x, y, v.dir < 0, v.coat);
+        drawSpriteTint(b ? SPR_HEN_B : SPR_HEN_A, x, y, v.dir < 0, v.coat);
     }
 }
 
@@ -2609,9 +2817,11 @@ static void updatePickups()
             playSfx(SFX_ORE, 0.4f, 1.7f);
             pu.alive = false;
             break;
-        case PU_SPELL:
-            P.bag.push_back(makeCard(pu.spell));
-            message(std::string("Spell found: ") + SPELLS[pu.spell].name + "  (TAB to equip)");
+        case PU_SCROLL:
+            if ((int)P.scrolls.size() >= SCROLL_CASE) { if (G.frame % 120 == 0) message("Your scroll case is full - read one (R) to make room."); break; }
+            P.scrolls.push_back(pu.spell);
+            P.scrollSel = (int)P.scrolls.size() - 1;
+            message(std::string(SCROLLS[pu.spell].name) + "  (R to read, T to choose)");
             playSfx(SFX_PICKUP, 0.6f);
             pu.alive = false;
             break;
@@ -2619,6 +2829,20 @@ static void updatePickups()
             P.potions++;
             message("Healing flask  (Q to drink)");
             playSfx(SFX_PICKUP, 0.6f, 0.9f);
+            pu.alive = false;
+            break;
+        case PU_OND: // the breath Odin gave the first people: 30 seconds without air
+            P.ondT = std::max(P.ondT, 30 * 60);
+            P.breath = 100;
+            message("Önd fills your lungs: for 30 seconds you need no air.");
+            playSfx(SFX_POTION, 0.7f, 1.4f);
+            for (int k = 0; k < 24; k++) spawnParticle(P.m.cx(), P.m.cy(), frange(-1.2f, 1.2f), frange(-1.4f, 0.4f), irange(30, 60), {170, 240, 250, 220}, -0.02f);
+            pu.alive = false;
+            break;
+        case PU_BOMB:
+            P.bombs++;
+            message("Rune bomb  (B to throw)");
+            playSfx(SFX_PICKUP, 0.6f, 0.8f);
             pu.alive = false;
             break;
         case PU_MEAD:
@@ -2676,15 +2900,18 @@ static void updateTraps()
     for (auto& t : G.traps)
     {
         if (t.timer > 0) t.timer--;
+        if (t.hit > 0) t.hit--;
         switch (t.type)
         {
         case TR_ARROW:
         {
-            float dx = pm.cx() - t.x;
+            if (t.done) break;
+            if (!isSolid(t.x, t.y)) { breakTrap(t, (float)t.dir); break; } // the rock it was set in is gone
+            float mx = trapFace(t) + t.dir * 9.5f, dx = pm.cx() - mx;
             if (pm.alive && t.timer == 0 && std::fabs(pm.cy() - t.y) < 12 && dx * t.dir > 0 && std::fabs(dx) < 160 &&
-                lineOfSight(t.x + t.dir * 2.0f, (float)t.y, pm.cx(), pm.cy()))
+                lineOfSight(mx, t.y + 0.5f, pm.cx(), pm.cy()))
             {
-                enemyProj(PK_ARROW, t.x + t.dir * 2.0f, (float)t.y, t.dir * 6.0f, 0, 14.0f + G.stage * 3, EL_PHYS, 0.01f, 0);
+                enemyProj(PK_ARROW, mx, t.y + 0.5f, t.dir * 6.0f, 0, 14.0f + G.stage * 3, EL_PHYS, 0.01f, 0);
                 t.timer = 80;
             }
             break;
@@ -2730,6 +2957,14 @@ static void updateInteract()
 {
     for (auto& it : G.inter) // crates burnt or blasted mostly away fall apart
     {
+        if (it.type == IT_CHEST && it.fade > 0)
+        {
+            if (--it.fade == 0) it.fade = -1; // gone
+            else if (it.fade % 2 == 0) // motes of light lifting off it as it dissolves
+                spawnParticle(it.x + frange(-CHEST_HW, CHEST_HW), it.y - frange(2, 12), frange(-0.15f, 0.15f), frange(-0.9f, -0.3f), irange(22, 40), {255, (unsigned char)irange(210, 245), (unsigned char)irange(120, 190), 255}, -0.01f);
+        }
+        if (it.type == IT_CRATE && it.style > 0 && it.used && it.fade > 0 && it.fade < 30) it.fade++; // an opening door's swing
+        if (it.type == IT_PROP && it.hit > 0) it.hit--;
         if (it.type != IT_CRATE || it.used) continue;
         if (it.hit > 0) it.hit--;
         if ((G.frame + (int)it.x) % 15) continue;
@@ -2744,7 +2979,7 @@ static void updateInteract()
     for (int i = 0; i < (int)G.inter.size(); i++)
     {
         Interact& it = G.inter[i];
-        if ((it.type == IT_CHEST && it.used) || (it.type == IT_BOAT && it.used) || it.type == IT_TORCH || it.type == IT_ROPE || it.type == IT_CRATE || it.type == IT_LANTERN || it.type == IT_PROP) continue;
+        if ((it.type == IT_CHEST && it.used) || (it.type == IT_BOAT && it.used) || it.type == IT_TORCH || it.type == IT_ROPE || (it.type == IT_CRATE && !(it.style > 0 && !it.used)) || it.type == IT_LANTERN || it.type == IT_PROP || it.type == IT_DECOR) continue; // (a closed door can be opened)
         float d = std::hypot(it.x - pm.cx(), it.y - 10 - pm.cy());
         if (d < bd) { bd = d; G.nearInteract = i; }
     }
@@ -2753,17 +2988,42 @@ static void updateInteract()
     switch (it.type)
     {
     case IT_CHEST:
+    {
         it.used = true;
+        it.fade = 84; // the chest's magic spends itself: a glow, then it is gone (updateInteract, drawEntities)
         playSfx(SFX_CHEST, 0.8f);
-        spawnOreBurst(it.x, it.y - 6, irange(10, 25));
-        addPickupSpell(it.x, it.y - 6, randomSpell(G.stage));
-        if (chance(7)) addPickup(it.x, it.y - 6, PU_POTION);
-        if (chance(2)) addPickupSpell(it.x, it.y - 6, randomSpell(G.stage));
-        if (chance(12)) addPickupWeapon(it.x, it.y - 6, randomWeapon(G.stage));
-        if (chance(4)) addPickup(it.x, it.y - 6, PU_HEART);
-        if (chance(12)) { addPickup(it.x, it.y - 6, PU_AMULET); G.pickups.back().spell = randomAmulet(); }
-        if (G.stage >= 1 && chance(20)) addPickupWeapon(it.x, it.y - 6, rollLegendary(G.stage + 1, false));
-        addCoins(it.x, it.y - 6, irange(4, 8) + G.stage, 1);
+        G.shake = std::max(G.shake, 3.0f);
+        size_t first = G.pickups.size();
+        int tier = it.data > 0 ? it.data - 1 : G.stage; // the depth it was left at (the deep sea's chests are richer)
+        float ox = it.x, oy = it.y - 9;
+        spawnOreBurst(ox, oy, irange(30, 52) + tier * 4, 2.0f);
+        if (chance(3)) addPickupScroll(ox, oy, randomScroll(tier));
+        if (chance(7)) addPickup(ox, oy, PU_POTION);
+        if (chance(4)) addPickup(ox, oy, PU_BOMB);
+        if (it.style == 1 && chance(3)) addPickup(ox, oy, PU_OND); // a sea chest
+        if (chance(std::max(4, 12 - tier))) addPickupWeapon(ox, oy, randomWeapon(tier));
+        if (chance(4)) addPickup(ox, oy, PU_HEART);
+        if (chance(12)) { addPickup(ox, oy, PU_AMULET); G.pickups.back().spell = randomAmulet(); }
+        if (tier >= 1 && chance(std::max(5, 20 - tier * 3))) addPickupWeapon(ox, oy, rollLegendary(tier + 1, false));
+        addCoins(ox, oy, irange(7, 12) + tier * 2, 1);
+        for (size_t i = first; i < G.pickups.size(); i++) // all of it flung up out of the open lid, fanning out as it falls
+        {
+            Mob& b = G.pickups[i].b;
+            b.vy = frange(-6.0f, -3.4f);
+            b.vx = frange(-2.2f, 2.2f);
+        }
+        for (int k = 0; k < 26; k++) spawnParticle(ox + frange(-6, 6), oy + frange(-2, 2), frange(-1.2f, 1.2f), frange(-3.2f, -1.0f), irange(24, 48), {255, (unsigned char)irange(190, 240), (unsigned char)irange(80, 140), 255}, 0.04f);
+        break;
+    }
+    case IT_CRATE: // a door: it swings open, and the way is clear
+        it.used = true;
+        it.fade = 1;
+        for (int y = (int)it.y - it.h; y < (int)it.y; y++)
+            for (int x = (int)it.x; x < (int)it.x + it.w; x++)
+                if (world.inU(x, y) && world.matU(x, y) == M::Wood)
+                    for (int j = 0; j < world.scale; j++)
+                        for (int i = 0; i < world.scale; i++) world.at(x * world.scale + i, y * world.scale + j) = Cell{};
+        playAt(SFX_KNOCK, it.x + 1.5f, it.y - 10, 0.5f, 0.6f);
         break;
     case IT_STONE:
         if (it.used) message("Only an empty cleft remains in the stone.");
@@ -2805,35 +3065,54 @@ void travelOnward()
 // contact, and gets a bounce (restitution) and friction impulse at that point, so a chest tips off a
 // ledge, tumbles down a slope and rattles to a stop. It sleeps once settled, and wakes if the ground under
 // it goes, or a blast throws it.
-bool rigidStep(RigidBody& b, const std::vector<Vector2>& pts, float I, bool square)
+bool rigidStep(RigidBody& b, const std::vector<Vector2>& pts, float I, bool square, float buoy)
 {
     const float M = 1, e = 0.32f, mu = 0.55f;
+    const int sc = world.scale; // the terrain is tested a cell (half a unit) at a time, so a body rests on the pixels
+    const float cell = 1.0f / sc;
+    auto solidAt = [&](float ux, float uy) { return isSolidC((int)std::floor(ux * sc), (int)std::floor(uy * sc)); };
     float cx = b.x, cy = b.y;
     bool touching = false, wet = false;
     for (int sub = 0; sub < 2; sub++)
     {
         b.vy = std::min(b.vy + 0.11f, 4.0f);
+        if (buoy > 0) // afloat: lifted by the share of its outline under water, bobbing and drifting on the swell, wanting to lie flat
+        {
+            float c0 = std::cos(b.ang), s0 = std::sin(b.ang);
+            int under = 0;
+            for (auto& p : pts) under += isLiquidAt((int)std::floor(cx + p.x * c0 - p.y * s0), (int)std::floor(cy + p.x * s0 + p.y * c0));
+            float frac = (float)under / (float)pts.size();
+            b.vy -= buoy * frac;
+            b.vy += std::sin(G.frame * 0.045f + cx * 0.05f) * 0.014f * frac;
+            b.vx += std::sin(G.frame * 0.011f + cx * 0.02f) * 0.012f * frac;
+            b.va -= b.ang * 0.012f * frac;
+            b.vy *= 1 - 0.07f * frac; b.vx *= 1 - 0.015f * frac; b.va *= 1 - 0.04f * frac;
+        }
         cx += b.vx * 0.5f; cy += b.vy * 0.5f; b.ang += b.va * 0.5f;
         float cs = std::cos(b.ang), sn = std::sin(b.ang);
-        Vector2 rs[64], ns[64];
-        int nc = 0;
-        Vector2 sumN = {0, 0};
+        Vector2 rs[160], ns[160];
+        float mus[160];
+        int nc = 0, deep = 0;
+        Vector2 push = {0, 0};
         for (auto& p : pts)
         {
             Vector2 r = {p.x * cs - p.y * sn, p.x * sn + p.y * cs};
-            int wx = (int)std::floor(cx + r.x), wy = (int)std::floor(cy + r.y);
+            float px = cx + r.x, py = cy + r.y;
+            int wx = (int)std::floor(px), wy = (int)std::floor(py);
             if (isLiquidAt(wx, wy)) wet = true;
-            if (!isSolid(wx, wy)) continue;
-            Vector2 n = {0, 0}; // away from the rock: towards whichever neighbours are open
-            for (int dy = -2; dy <= 2; dy += 2)
-                for (int dx = -2; dx <= 2; dx += 2)
-                    if ((dx || dy) && !isSolid(wx + dx, wy + dy)) { n.x += dx; n.y += dy; }
+            if (!solidAt(px, py)) continue;
+            Vector2 n = {0, 0}; // away from the rock: towards whichever neighbouring cells are open
+            for (int dy = -2; dy <= 2; dy++)
+                for (int dx = -2; dx <= 2; dx++)
+                    if ((dx || dy) && !solidAt(px + dx * cell, py + dy * cell)) { n.x += dx; n.y += dy; }
             float l = std::sqrt(n.x * n.x + n.y * n.y);
             if (l < 0.01f) { n = {-r.x, -r.y}; l = std::sqrt(n.x * n.x + n.y * n.y) + 0.01f; } // buried: back towards the middle
             n.x /= l; n.y /= l;
-            rs[nc] = r; ns[nc] = n; nc++;
-            if (isSolid((int)std::floor(cx + r.x + n.x * 1.2f), (int)std::floor(cy + r.y + n.y * 1.2f))) { sumN.x += n.x; sumN.y += n.y; } // only a deep point pushes out: resting ones are left to the impulses
-            if (nc == 64) break;
+            int steps = 1; // how many cells deep: along the normal until it's open
+            while (steps < 8 && solidAt(px + n.x * steps * cell, py + n.y * steps * cell)) steps++;
+            rs[nc] = r; ns[nc] = n; mus[nc] = mu * gripAt(wx, wy); nc++;
+            if (steps > 1) { push.x += n.x * (steps - 1) * cell; push.y += n.y * (steps - 1) * cell; deep++; } // more than a cell in: lift it out, so it sits on the pixels
+            if (nc == 160) break;
         }
         if (!nc) continue;
         touching = true;
@@ -2848,11 +3127,10 @@ bool rigidStep(RigidBody& b, const std::vector<Vector2>& pts, float I, bool squa
             b.vx += j * n.x / M; b.vy += j * n.y / M; b.va += rn * j / I;
             Vector2 t = {-n.y, n.x};
             float vt = (b.vx - b.va * r.y) * t.x + (b.vy + b.va * r.x) * t.y, rt = r.x * t.y - r.y * t.x;
-            float jt = clampf(-vt / (1 / M + rt * rt / I) / nc, -mu * j, mu * j);
+            float jt = clampf(-vt / (1 / M + rt * rt / I) / nc, -mus[i] * j, mus[i] * j);
             b.vx += jt * t.x / M; b.vy += jt * t.y / M; b.va += rt * jt / I;
         }
-        float l = std::sqrt(sumN.x * sumN.x + sumN.y * sumN.y);
-        if (l > 0.01f) { cx += sumN.x / l * 0.4f; cy += sumN.y / l * 0.4f; } // ease out of the rock
+        if (deep) { cx += push.x / deep * 0.8f; cy += push.y / deep * 0.8f; } // ease out of the rock
     }
     if (wet) { b.vx *= 0.94f; b.vy *= 0.94f; b.va *= 0.94f; }
     b.va *= 0.995f;
@@ -2882,11 +3160,11 @@ static void chestPhysics(Interact& it)
     Vector2 hb = bodyHalf(it);
     const float HW = hb.x, HH = hb.y;
     std::vector<Vector2> pts;
-    float sx = 2 * HW / std::ceil(2 * HW / 2.4f), sy = 2 * HH / std::ceil(2 * HH / 2.4f);
+    float sx = 2 * HW / std::ceil(2 * HW / 1.4f), sy = 2 * HH / std::ceil(2 * HH / 1.4f);
     for (float x = -HW; x <= HW + 0.01f; x += sx) { pts.push_back({x, HH}); pts.push_back({x, -HH}); }
     for (float y = -HH + sy; y < HH - 0.5f; y += sy) { pts.push_back({-HW, y}); pts.push_back({HW, y}); }
     RigidBody b{it.x, it.y - HH, it.vx, it.vy, it.ang, it.va, it.rest};
-    rigidStep(b, pts, ((2 * HW) * (2 * HW) + (2 * HH) * (2 * HH)) / 12, true);
+    rigidStep(b, pts, ((2 * HW) * (2 * HW) + (2 * HH) * (2 * HH)) / 12, true, it.type == IT_PROP && it.style >= 3 ? 0.17f : 0);
     it.x = b.x; it.y = b.y + HH; it.vx = b.vx; it.vy = b.vy; it.ang = b.ang; it.va = b.va; it.rest = b.rest;
 }
 
@@ -2941,7 +3219,7 @@ static void updateChests()
     }
     for (auto& it : G.inter) // what's solid to walkers this frame
     {
-        if (it.type != IT_PROP || it.used || std::fabs(it.x - G.camX - G.vw / 2) > G.vw + 300 || std::fabs(it.y - G.camY - G.vh / 2) > G.vh + 300) continue;
+        if (!isBody(it) || (it.type == IT_PROP && it.used) || std::fabs(it.x - G.camX - G.vw / 2) > G.vw + 300 || std::fabs(it.y - G.camY - G.vh / 2) > G.vh + 300) continue;
         Vector2 hb = bodyHalf(it);
         float cs = std::fabs(std::cos(it.ang)), sn = std::fabs(std::sin(it.ang)), ex = hb.x * cs + hb.y * sn, ey = hb.x * sn + hb.y * cs;
         propBoxes.push_back({it.x - ex, it.y - hb.y - ey, ex * 2, ey * 2});
@@ -2974,9 +3252,8 @@ static void updateLanterns()
             it.va *= 0.996f;
             it.ang += it.va;
             float lx = it.x + std::sin(it.ang) * L, ly = it.y + std::cos(it.ang) * L;
-            if (isSolid((int)std::floor(lx + (it.va > 0 ? 2 : -2) * std::cos(it.ang)), (int)std::floor(ly))) // swung into a wall
-            {
-                if (std::fabs(it.va) * L > 1.3f) { it.x = lx; it.y = ly - 4; it.style = 1; it.vx = it.vy = 0; smashLantern(it); continue; }
+            if (isSolid((int)std::floor(lx + (it.va > 0 ? 2 : -2) * std::cos(it.ang)), (int)std::floor(ly))) // swung into a wall: it knocks and bounces back
+            { // (it never smashes this way: bats brushing lanterns burnt whole farmhouses down before you got there)
                 it.ang -= it.va;
                 it.va *= -0.4f;
                 playAt(SFX_KNOCK, lx, ly, 0.3f, 1.8f);
@@ -3022,12 +3299,13 @@ static void sandboxTools()
     if (IsKeyPressed(KEY_MINUS) && G.brushR > 0) G.brushR--;
     if (IsKeyPressed(KEY_EQUAL) && G.brushR < 20) G.brushR++;
     Vector2 mw = mouseWorld();
-    if (IsKeyPressed(KEY_E))
+    bool cmd = G.sandbox || IsKeyDown(KEY_LEFT_CONTROL); // (E and C mean other things in a run)
+    if (cmd && IsKeyPressed(KEY_E))
     {
         Mob e = makeEnemy(irand(E_BLACKKNIGHT), mw.x, mw.y);
         G.mobs.push_back(e);
     }
-    if (IsKeyPressed(KEY_C)) // a chest, dropped from the mouse
+    if (cmd && IsKeyPressed(KEY_C)) // a chest, dropped from the mouse
     {
         Interact c{IT_CHEST, mw.x, mw.y + CHEST_HH};
         c.rest = 0;
@@ -3204,7 +3482,8 @@ void shiftEntities(float dx, float dy)
 static void updateStorm()
 {
     float px = G.p.m.cx(), target = 0;
-    if (G.stormX1 > G.stormX0 && !G.inVillage) target = clampf((px - G.stormX0) / (G.stormX1 - G.stormX0), 0, 1);
+    if (G.stormX1 > G.stormX0 && !G.inVillage) target = clampf((px - G.stormX0) / (G.stormX1 - G.stormX0), 0, 1)
+                                                      * clampf(1 - (px - G.stormX1 - 2800) / 500, 0, 1); // it breaks over Dunmoor; the desert beyond is clear
     world.storm += (target - world.storm) * 0.02f;
     world.flash *= 0.8f;
     if (world.storm < 0.05f) return;
@@ -3242,6 +3521,9 @@ static void updateHavens()
     }
 }
 
+float PROF[PF_COUNT];
+const char* const PROF_NAMES[PF_COUNT] = {"player", "mobs", "projectiles", "items+lanterns", "damp caves", "cell sim", "collapse", "blasts", "particles", "corpses+misc", "renderWorld", "buildLight", "drawEntities", "HUD"};
+
 void updateGame()
 {
     if (G.hitstop > 0) { G.hitstop--; return; } // freeze frames sell the impact
@@ -3267,8 +3549,11 @@ void updateGame()
         return;
     }
 
-    if (G.sandbox) sandboxTools();
+    double pt = GetTime();
+    if (G.sandbox || G.dev) sandboxTools(); // (in a real run, with dev tools on: Ctrl+E, Ctrl+C, Ctrl+mouse)
     updatePlayer();
+    profLap(pt, PF_PLAYER);
+    if (G.devGod && pm.alive) { pm.hp = pm.maxHp; G.p.breath = 100; pm.burn = pm.poison = 0; }
     if (pm.alive && pm.hp <= 0 && G.p.amulet == AM_VALKNUT) // Odin isn't done with you
     {
         wearAmulet(-1);
@@ -3303,18 +3588,24 @@ void updateGame()
     G.mobs.erase(std::remove_if(G.mobs.begin(), G.mobs.end(), [](const Mob& m) { return !m.alive; }), G.mobs.end());
     for (auto& m : pendingMobs) G.mobs.push_back(m);
     pendingMobs.clear();
+    profLap(pt, PF_MOBS);
 
     updateProjectiles();
+    profLap(pt, PF_PROJ);
     updatePickups();
     updateTraps();
     updateInteract();
     updateChests();
     updateLanterns();
     if (!G.sandbox && !G.inVillage) updateHavens();
+    profLap(pt, PF_ITEMS);
     growDampCaves();
+    profLap(pt, PF_DAMP);
 
     simulate(((int)G.camX - 100) * world.scale, ((int)G.camY - 100) * world.scale, ((int)G.camX + G.vw + 100) * world.scale, ((int)G.camY + G.vh + 100) * world.scale);
+    profLap(pt, PF_SIM);
     updateStructures();
+    profLap(pt, PF_STRUCT);
 
     std::vector<Blast> bl;
     bl.swap(world.blasts);
@@ -3324,13 +3615,21 @@ void updateGame()
         if (n++ < 24) explode((float)b.x / world.scale, (float)b.y / world.scale, b.r, b.dmg, EL_FIRE, false, b.power); // sim blasts come in cells
         else world.blasts.push_back(b);
     }
+    profLap(pt, PF_BLAST);
     updateParticles();
+    profLap(pt, PF_FX);
     updateRagdolls();
     updateCorpses();
     updateStorm();
     updateDunes();
     updateVillagers();
     if (G.duneEnd && !G.duneCrossed && pm.x > G.duneEnd) { G.duneCrossed = true; G.bannerTimer = 240; } // the Greenmarch, at last
+    { // out to sea, or into the desert: their names come up as you arrive
+        static int lastRegion = 0;
+        int r = regionId();
+        if (r >= 2 && r != lastRegion) G.bannerTimer = 240;
+        lastRegion = r;
+    }
 
     for (auto& t : G.texts) { t.life--; t.y -= 0.3f; }
     G.texts.erase(std::remove_if(G.texts.begin(), G.texts.end(), [](const FloatText& t) { return t.life <= 0; }), G.texts.end());
@@ -3347,6 +3646,7 @@ void updateGame()
     if (G.winTimer > 0 && --G.winTimer == 0) { bankRun(); G.state = GS_WIN; }
 
     updateCamera();
+    profLap(pt, PF_CORPSE);
 }
 
 // ================================================================ drawing (render-texture space)
@@ -3487,7 +3787,7 @@ static void drawStall(float fx, float fy, int kind, int layer)
 
     // layer 2: what's for sale, drawn as the real thing - an empty peg once it's yours - and every flame and glow
     static const float WPOS[6][3] = {{-18, -15, -PI / 2}, {4, -15, 0}, {30, -8, -PI / 2}, {-12, -15, -PI / 2}, {7, -26, 0}, {-5, -15, -PI / 2}};
-    static const int SCROLL_X[5] = {-18, -13, -8, 4, 9};
+    static const int SCROLL_X[6] = {-20, -15, -10, -5, 4, 9};
     for (int i = 0, slot = 0; i < UNLOCK_COUNT; i++)
     {
         const Unlock& un = UNLOCKS[i];
@@ -3503,14 +3803,17 @@ static void drawStall(float fx, float fy, int kind, int layer)
             drawWeaponSprite(w, {fx + p[0], fy + p[1]}, p[2], 0.5f, false);
             break;
         }
-        case UK_STAFF: { Weapon w; w.type = W_STAFF; w.staff.gem = SKYBLUE; drawWeaponSprite(w, {fx + 27, fy - 8}, -PI / 2, 0.5f, false); break; }
-        case UK_SPELL: // a scroll, sealed in the spell's colour
+        case UK_SCROLL: // a scroll, sealed in its own colour
         {
-            int sx = SCROLL_X[std::min(std::max(s - 1, 0), 4)];
+            int sx = SCROLL_X[std::min(std::max(s, 0), 5)];
             R(sx, -17, 4, 3, {226, 214, 180, 255}); R(sx, -17, 4, 1, {246, 238, 214, 255});
-            R(sx + 1, -17, 1, 3, SPELLS[un.a].col);
+            R(sx + 1, -17, 1, 3, SCROLLS[un.a].col);
             break;
         }
+        case UK_MAP: // a map pinned to the post, its corners curling
+            R(26, -34, 9, 7, {214, 196, 150, 255}); R(26, -34, 9, 1, {240, 226, 186, 255}); R(34, -33, 1, 6, {150, 126, 84, 255});
+            R(28, -32, 3, 1, {120, 86, 50, 255}); R(30, -31, 1, 2, {120, 86, 50, 255}); R(32, -30, 2, 1, {50, 100, 170, 255}); R(29, -29, 1, 1, {190, 50, 40, 255});
+            break;
         case UK_HOOK: DrawCircleLines(x + 24, y - 28, 3, {150, 150, 160, 255}); R(23, -34, 2, 4, {150, 150, 160, 255}); break;
         case UK_ARMOUR: // a mail shirt hung on the back
         {
@@ -3550,18 +3853,9 @@ void prepareStallArt()
     for (int kind = 0; kind < 3; kind++)
         for (int layer = 0; layer < 2; layer++)
         {
-            BeginTextureMode(canvas);
-            ClearBackground(BLANK);
-            drawStall(STALL_OX, STALL_OY, kind, layer);
-            EndTextureMode();
-            Image img = LoadImageFromTexture(canvas.texture);
-            ImageFlipVertical(&img);
-            ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
-            std::vector<Color> fine;
-            detail2x((const Color*)img.data, STALL_W, STALL_H, fine);
-            UnloadImage(img);
-            Image out = {fine.data(), STALL_W * 2, STALL_H * 2, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+            Image out = stallImageFine(kind, layer);
             stallArt[kind][layer] = LoadTextureFromImage(out);
+            UnloadImage(out);
             SetTextureFilter(stallArt[kind][layer], TEXTURE_FILTER_POINT);
         }
     UnloadRenderTexture(canvas);
@@ -3576,10 +3870,52 @@ static void drawStallLayer(float x, float y, int kind, int layer)
 
 
 
+// A house door, hinged on the outer edge of its doorway. Shut it is a slab filling the doorway (3 wide); opened (it.fade counts the
+// swing) it turns edge-on and out past the wall until it stands wide open beside the doorway, seen at an angle and a little nearer.
+static void drawDoor(const Interact& it, float x, float y)
+{
+    if (it.used && !it.fade) return; // smashed
+    float t = clampf(it.fade / 30.0f, 0, 1), a = t * t * (3 - 2 * t);
+    int inward = it.style == 1 ? 1 : -1;
+    float hinge = it.style == 1 ? x : x + it.w, H = (float)it.h, sw = 3 - 11 * a, mid = y - H / 2; // + into the doorway, - out past the wall
+    float n = std::fabs(sw);
+    for (float c = 0; c < std::max(1.0f, n); c += 1)
+    {
+        float hs = sw < 0 ? 1 + 0.1f * (c / std::max(1.0f, n)) : 1, top = mid - H * hs / 2, h = H * hs; // the free edge swings nearer, so a touch taller
+        float px = hinge + (sw > 0 ? inward * c - (inward < 0 ? 1 : 0) : -inward * c - (inward > 0 ? 1 : 0));
+        bool edge = c < 1 || c + 1 >= n;
+        Color col = edge ? Color{52, 34, 20, 255} : ((int)c % 3 == 0 ? Color{104, 68, 40, 255} : Color{132, 90, 54, 255});
+        col = lerpColor(col, Color{66, 44, 28, 255}, 0.4f * (1 - std::fabs(1 - 2 * a))); // dimmest as it passes edge-on
+        DrawRectangleRec({px, top, 1, h}, col);
+        DrawRectangleRec({px, top, 1, 1}, {168, 122, 78, 255}); // lit top edge
+        for (float by : {0.2f, 0.8f}) DrawRectangleRec({px, top + h * by, 1, 1.5f}, {44, 44, 52, 255}); // iron straps
+    }
+    if (sw < -3 || sw > 1.5f) // the ring handle, on the free edge
+    {
+        float fe = hinge + (sw > 0 ? inward * (n - 1.5f) : -inward * (n - 1.5f));
+        DrawRectangleRec({fe - (fe > hinge ? 1.0f : 0.0f), mid + 1, 1.5f, 1.5f}, {190, 156, 70, 255});
+    }
+    if (!it.used && it.data < 3) // splits showing, one more pair per blow
+        for (int k = 0; k < (3 - it.data) * 2; k++)
+        {
+            float fx = x + 1.5f + (hash2((int)it.x, k, 77) - 0.5f) * 6, fy = y - H * (0.15f + 0.6f * hash2((int)it.x, k, 78));
+            for (int s = 0; s < 4; s++) DrawRectangle((int)(fx + (s % 2 ? 1 : -1) * 0.5f * s), (int)(fy + s * 1.5f), 1, 2, {28, 18, 10, 230});
+        }
+    if (!it.used && it.hit > 0)
+    {
+        BeginBlendMode(BLEND_ADDITIVE);
+        DrawRectangle((int)x, (int)(y - H), it.w, (int)H, {255, 230, 190, (unsigned char)(it.hit * 12)});
+        EndBlendMode();
+    }
+}
+
 void drawEntities(int camX, int camY)
 {
     // off screen (x, y relative to the camera): skipped, or a long run's whole world gets drawn every frame
     auto off = [](float x, float y, float m) { return x < -m || y < -m || x > G.vw + m || y > G.vh + m; };
+    drawBodies(camX, camY); // falling slabs
+    for (auto& t : G.traps)
+        if (t.type == TR_ARROW && !off(t.x - camX, t.y - camY, 16)) drawDartTrap(trapFace(t) - camX, t.y + 0.5f - camY, t.dir, t.done, t.hit, t.hp);
     // interactables
     for (auto& it : G.inter)
     {
@@ -3589,10 +3925,25 @@ void drawEntities(int camX, int camY)
         {
         case IT_CHEST:
         {
-            drawChest(x, y - CHEST_HH, it.ang, it.used);
+            if (it.fade < 0) break; // dissolved
+            float sink = it.style == 1 ? 6.5f : 0.0f; // the sea's chests lie half buried in the sand
+            if (it.fade > 0)
+            {
+                float t = it.fade / 84.0f, k = 1 - t, pk = std::sin(PI * k); // t: 1 -> 0 over the animation; pk peaks mid-way
+                BeginBlendMode(BLEND_ADDITIVE);
+                DrawCircleGradient((int)x, (int)(y - CHEST_HH), 8 + 22 * pk + 6 * k, {255, 210, 120, (unsigned char)(150 * pk + 30 * (1 - k))}, {255, 190, 90, 0});
+                EndBlendMode();
+                Color tint = {255, (unsigned char)(255 - 20 * k), (unsigned char)(255 - 110 * k), (unsigned char)(255 * std::min(1.0f, t / 0.7f))}; // warms to gold, then fades out
+                drawChest(x, y - CHEST_HH, it.ang, true, tint, sink);
+                BeginBlendMode(BLEND_ADDITIVE);
+                if (pk > 0.25f) DrawRectangle((int)x - 1, (int)(y - CHEST_HH - 20 * k * pk) - 1, 2, 2, {255, 240, 190, (unsigned char)(220 * pk)});
+                EndBlendMode();
+            }
+            else drawChest(x, y - CHEST_HH, it.ang, it.used, WHITE, sink);
             break;
         }
         case IT_ANVIL: drawSpriteBig(SPR_ANVIL, x, y, false, WHITE); break;
+        case IT_DECOR: drawDecor(it, x, y); break;
         case IT_SHRINE:
         {
             drawSpriteBig(SPR_SHRINE, x, y, false, WHITE);
@@ -3605,12 +3956,23 @@ void drawEntities(int camX, int camY)
         case IT_PROP:
         {
             Vector2 hb = bodyHalf(it);
-            float cx = x, cy = y - hb.y, cs = std::cos(it.ang), sn = std::sin(it.ang);
+            float j = it.hit > 0 ? (it.hit % 2 ? 0.5f : -0.5f) : 0; // a struck one shakes
+            float cx = x + j, cy = y - hb.y, cs = std::cos(it.ang), sn = std::sin(it.ang);
             auto part = [&](float ox, float oy, float w, float h, Color c) { // a piece of it, turned with it (offsets from the centre)
                 DrawRectanglePro({cx + ox * cs - oy * sn, cy + ox * sn + oy * cs, w, h}, {0, 0}, it.ang * RAD2DEG, c);
             };
             if (it.used) break;
             float W = hb.x * 2, H = hb.y * 2;
+            if (it.style >= 3) // a broken plank adrift: grey-brown, wet and splintered, a rusty nail left in it
+            {
+                part(-hb.x, -hb.y, W, H, {58, 40, 26, 255});
+                part(-hb.x + 0.5f, -hb.y, W - 1, 1.5f, {128, 94, 58, 255});
+                part(-hb.x + 0.5f, -hb.y + 1.5f, W - 1, 1.5f, {82, 58, 36, 255});
+                for (float sx = -hb.x + 4; sx < hb.x - 2; sx += 5) part(sx, -hb.y, 0.6f, H, {44, 30, 20, 255}); // grain breaks
+                part(hb.x - 1.5f, -hb.y, 1.5f, 1.0f, {0, 0, 0, 0}); part(-hb.x, hb.y - 1.0f, 1.5f, 1.0f, {20, 14, 10, 255}); // ragged ends
+                part(-hb.x * 0.3f, -hb.y + 0.5f, 1, 1, {150, 110, 90, 255});
+                break;
+            }
             if (it.style % 3 == 1) // a barrel: staves, two iron hoops, a darker rim
             {
                 part(-hb.x, -hb.y, W, H, {84, 54, 30, 255});
@@ -3632,7 +3994,21 @@ void drawEntities(int camX, int camY)
                                {cx + (hb.x - 1) * cs - (-hb.y + 1) * sn, cy + (hb.x - 1) * sn + (-hb.y + 1) * cs}, 1.2f, {92, 62, 34, 255}); // the brace
                 }
             }
-            if (it.data == 1) { part(-hb.x * 0.5f, -hb.y + 1, 0.8f, hb.y, {30, 20, 12, 255}); part(-hb.x * 0.5f, 0, hb.x * 0.6f, 0.8f, {30, 20, 12, 255}); } // splitting
+            int lost = (it.style % 3 == 2 ? 2 : 3) - it.data; // blows taken
+            const Color CR = {30, 20, 12, 255};
+            if (lost >= 1) // a split runs down from the top
+            {
+                part(-hb.x * 0.3f, -hb.y + 0.5f, 0.8f, hb.y * 0.7f, CR);
+                part(-hb.x * 0.3f, -hb.y * 0.3f, hb.x * 0.45f, 0.8f, CR);
+                part(hb.x * 0.15f, -hb.y * 0.3f, 0.8f, hb.y * 0.6f, CR);
+            }
+            if (lost >= 2) // a second, and a plank stoved in to the dark inside
+            {
+                part(hb.x * 0.3f, hb.y * 0.1f, hb.x * 0.45f, hb.y * 0.5f, {18, 12, 8, 255});
+                part(-hb.x + 1, hb.y * 0.35f, hb.x * 0.9f, 0.8f, CR);
+                part(-hb.x * 0.7f, hb.y * 0.35f, 0.8f, hb.y * 0.6f, CR);
+            }
+            if (it.hit > 0) { BeginBlendMode(BLEND_ADDITIVE); part(-hb.x, -hb.y, hb.x * 2, hb.y * 2, {255, 230, 190, (unsigned char)(it.hit * 10)}); EndBlendMode(); }
             break;
         }
         case IT_LANTERN:
@@ -3664,15 +4040,22 @@ void drawEntities(int camX, int camY)
         }
         case IT_TORCH:
         {
-            DrawRectangle((int)x - 1, (int)y - 11, 2, 11, {92, 60, 34, 255});
-            DrawRectangle((int)x - 2, (int)y - 12, 4, 2, {70, 70, 76, 255});
-            float fl = hash2((int)x, G.frame / 4, 9);
-            BeginBlendMode(BLEND_ADDITIVE);
-            DrawCircleGradient((int)x, (int)y - 15, 22 + fl * 3, {255, 140, 50, 70}, {255, 140, 50, 0});
-            EndBlendMode();
-            DrawRectangle((int)x - 1, (int)y - 16 - (fl > 0.5f), 3, 4, {255, 120, 30, 255});
-            DrawRectangle((int)x - (fl > 0.7f ? 1 : 0), (int)y - 15, 2, 2, {255, 230, 120, 255});
-            if (fl > 0.9f) spawnParticle(x + camX + 0.5f, y + camY - 17, frange(-0.2f, 0.2f), -0.5f, 24, {255, 170, 60, 255}, -0.005f);
+            auto px = [](float X, float Y, float W, float H, Color c) { DrawRectangleRec({X, Y, W, H}, c); }; // half-unit art
+            float tx = std::floor(x);
+            px(tx - 2.5f, y - 1, 5, 1, {58, 52, 48, 255});       // a stone footing
+            px(tx - 1.5f, y - 2, 3, 1, {84, 78, 74, 255});
+            px(tx - 1, y - 11, 2, 9.5f, {96, 62, 36, 255});       // the pole: lit left, shaded right
+            px(tx - 1, y - 11, 0.5f, 9.5f, {140, 96, 58, 255});
+            px(tx + 0.5f, y - 11, 0.5f, 9.5f, {62, 40, 24, 255});
+            for (int k = 0; k < 3; k++) px(tx - 1, y - 6.5f - k * 1.5f, 2, 0.5f, {50, 32, 20, 255}); // lashings
+            px(tx - 2, y - 12.5f, 4, 1.5f, {72, 74, 82, 255});     // the iron cuff
+            px(tx - 2, y - 12.5f, 4, 0.5f, {128, 132, 144, 255});
+            px(tx - 1.5f, y - 11.5f, 3, 0.5f, {40, 40, 46, 255});
+            px(tx - 2, y - 15, 4, 2.5f, {38, 28, 22, 255});        // the charred, pitch-soaked head
+            px(tx - 1.5f, y - 15.5f, 3, 1, {28, 20, 16, 255});
+            px(tx - 1.5f, y - 14.5f, 0.5f, 1, {212, 90, 28, 255}); // embers glowing in the char
+            px(tx + 0.5f, y - 14, 0.5f, 0.5f, {240, 140, 40, 255});
+            drawFlame(tx, y - 15, 1.0f, (int)it.x);
             break;
         }
         case IT_SHOP:
@@ -3765,7 +4148,17 @@ void drawEntities(int camX, int camY)
                 DrawRectangle((int)(x + sway), yy, 1, 1, c);
             }
             break;
-        case IT_CRATE: // flashes when struck
+        case IT_CRATE: // flashes when struck; cracks open as it takes blows
+            if (it.style > 0) { drawDoor(it, x, y); break; }
+            if (!it.used && it.data < (it.h > 12 ? 3 : 2))
+            {
+                int lost = (it.h > 12 ? 3 : 2) - it.data; // (placeObstacle gives it 3 blows if tall, 2 if not)
+                for (int k = 0; k < lost * 2; k++) // zigzag splits, one more pair per blow
+                {
+                    float fx = x + it.w * (0.2f + 0.6f * hash2((int)it.x, k, 77)), fy = y - it.h * (0.15f + 0.5f * hash2((int)it.x, k, 78));
+                    for (int s = 0; s < 4; s++) DrawRectangle((int)(fx + (s % 2 ? 1 : -1) * 0.5f * s), (int)(fy + s * 1.5f), 1, 2, {28, 18, 10, 230});
+                }
+            }
             if (!it.used && it.hit > 0)
             {
                 BeginBlendMode(BLEND_ADDITIVE);
@@ -3786,11 +4179,41 @@ void drawEntities(int camX, int camY)
     {
         if (l.smoke && G.frame % 4 == 0 && !off(l.x - camX, l.y - camY, 60)) // a hall's hearth, smoking through the roof
             spawnParticle(l.x + frange(-1, 1), l.y, frange(0.02f, 0.12f), frange(-0.35f, -0.2f), irange(110, 170), {84, 80, 82, (unsigned char)irange(70, 120)}, -0.002f);
+        if (l.beam > 0 && !off(l.x - camX, l.y - camY, 60)) // a window's shaft of moonlight, slanting down-left to the floor
+        {
+            float bx = l.x - camX, cy = l.y - camY, ww = l.w, wh = l.wh, len = l.beam * 1.3f, k = 0.9f, br = 0.9f + 0.1f * std::sin(G.frame * 0.03f + l.x);
+            float by = cy + wh / 2; // rays leave from the sill
+            BeginBlendMode(BLEND_ADDITIVE);
+            DrawCircleGradient((int)bx, (int)cy, std::max(ww, wh) * 1.3f, {170, 205, 255, (unsigned char)(48 * br)}, {170, 205, 255, 0}); // a halo round the glass
+            DrawRectangleRec({bx - ww / 2, cy - wh / 2, ww, wh}, {150, 190, 255, (unsigned char)(70 * br)});                                  // the whole pane glowing
+            DrawRectangleRec({bx - ww / 2 + 1, cy - wh / 2 + 1, ww - 2, wh - 2}, {200, 225, 255, (unsigned char)(40 * br)});
+            for (float j = 0; j < len; j += 1)
+            {
+                float t = j / len, fall = std::pow(1 - t, 1.8f), xo = -k * j, spread = 1 + 0.5f * t; // the rays fan out and die away with distance
+                for (float c = -ww / 2; c < ww / 2; c += 1)
+                {
+                    float ray = 0.35f + 0.65f * vnoise(c * 0.8f + l.x * 0.37f, 7.0f + G.frame * 0.004f, 91); // streaks, some brighter than others
+                    unsigned char a = (unsigned char)(56 * br * fall * ray);
+                    if (a) DrawRectangleRec({bx + c * spread + xo, by + j, 1, 1}, {170, 205, 255, a});
+                }
+            }
+            EndBlendMode();
+            if (G.frame % 18 == 0) spawnParticle(l.x - 0.9f * frange(0, len) + frange(-ww / 2, ww / 2), l.y + wh / 2 + frange(0, len * 0.7f), frange(-0.03f, 0.03f), frange(0.0f, 0.04f), irange(90, 160), {200, 220, 255, 140}, 0);
+        }
         if (!l.flame || off(l.x - camX, l.y - camY, 8)) continue;
-        float x = l.x - camX, y = l.y - camY, fl = hash2((int)l.x, G.frame / 4, 9);
-        DrawRectangle((int)x - 1, (int)y - (fl > 0.5f), 3, 4, {255, 120, 30, 255});
-        DrawRectangle((int)x - (fl > 0.7f ? 1 : 0), (int)y + 1, 2, 2, {255, 230, 120, 255});
-        if (fl > 0.92f) spawnParticle(l.x + 0.5f, l.y - 1, frange(-0.2f, 0.2f), -0.5f, 24, {255, 170, 60, 255}, -0.005f);
+        float x = l.x - camX, y = l.y - camY;
+        if (l.r < 84) { drawFlame(std::floor(x) + 0.5f, y + 3, 1.0f, (int)l.x); continue; } // a sconce's torch
+        float sc = l.r < 88 ? 1.0f : 1.0f + (l.r - 80) / 22.0f; // a fireplace, a camp fire, a hall's hearth
+        if (l.r >= 88 && l.r < 100) // a camp fire: logs laid crosswise under it
+            for (int k = 0; k < 2; k++)
+            {
+                DrawLineEx({x - 7, y + 3 - 3.0f * k}, {x + 7, y + 1 + 3.0f * k}, 1.6f, {70, 46, 28, 255});
+                DrawLineEx({x - 7, y + 2.4f - 3.0f * k}, {x + 7, y + 0.4f + 3.0f * k}, 0.6f, {120, 82, 50, 255});
+            }
+        drawFlame(x - 3.0f * sc * 0.4f, y + 2, sc * 0.9f, (int)l.x);
+        drawFlame(x + 3.0f * sc * 0.4f, y + 2, sc * 0.8f, (int)l.x + 9);
+        drawFlame(x, y + 2, sc, (int)l.x + 4);
+        if (G.frame % 5 == 0 && !off(x, y, 60)) spawnParticle(l.x + frange(-3, 3), l.y - 4 * sc, frange(-0.15f, 0.15f), frange(-0.6f, -0.3f), irange(24, 50), {255, (unsigned char)(170 + irand(60)), 60, 255}, -0.004f);
     }
     drawTumbleweeds(camX, camY);
 
@@ -3800,8 +4223,10 @@ void drawEntities(int camX, int camY)
         if (off(x, y, 32)) continue;
         switch (pu.kind)
         {
-        case PU_SPELL: drawSpriteBig(SPR_SCROLL, x + 4, y + 8, false, SPELLS[pu.spell].col); break;
+        case PU_SCROLL: drawScroll(pu.spell, x + 4, y + 5 + std::sin((G.frame + pu.age) * 0.08f) * 0.8f, 11, 1.0f); break;
         case PU_POTION: drawSpriteBig(SPR_POTION, x + 4, y + 8, false, WHITE); break;
+        case PU_BOMB: drawBomb(x + 4, y + 4.5f, 0, 0.8f); break;
+        case PU_OND: drawOnd(x + 4, y + 3.5f + std::sin(G.frame * 0.06f + pu.b.x) * 0.8f, 0.8f); break;
         case PU_HEART: drawSpriteBig(SPR_HEART, x + 4, y + 8, false, WHITE); break;
         case PU_AMULET:
         {
@@ -3847,7 +4272,7 @@ void drawEntities(int camX, int camY)
     drawVillagers(camX, camY);
     for (auto& m : G.mobs)
         if (!off(m.cx() - camX, m.cy() - camY, 96)) drawMobAnimated(m, camX, camY);
-    drawPlayerRig(camX, camY);
+    drawPlayerViking(camX, camY);
     for (auto& m : G.mobs)
         if (m.burn > 0 && !off(m.cx() - camX, m.cy() - camY, 40)) drawBurning(m, camX, camY);
     if (G.p.m.alive && G.p.m.burn > 0) drawBurning(G.p.m, camX, camY);
@@ -3879,6 +4304,7 @@ void drawEntities(int camX, int camY)
             DrawRectangle((int)x - 1, (int)y - 1, 2, 2, p.kind == PK_BOLT ? p.col : Color{180, 180, 190, 255});
             break;
         case PK_BOMB:
+            if (p.friendly) { drawBomb(x, y, p.x * 0.15f, 0.6f); break; } // a rune bomb, turning as it rolls
             DrawCircle((int)x, (int)y, 2.5f, {30, 30, 34, 255});
             if (G.frame % 6 < 3) DrawRectangle((int)x, (int)y - 4, 1, 2, {255, 200, 60, 255});
             break;
@@ -3892,6 +4318,16 @@ void drawEntities(int camX, int camY)
                 DrawLineEx({x - p.vx * 1.5f, y - p.vy * 1.5f}, {x, y}, 4, {200, 200, 120, 90});
                 EndBlendMode();
                 DrawLineEx({x - p.vx, y - p.vy}, {x, y}, 1.5f, {255, 255, 220, 255});
+            }
+            else if (p.spell == SP_BLOODSPEAR)
+            {
+                BeginBlendMode(BLEND_ADDITIVE);
+                DrawLineEx({x - ux * 14, y - uy * 14}, {x, y}, 5, {200, 30, 40, 70});
+                EndBlendMode();
+                DrawLineEx({x - ux * 12, y - uy * 12}, {x + ux * 3, y + uy * 3}, 1.6f, {120, 36, 30, 255});     // the haft
+                DrawLineEx({x - ux * 12, y - uy * 12}, {x - ux * 5, y - uy * 5}, 1.2f, {236, 214, 176, 255});    // bound with pale cord
+                DrawLineEx({x + ux * 1, y + uy * 1}, {x + ux * 6, y + uy * 6}, 2.2f, {214, 40, 52, 255});         // the blade, blood-bright
+                DrawLineEx({x + ux * 3, y + uy * 3}, {x + ux * 6, y + uy * 6}, 1.0f, {255, 230, 220, 255});
             }
             else if (p.spell == SP_BOMB)
             {

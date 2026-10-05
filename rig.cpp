@@ -1,10 +1,11 @@
 // Character art and animation:
-//  - the player is a jointed rig drawn into a small pixel canvas
-//  - creature sprites are hand-shaded with no outline (bosses are drawn at 2x)
-//  - ragdolls: verlet stick figures that tumble through the falling-sand world
+//  - the hero and every creature are painted frame by frame (tools/anim.py -> sprites_anim.h)
+//  - when a creature dies its body becomes a Verlet ragdoll of parts cut from the same painting
+//  - the player's cape is cloth, simulated and drawn into a small pixel canvas
 #include "game.h"
 #include "sprites.h"
 #include "sprites_hd.h"
+#include "sprites_anim.h"
 #include "util.h"
 #include <cmath>
 #include <algorithm>
@@ -50,15 +51,6 @@ static void seg(Vector2 a, Vector2 b, Color c)
     }
 }
 
-static void thick(Vector2 a, Vector2 b, int w, Color c, float f)
-{
-    for (int k = 0; k < w; k++)
-    {
-        float o = (k - (w - 1) / 2.0f) * f;
-        seg({a.x + o, a.y}, {b.x + o, b.y}, k == 0 && w > 1 ? mul(c, 0.8f) : c);
-    }
-}
-
 static void canvasBegin(int ox, int oy)
 {
     std::memset(canvas, 0, sizeof(canvas));
@@ -94,7 +86,7 @@ static Color coat(Color c, const Mob& m, int x, int y, int h)
     if (m.burn)
     {
         float fl = 0.5f + 0.5f * std::sin(f * 0.6f + x * 0.9f + y * 0.4f), low = (float)y / h;
-        c = lerpColor(c, fl > 0.6f ? Color{255, 220, 110, c.a} : Color{255, 110, 30, c.a}, 0.25f + 0.3f * fl * (1 - low * 0.5f));
+        c = lerpColor(c, fl > 0.75f ? Color{255, 176, 70, c.a} : Color{232, 84, 26, c.a}, 0.08f + 0.14f * fl * (1 - low * 0.5f)); // a warm cast; the flames themselves do the burning
     }
     return c;
 }
@@ -114,63 +106,24 @@ static void canvasEnd(bool flash)
         }
 }
 
-// ---------------------------------------------------------------- player heads (6 wide, facing right)
-// h/H hair & beard, s/S skin, u eye, A/D/L armour, c/C mail, v eye slot, g glow, n horn
-
-static const char* HEAD_BARE[] = { // braided hair and a full beard
-    ".hHHh.",
-    "hHhhHh",
-    "hhssus",
-    "hhSsss",
-    "hhSSs.",
-    "h.hHh.",
-    "..hh..",
-};
-static const char* HEAD_SPANGEN[] = { // riveted cap with a nasal guard
-    "..LL..",
-    ".LAAD.",
-    "LAAAAD",
-    "DDDDDA",
-    "hhssuA",
-    "hhSssS",
-    "h.hHh.",
-    "..hh..",
-};
-static const char* HEAD_GJERMUNDBU[] = { // rounded helm with spectacle guards
-    "..LL..",
-    ".LAAD.",
-    "LAAAAD",
-    "DDDDDD",
-    "hhsAvA",
-    "hhSsAS",
-    "h.hHh.",
-    "..hh..",
-};
-static const char* HEAD_RUNE[] = { // closed helm, mail aventail, eyes burning with the armour's element
-    "..LL..",
-    ".LAAD.",
-    "LAAAAD",
-    "DDDDDD",
-    "DAAggA",
-    "DAAAAD",
-    "cCcCc.",
-    ".CcC..",
-};
-static const char* HEAD_HORNED[] = { // the adamantium war-helm
-    "n....n",
-    "nLLLLn",
-    "LAAAAD",
-    "DDDDDD",
-    "DAAggA",
-    "DAAAAD",
-    "cCcCc.",
-    ".CcC..",
-};
-
 // ---------------------------------------------------------------- player rig
 
-// angles are measured from straight down, positive = towards facing
-struct Pose { float fThigh, fShin, bThigh, bShin, lean, backArm, frontArm, bob; };
+// The limb rigs' joints (see "limb rigs" below); the player is drawn with them too.
+enum { J_NECK, J_PELVIS, J_HEADB, J_HEADT, J_SHF, J_ELF, J_HAF, J_SHN, J_ELN, J_HAN, J_HIPF, J_KNF, J_FTF, J_HIPN, J_KNN, J_FTN, J_WB, J_WT };
+static_assert(J_WT + 1 == RJ_COUNT, "joint count");
+// The player's parts paint their armour in neutral grey (palette alpha 254) and runes in white (253): drawn with
+// these set, the grey takes the armour's metal and the runes its element's glow.
+static Color rigMetal = BLANK, rigGlow = BLANK;
+static void drawRig(const RigSpec& R, const Vector2* J, int f, Color tint, bool white, float flap);
+static float boneLen(const RigPart& p);
+static Color coatTint(const Mob& m);
+static Vector2 lerpV(Vector2 a, Vector2 b, float t);
+static int clipFrame(const AnimSheet& A, int clip, float k);
+static void animJoints(const AnimSheet& A, int fr, float x, float y, int facing, Vector2* J);
+static void drawSheet(const AnimSheet& A, int fr, float x, float y, int facing, Color tint, bool white);
+
+
+static const bool HERO_CAPE = false; // the robed hero (tools/userart.py) wears none; the cloth sim is kept for another look
 
 static void simulateCape(Player& P, Vector2 anchor, float f)
 {
@@ -224,8 +177,6 @@ struct Look
     int set;
     Color tunic, tunicD, tunicL, trim, pants, wrap, boot, bracer, cloak, fur, skin, skinD, hairD, hairL, A, Ad, Ah, glow;
     bool metal;
-    const char* const* head;
-    int headRows;
 };
 
 static Look playerLook()
@@ -256,47 +207,29 @@ static Look playerLook()
     {
     case AS_WOOL:
         k.tunic = {84, 98, 64, 255}; k.trim = {184, 146, 70, 255}; k.cloak = {132, 38, 36, 255};
-        k.head = HEAD_BARE; k.headRows = 7;
+       
         break;
     case AS_LEATHER:
         k.tunic = {128, 84, 50, 255}; k.trim = k.A; k.cloak = {44, 60, 96, 255};
-        k.head = HEAD_SPANGEN; k.headRows = 8;
+       
         break;
     case AS_MAIL:
         k.tunic = k.A; k.trim = k.Ad; k.cloak = {70, 66, 64, 255}; k.bracer = k.Ad;
-        k.head = HEAD_GJERMUNDBU; k.headRows = 8;
+       
         break;
     case AS_LAMELLAR:
         k.tunic = k.A; k.trim = k.glow; k.cloak = mul(k.glow, 0.42f); k.bracer = k.Ad; k.fur = {70, 64, 60, 255};
-        k.head = HEAD_RUNE; k.headRows = 8;
+       
         break;
     default:
         k.tunic = k.A; k.trim = {214, 180, 80, 255}; k.cloak = {32, 30, 38, 255}; k.bracer = k.A; k.fur = {60, 56, 54, 255};
         k.pants = {48, 44, 50, 255}; k.wrap = k.Ad;
-        k.head = HEAD_HORNED; k.headRows = 8;
+       
         break;
     }
     k.tunicD = mul(k.tunic, 0.66f);
     k.tunicL = brighten(k.tunic, 34);
     return k;
-}
-
-// Body pixel colour for the armour set at torso row r (0 = shoulders) and column c (front is +).
-static Color bodyColor(const Look& k, int r, int c, int half)
-{
-    bool front = c == half, back = c == -half;
-    Color base = k.tunic;
-    switch (k.set)
-    {
-    case AS_WOOL: base = (r + c * 3) % 7 == 0 ? mul(k.tunic, 0.9f) : k.tunic; break; // a coarse weave
-    case AS_LEATHER: base = (r % 3 == 1 && (c + 8) % 2 == 0 && !front && !back) ? mul(k.A, 0.85f) : ((r + c * 2) % 5 == 0 ? mul(k.tunic, 0.9f) : k.tunic); break; // riveted hide
-    case AS_MAIL: base = (r + c + 16) % 2 ? k.A : mul(k.A, 0.78f); break;
-    case AS_LAMELLAR: base = r % 2 ? k.Ad : (((c + 9 + r / 2) % 3) ? k.A : mul(k.A, 0.82f)); break;
-    default: base = ((c + 9 + (r / 2) % 2) % 2 == 0 && r % 2) ? k.Ad : k.A; break; // overlapping scales
-    }
-    if (front) return brighten(base, 30);
-    if (back) return mul(base, 0.68f);
-    return base;
 }
 
 // The weapon carried on the back while out of combat.
@@ -364,79 +297,64 @@ void drawPlayerRig(int camX, int camY)
     const Weapon* wpn = hasWeapon ? &P.hotbar[P.sel] : nullptr;
     bool drawn = hasWeapon && (P.combatT > 0 || P.swingT > 0);
 
-    Pose ps;
-    if (P.rollT > 0) ps = {1.6f, -1.5f, 1.3f, -1.2f, 0.9f, 1.4f, 1.4f, 0};
-    else if (P.prone) // crawling on elbows, legs trailing behind
+    // which frame of the hero's sheets (tools/anim.py): one per armour set, the near arm on a layer of its own
+    Look k = playerLook();
+    static const AnimSheet* BODY[] = {&ANIM_HERO_WOOL, &ANIM_HERO_LEATHER, &ANIM_HERO_MAIL, &ANIM_HERO_LAMELLAR, &ANIM_HERO_SCALE};
+    static const AnimSheet* ARM[] = {&ANIM_HERO_WOOL_ARM, &ANIM_HERO_LEATHER_ARM, &ANIM_HERO_MAIL_ARM, &ANIM_HERO_LAMELLAR_ARM, &ANIM_HERO_SCALE_ARM};
+    static const AnimSheet* AIM[] = {&ANIM_HERO_WOOL_AIM, &ANIM_HERO_LEATHER_AIM, &ANIM_HERO_MAIL_AIM, &ANIM_HERO_LAMELLAR_AIM, &ANIM_HERO_SCALE_AIM};
+    const AnimSheet &A = *BODY[k.set], &AA = *ARM[k.set], &AM = *AIM[k.set];
+    auto cyc = [](float x) { return x - std::floor(x); };
+    const float TAU = 2 * PI;
+    bool moving = std::fabs(m.vx) > 0.08f;
+    int clip = AC_IDLE;
+    float kk = cyc(t / 60.0f);
+    bool swinging = hasWeapon && isMelee(wpn->type) && P.swingT > 0 && !air && !P.prone && !P.crouch && !m.inLiquid && !P.climb && !P.onWall && P.hook != 2;
+    if (P.rollT > 0)
     {
-        float q = P.runPhase * 1.3f, mv = std::fabs(m.vx) > 0.05f ? 1.0f : 0.0f;
-        ps = {-1.35f + 0.25f * std::sin(q) * mv, -1.5f, -1.45f - 0.25f * std::sin(q) * mv, -1.55f, 1.42f,
-              1.35f + 0.45f * std::sin(q) * mv, 1.35f - 0.45f * std::sin(q) * mv, 0};
+        int e = 19 - P.rollT; // 0..18: dip into the tuck, a fast tight spin, skid back up
+        if (e < 2) clip = AC_ROLLIN, kk = e / 2.0f;
+        else if (e < 16) clip = AC_ROLL, kk = (e - 2) / 14.0f;
+        else clip = AC_ROLLOUT, kk = (e - 16) / 3.0f;
     }
-    else if (P.crouch)
+    else if (swinging)
+    { // the body commits to the blow: coil (before the hit), lunge (on it), follow through and settle (after)
+        clip = P.atkStyle == ATK_SLASH || P.atkStyle == ATK_SWEEP ? AC_SLASH : P.atkStyle == ATK_CHOP || P.atkStyle == ATK_SLAM ? AC_CHOP : AC_THRUST; // stab, thrust, bash
+        float p = 1 - (float)P.swingT / std::max(1, P.atkLen), hp = (float)P.atkHitAt / std::max(1, P.atkLen);
+        kk = p < hp ? 0.4f * p / hp : p < hp + 0.15f ? 0.4f + 0.2f * (p - hp) / 0.15f : 0.6f + 0.4f * (p - hp - 0.15f) / std::max(0.05f, 1 - hp - 0.15f);
+    }
+    else if (P.prone) clip = AC_CRAWL, kk = moving ? cyc(P.runPhase * 1.3f / TAU) : 0;
+    else if (P.crouch) clip = moving ? AC_CROUCHWALK : AC_CROUCH, kk = moving ? cyc(P.runPhase / TAU) : cyc(t / 48.0f);
+    else if (m.inLiquid) // off the bottom: a crawl stroke when going somewhere, treading water when hanging; on it: wading, the stride played slow
     {
-        float q = P.runPhase, mv = std::fabs(m.vx) > 0.08f ? 1.0f : 0.0f;
-        ps = {1.05f + 0.35f * std::sin(q) * mv, -0.6f - 0.3f * std::max(0.0f, std::sin(q + 1.9f)) * mv,
-              0.9f + 0.35f * std::sin(q + PI) * mv, -0.75f - 0.3f * std::max(0.0f, std::sin(q + PI + 1.9f)) * mv,
-              0.7f, 0.7f + 0.4f * std::sin(q) * mv, 0.9f, 0};
+        bool going = std::fabs(m.vx) > 0.15f || std::fabs(m.vy) > 0.25f;
+        if (!m.onGround) { clip = going ? AC_SWIM : AC_TREAD; kk = cyc(t * (going ? 0.2f : 0.1f) / TAU); }
+        else if (going) { clip = AC_WALK; kk = cyc(t * 0.09f / TAU); if (m.vx * f < 0) kk = 1 - kk; }
     }
-    else if (m.inLiquid)
-    {
-        float k = std::sin(t * 0.2f);
-        ps = {0.4f * k + 0.3f, 0.2f, -0.4f * k + 0.3f, -0.2f, 0.5f, -0.5f + k * 0.6f, 2.5f - k * 0.6f, 0};
-    }
-    else if (P.climb) // hand over hand up the rope, one knee hooked round it
-    {
-        float k = std::sin(P.runPhase * 2.5f) * 0.45f;
-        ps = {0.9f + k, -0.9f, -0.15f - k, -0.2f, 0.0f, 2.9f + k, 2.8f - k, 0};
-    }
-    else if (P.onWall)
-    {
-        float k = std::sin(t * 0.25f) * (m.vy < 0 ? 0.5f : 0); // climbing shuffle
-        ps = {1.0f + k, -0.4f, 0.7f - k, 0.2f, -0.08f, 2.7f + k, 2.5f - k, 0};
-    }
-    else if (P.hook == 2 && air) ps = {0.35f, 0.1f, -0.3f, -0.1f, 0.0f, -0.4f, 2.8f, 0};
-    else if (air && m.vy < -0.3f) ps = {1.0f, -0.6f, -0.3f, 0.5f, 0.12f, -0.8f, 2.2f, 0};
-    else if (air) ps = {0.45f, 0.15f, -0.5f, -0.15f, 0.0f, 2.4f, 2.0f, 0};
+    else if (P.climb) clip = AC_CLIMB, kk = cyc(P.runPhase * 2.5f / TAU);
+    else if (P.onWall) clip = AC_WALL;
+    else if (P.hook == 2 && air) clip = AC_HANG;
+    else if (air) clip = m.vy < -0.3f ? AC_JUMP : AC_FALL;
+    else if (P.squash < 0.9f) clip = AC_LAND; // the knees take a hard landing
     else if (std::fabs(m.vx) > 0.12f)
     {
-        float q = P.runPhase * (m.vx * f < 0 ? -1.0f : 1.0f); // backpedal plays the cycle in reverse
-        float fa = 0.8f * std::sin(q), ba = 0.8f * std::sin(q + PI);
-        ps.fThigh = fa;
-        ps.fShin = fa - 1.0f * (0.5f + 0.5f * std::sin(q + 1.9f));
-        ps.bThigh = ba;
-        ps.bShin = ba - 1.0f * (0.5f + 0.5f * std::sin(q + PI + 1.9f));
-        ps.lean = 0.2f * std::min(1.0f, std::fabs(m.vx) * 1.2f) * (m.vx * f < 0 ? -0.5f : 1.0f);
-        ps.backArm = -0.9f * std::sin(q);
-        ps.frontArm = 0.9f * std::sin(q);
-        ps.bob = std::fabs(std::sin(q)) * 1.0f;
+        clip = AC_WALK;
+        kk = cyc(P.runPhase / TAU);
+        if (m.vx * f < 0) kk = 1 - kk; // backpedalling plays the stride in reverse
     }
-    else
-        ps = {0.1f, 0.03f, -0.1f, -0.03f, 0.0f, 0.12f, -0.12f, std::sin(t * 0.05f) > 0.3f ? 1.0f : 0.0f}; // idle breathing
-
-    float sy = P.squash * (air && !P.rollT ? 1 + clampf(-m.vy * 0.03f, -0.1f, 0.12f) : 1);
-    if (P.rollT) sy *= 0.75f;
-    float sx = 1.0f / std::sqrt(sy);
+    int fr = clipFrame(A, clip, kk);
     float bx = std::floor(m.x) + m.w * 0.5f - camX, by = std::floor(m.y) + m.h - camY; // whole-pixel anchor, no shimmer
-    auto off = [&](float ang, float len) { return Vector2{f * std::sin(ang) * len * sx, std::cos(ang) * len * sy}; };
+    Vector2 J[RJ_COUNT];
+    animJoints(A, fr, bx, by, (int)f, J);
+    Vector2 shoulder = J[J_NECK], hip = J[J_PELVIS];
 
-    // a lean warrior with real proportions: ~23px tall, legs 10, torso 7, head 6
-    const float LEG = 5.0f, TORSO = 7.0f;
-    Vector2 hip = {bx, by - 2 * LEG * sy + 0.5f + ps.bob};
-    if (P.crouch && !P.prone) // knees bent: the hips sit as high as the legs reach
-        hip.y = by - std::max(std::cos(ps.fThigh) + std::cos(ps.fShin), std::cos(ps.bThigh) + std::cos(ps.bShin)) * LEG * sy;
-    if (P.prone) { hip.y = by - 3.0f; hip.x = bx - f * 5; }
-    Vector2 shoulder = {hip.x + f * std::sin(ps.lean) * TORSO * sx, hip.y - std::cos(ps.lean) * TORSO * sy};
-
-    { // pinned to the body, not the posed shoulder: a landing squash or a stride's bob would yank it about every frame
-        static float shoulderH = 14; // the shoulder's height above the feet, eased
+    { // pinned to the body, not the posed shoulder: a stride's bob would yank it about every frame
+        static float shoulderH = 17; // the shoulder's height above the feet, eased
         shoulderH += (by - shoulder.y - shoulderH) * 0.3f;
         simulateCape(P, {std::floor(m.x) + m.w * 0.5f - f * 2.0f, std::floor(m.y) + m.h - shoulderH + 0.5f}, f);
     }
     if (m.iframes > 0 && P.rollT == 0 && (G.frame / 3) % 2) return; // hurt blink
 
-    Look k = playerLook();
     canvasBegin((int)std::floor(bx) - CW / 2, (int)std::floor(by) - CH + 16);
-
     // the cloak: a great sweep of cloth, flaring from the shoulders to a gold-trimmed hem, its lining showing beneath
     Color lining = mul(k.cloak, 0.45f);
     auto outward = [&](Vector2 a, Vector2 b) { // the cloth's thickness: always the same side of the line, turning smoothly with it
@@ -451,141 +369,51 @@ void drawPlayerRig(int camX, int camY)
             if (!isSolid((int)std::floor(x + camX), (int)std::floor(y + camY))) px(x, y, c);
         }
     };
-    for (int i = 0; i < CAPE_N - 1; i++)
+    if (HERO_CAPE)
     {
-        float t = (float)i / (CAPE_N - 1);
-        Vector2 a = {P.cape[i].x - camX, P.cape[i].y - camY}, b = {P.cape[i + 1].x - camX, P.cape[i + 1].y - camY};
-        Vector2 n = outward(a, b);
-        float w0 = 2.5f + t * 4.5f, w1 = 2.5f + (t + 1.0f / (CAPE_N - 1)) * 4.5f; // the depth of the folds
-        int layers = (int)std::ceil(std::max(w0, w1) / 0.7f);
-        for (int j = 0; j <= layers; j++)
+        for (int i = 0; i < CAPE_N - 1; i++)
         {
-            float u = (float)j / layers;
-            Color c = lerpColor(k.cloak, mul(k.cloak, 0.6f), t);
-            if (j == 0) c = brighten(c, 16);                              // the crease the light catches
-            else if (u > 0.8f) c = lining;                               // the lining, underneath
-            else if (((int)(i * 0.7f + u * 3)) % 2) c = mul(c, 0.86f);   // folds
-            cloth({a.x + n.x * w0 * u, a.y + n.y * w0 * u}, {b.x + n.x * w1 * u, b.y + n.y * w1 * u}, c);
+            float t = (float)i / (CAPE_N - 1);
+            Vector2 a = {P.cape[i].x - camX, P.cape[i].y - camY}, b = {P.cape[i + 1].x - camX, P.cape[i + 1].y - camY};
+            Vector2 n = outward(a, b);
+            float w0 = 2.5f + t * 4.5f, w1 = 2.5f + (t + 1.0f / (CAPE_N - 1)) * 4.5f; // the depth of the folds
+            int layers = (int)std::ceil(std::max(w0, w1) / 0.7f);
+            for (int j = 0; j <= layers; j++)
+            {
+                float u = (float)j / layers;
+                Color c = lerpColor(k.cloak, mul(k.cloak, 0.6f), t);
+                if (j == 0) c = brighten(c, 16);                              // the crease the light catches
+                else if (u > 0.8f) c = lining;                               // the lining, underneath
+                else if (((int)(i * 0.7f + u * 3)) % 2) c = mul(c, 0.86f);   // folds
+                cloth({a.x + n.x * w0 * u, a.y + n.y * w0 * u}, {b.x + n.x * w1 * u, b.y + n.y * w1 * u}, c);
+            }
+            if (i >= CAPE_N - 3) cloth({a.x + n.x * w0, a.y + n.y * w0}, {b.x + n.x * w1, b.y + n.y * w1}, k.trim); // gilded hem
         }
-        if (i >= CAPE_N - 3) cloth({a.x + n.x * w0, a.y + n.y * w0}, {b.x + n.x * w1, b.y + n.y * w1}, k.trim); // gilded hem
-    }
-    {
-        Vector2 e0 = {P.cape[CAPE_N - 1].x - camX, P.cape[CAPE_N - 1].y - camY}, e1 = {P.cape[CAPE_N - 2].x - camX, P.cape[CAPE_N - 2].y - camY};
-        Vector2 n = outward(e1, e0);
-        cloth(e0, {e0.x + n.x * 7.0f, e0.y + n.y * 7.0f}, k.trim); // the hem's edge
-    }
-    for (int c = -2; c <= 3; c++) // a fur mantle across the shoulders, where the cape is pinned
-        for (int r = 0; r < 2; r++)
-            px(P.cape[0].x - camX + c * f * 0.8f - f, P.cape[0].y - camY - 1 + r, (c + r) % 2 ? k.fur : mul(k.fur, 0.78f));
-    px(P.cape[0].x - camX + f * 2, P.cape[0].y - camY, k.trim); // the brooch
-
-    if (P.rollT > 0)
-    {
-        rotA = f * (1 - P.rollT / 20.0f) * 2 * PI;
-        rotCx = bx;
-        rotCy = by - 11;
+        {
+            Vector2 e0 = {P.cape[CAPE_N - 1].x - camX, P.cape[CAPE_N - 1].y - camY}, e1 = {P.cape[CAPE_N - 2].x - camX, P.cape[CAPE_N - 2].y - camY};
+            Vector2 n = outward(e1, e0);
+            cloth(e0, {e0.x + n.x * 7.0f, e0.y + n.y * 7.0f}, k.trim); // the hem's edge
+        }
+        for (int c = -2; c <= 3; c++) // a fur mantle across the shoulders, where the cape is pinned
+            for (int r = 0; r < 2; r++)
+                px(P.cape[0].x - camX + c * f * 0.8f - f, P.cape[0].y - camY - 1 + r, (c + r) % 2 ? k.fur : mul(k.fur, 0.78f));
+        px(P.cape[0].x - camX + f * 2, P.cape[0].y - camY, k.trim); // the brooch
     }
 
     if (hasWeapon && !drawn && P.rollT == 0 && !P.prone) drawStowed(*wpn, shoulder, hip, f);
+    coatMob = (m.wet || m.oily || m.bloody || m.burn) ? &m : nullptr;
+    canvasEnd(m.hurtFlash > 0);
+    coatMob = nullptr;
 
-    auto leg = [&](float th, float sh, float dim) {
-        Vector2 kn = add(hip, off(th, LEG));
-        Vector2 ft = add(kn, off(sh, LEG));
-        thick(hip, kn, 2, mul(k.pants, dim), f);
-        thick(kn, ft, 2, mul(k.wrap, dim), f);
-        for (float tt : {0.25f, 0.6f}) // leg wraps wound round the shin
-        {
-            Vector2 w = {kn.x + (ft.x - kn.x) * tt, kn.y + (ft.y - kn.y) * tt};
-            for (int i = -1; i <= 0; i++) px(w.x + i * 0.5f, w.y, mul(k.wrap, 0.72f * dim));
-        }
-        for (int i = -1; i <= 1; i++) px(ft.x + i * f, ft.y, mul(k.boot, dim * (i == 1 ? 0.8f : 1.0f)));
-        px(ft.x, ft.y - 1, mul(k.boot, dim * 1.15f));
-    };
-    auto arm = [&](Vector2 sh, float ang, float dim) {
-        Vector2 el = add(sh, off(ang, 3.6f));
-        Vector2 hand = add(el, off(ang * 0.9f, 3.0f));
-        thick(sh, el, 2, mul(k.set == AS_WOOL || k.set == AS_LEATHER ? mul(k.tunic, 1.05f) : k.A, dim), f);
-        thick(el, hand, 2, mul(k.bracer, dim), f);
-        px(hand.x, hand.y, mul(k.skin, dim));
-        px(hand.x + f, hand.y, mul(k.skinD, dim));
-        return hand;
-    };
+    rigMetal = k.metal ? k.A : Color{150, 150, 156, 255};
+    rigGlow = (G.frame / 8) % 7 ? k.glow : WHITE;
+    Color tint = coatTint(m);
+    if (m.inLiquid) tint = {(unsigned char)(tint.r * 0.7f), (unsigned char)(tint.g * 0.88f), (unsigned char)(tint.b * 1.0f), tint.a}; // seen through the water: cooler, dimmer
+    bool white = m.hurtFlash > 0;
+    drawSheet(A, fr, bx, by, (int)f, tint, white);
 
-    arm({shoulder.x - f * 2.0f, shoulder.y + 1}, ps.backArm, 0.72f);
-    leg(ps.bThigh, ps.bShin, 0.75f);
-    leg(ps.fThigh, ps.fShin, 1.0f);
-
-    // torso: broad shoulders narrowing to the belt, patterned by the armour set
-    static const int halfW[8] = {3, 3, 3, 2, 2, 2, 2, 2};
-    for (int r = 0; r <= 7; r++)
-    {
-        float tt = r / 7.0f;
-        float cx = shoulder.x + (hip.x - shoulder.x) * tt, cy = shoulder.y + (hip.y - shoulder.y) * tt;
-        int half = halfW[r];
-        for (int c = -half; c <= half; c++) px(cx + c * f, cy, bodyColor(k, r, c, half));
-    }
-    // the skirt of the tunic (or byrnie) flares over the thighs
-    for (int r = 1; r <= 3; r++)
-    {
-        int half = r < 3 ? 2 : 3;
-        for (int c = -half; c <= half; c++)
-        {
-            Color col = r == 3 ? (k.set == AS_WOOL ? k.trim : mul(bodyColor(k, r + 8, c, half), 0.8f)) : bodyColor(k, r + 8, c, half);
-            if (k.set == AS_LEATHER && r == 3 && c % 2) continue; // hanging leather strips
-            px(hip.x + c * f, hip.y + r * sy, col);
-        }
-    }
-    for (int c = -2; c <= 2; c++) // belt and buckle
-        px(hip.x + c * f, hip.y, c == 1 ? Color{224, 190, 90, 255} : Color{66, 44, 30, 255});
-    if (k.set == AS_WOOL) for (int c = -3; c <= 3; c++) px(shoulder.x + c * f, shoulder.y + 3 + (c > 0 ? 0 : 0), (c + 3) % 2 ? k.trim : mul(k.trim, 0.8f)); // woven band across the chest
-    if (k.set == AS_LAMELLAR || k.set == AS_SCALE) // a rune glowing on the breast (Algiz, for protection)
-    {
-        Color g = (G.frame / 8) % 7 ? k.glow : WHITE;
-        float rx = shoulder.x + (hip.x - shoulder.x) * 0.35f + f * 0.5f, ry = shoulder.y + 2;
-        for (int d = 0; d < 4; d++) px(rx, ry + d, g);
-        px(rx - 1, ry, g);
-        px(rx + 1, ry, g);
-    }
-    for (int c = -2; c <= 2; c++) // fur collar where the cloak is pinned
-        px(shoulder.x + c * f, shoulder.y, (c + 3) % 3 ? k.fur : mul(k.fur, 0.8f));
-    if (k.set >= AS_MAIL) // pauldrons
-        for (int dy = 0; dy < 2; dy++)
-            for (int dx = 0; dx < 2; dx++)
-                px(shoulder.x + f * (2 + dx), shoulder.y + dy, dy == 0 ? k.Ah : (dx == 1 ? k.Ad : k.A));
-
-    // head
-    bool blink = (G.frame % 220) < 6;
-    int rows = k.headRows;
-    float hx = std::floor(shoulder.x) - 3 + (f > 0 ? 1 : 0) + (P.prone ? f * 3 : 0), hy = std::floor(shoulder.y) - rows + 1 + (P.prone ? 2 : 0);
-    for (int j = 0; j < rows; j++)
-        for (int i = 0; i < 6; i++)
-        {
-            char ch = k.head[j][i];
-            Color c;
-            switch (ch)
-            {
-            case 's': c = k.skin; break;
-            case 'S': c = k.skinD; break;
-            case 'F': c = blink ? k.skinD : Color{241, 240, 253, 255}; break;
-            case 'u': c = blink ? k.skinD : Color{60, 110, 170, 255}; break;
-            case 'h': c = k.hairD; break;
-            case 'H': c = k.hairL; break;
-            case 'A': c = k.A; break;
-            case 'D': c = k.Ad; break;
-            case 'L': c = k.Ah; break;
-            case 'c': c = mul(k.A, 0.85f); break;
-            case 'C': c = k.Ad; break;
-            case 'v': c = {18, 18, 26, 255}; break;
-            case 'g': c = (G.frame / 8) % 6 ? k.glow : WHITE; break;
-            case 'n': c = {232, 226, 206, 255}; break;
-            default: continue;
-            }
-            px(hx + (f > 0 ? i : 5 - i), hy + j, c);
-        }
-
-    // front arm: swings while unarmed, lowers a drawn blade, aims ranged weapons, reaches for the rope
-    Vector2 shF = {shoulder.x + f * 1.5f, shoulder.y + 1};
-    Vector2 handF;
+    // the near arm: with the stride, unless it's holding a drawn weapon out (or the grappling rope) - then it's
+    // the arm alone, painted at 16 angles, turned to the nearest
     bool weaponInHand = drawn && P.rollT == 0 && !P.prone;
     float aimAng = P.aim, reach = 0;
     if (weaponInHand && isMelee(wpn->type))
@@ -599,24 +427,21 @@ void drawPlayerRig(int camX, int camY)
         else
             aimAng = f > 0 ? 1.0f : PI - 1.0f; // relaxed, blade lowered in front
     }
-    if (P.hook == 2) { aimAng = std::atan2(P.hy - camY - shF.y, P.hx - camX - shF.x); weaponInHand = false; }
+    if (P.hook == 2) { aimAng = std::atan2(P.hy - camY - J[J_SHN].y, P.hx - camX - J[J_SHN].x); weaponInHand = false; }
     if (weaponInHand || P.hook == 2)
     {
-        Vector2 el = {shF.x + std::cos(aimAng) * 3.0f, shF.y + std::sin(aimAng) * 3.0f};
-        handF = {shF.x + std::cos(aimAng) * (5.5f + reach), shF.y + std::sin(aimAng) * (5.5f + reach)};
-        thick(shF, el, 2, k.set == AS_WOOL || k.set == AS_LEATHER ? mul(k.tunic, 1.05f) : k.A, f);
-        thick(el, handF, 2, k.bracer, f);
-        px(handF.x, handF.y, k.skin);
-        px(handF.x + 1, handF.y, k.skinD);
+        float a = std::atan2(f * std::cos(aimAng), std::sin(aimAng)); // 0 down, turning towards the way you face
+        int ki = (((int)std::lround(a / (2 * PI) * 16)) % 16 + 16) % 16;
+        float ak = ki * 2 * PI / 16;
+        Vector2 sh = add(J[J_SHN], {std::cos(aimAng) * reach, std::sin(aimAng) * reach});
+        drawSheet(AM, ki, sh.x, sh.y, (int)f, tint, white);
+        Vector2 hand = add(sh, {f * std::sin(ak) * 6.6f, std::cos(ak) * 6.6f});
+        rigMetal = rigGlow = BLANK;
+        if (weaponInHand) drawHeld(hand.x, hand.y);
+        return;
     }
-    else
-        handF = arm(shF, ps.frontArm, 1.0f);
-
-    rotA = 0;
-    coatMob = (m.wet || m.oily || m.bloody || m.burn) ? &m : nullptr;
-    canvasEnd(m.hurtFlash > 0);
-    coatMob = nullptr;
-    if (weaponInHand) drawHeld(handF.x, handF.y);
+    drawSheet(AA, fr, bx, by, (int)f, tint, white);
+    rigMetal = rigGlow = BLANK;
 }
 
 // ---------------------------------------------------------------- detail at twice the resolution
@@ -719,26 +544,6 @@ static const BigSprite& bigOf(const Sprite& s, Color tint, int mode)
     return cache[key] = b;
 }
 
-// The detailed character art (tools/art_hd.py), drawn at half a world cell per pixel.
-static const BigSprite& bigOfHD(const HDSprite& s)
-{
-    static std::map<const void*, BigSprite> cache;
-    auto it = cache.find(&s);
-    if (it != cache.end()) return it->second;
-    BigSprite b;
-    b.w = s.w;
-    b.h = s.h;
-    b.unit = 0.5f;
-    b.px.assign(b.w * b.h, BLANK);
-    for (int y = 0; y < s.h; y++)
-        for (int x = 0; x < s.w; x++)
-        {
-            char ch = s.rows[y][x];
-            if (ch != '.') b.px[y * b.w + x] = s.pal[std::strchr(HD_ALPHABET, ch) - HD_ALPHABET];
-        }
-    return cache[&s] = b;
-}
-
 // Draws a sprite anchored at its bottom-centre with squash, lean and flip.
 static void drawBig(const BigSprite& b, float ax, float ay, bool flip, float sxs, float sys, float lean, Color flash, float alpha)
 {
@@ -760,47 +565,350 @@ static void drawBig(const BigSprite& b, float ax, float ay, bool flip, float sxs
         }
 }
 
-// Fire you can't miss: a glare round the body and pixel flames licking up off it, taller where the oil is.
-void drawBurning(const Mob& m, int camX, int camY)
+// One tongue of flame as 0.5-unit pixels, its root at (x, by): a white-yellow core, yellow, orange and red toward a ragged,
+// swaying tip. `seed` makes every tongue its own; `alpha` thins the whole thing.
+static void flameShape(float x, float by, float w, float h, int seed, float alpha)
 {
-    float x0 = std::floor(m.x) - camX, top = std::floor(m.y) - camY, h = (float)m.h, f = (float)G.frame;
-    BeginBlendMode(BLEND_ADDITIVE);
-    float pulse = 0.85f + 0.15f * std::sin(f * 0.3f);
-    DrawCircleGradient((int)(x0 + m.w / 2.0f), (int)(top + h * 0.45f), h * 0.95f * pulse, {255, 120, 30, 70}, {255, 80, 20, 0});
-    EndBlendMode();
-    float reach = h * (m.oily ? 0.75f : 0.5f);
-    for (float cx = -1; cx <= m.w + 1; cx += 0.5f) // a column of flame per half unit
+    float f = (float)G.frame;
+    for (float cx = -w / 2; cx <= w / 2; cx += 0.5f)
     {
-        float n = vnoise(cx * 0.9f + m.id, f * 0.22f, 31), fh = reach * (0.35f + 0.65f * n) * (1 - std::fabs(cx - m.w / 2.0f) / (m.w / 2.0f + 2) * 0.6f);
-        float base = top + h * 0.55f; // licking up from the waist
-        for (float y = 0; y < fh + h * 0.4f; y += 0.5f)
+        float u = cx / (w / 2), prof = std::pow(std::max(0.0f, 1 - u * u), 0.7f);
+        float n = vnoise(seed * 3.1f + cx * 0.8f, f * 0.23f, 5), colH = h * prof * (0.5f + 0.75f * n);
+        float sway = std::sin(f * 0.17f + seed * 1.7f) * w * 0.3f + (vnoise(seed * 1.3f, f * 0.1f, 8) - 0.5f) * w * 0.4f;
+        for (float y = 0; y < colH; y += 0.5f)
         {
-            float t = y / (fh + h * 0.4f); // 0 at the root, 1 at the tip
-            if (hash2((int)(cx * 2) + m.id * 7, (int)(y * 2) - (int)(f * 1.5f), 13) > 1.1f - t) continue; // ragged, flickering edges
-            Color c = t < 0.25f ? Color{255, 246, 190, 230} : (t < 0.55f ? Color{255, 190, 60, 220} : (t < 0.8f ? Color{240, 100, 24, 200} : Color{170, 40, 20, 150}));
-            DrawRectangleRec({x0 + cx, base - y, 0.5f, 0.5f}, c);
+            float t = y / colH, lean = t * t * sway;
+            if (t > 0.55f && hash2((int)(cx * 2) + seed * 7, (int)(y * 2) - (int)(f * 1.5f), 13) > 1.25f - t * 0.9f) continue; // ragged, flickering edges
+            float v = t * 0.85f + std::fabs(u) * 0.55f;
+            Color c = v < 0.26f ? Color{255, 247, 200, 255} : (v < 0.5f ? Color{255, 208, 74, 255} : (v < 0.75f ? Color{250, 126, 30, 240} : (v < 0.95f || t < 0.8f ? Color{206, 54, 24, 210} : Color{120, 30, 20, 140})));
+            c.a = (unsigned char)(c.a * alpha);
+            DrawRectangleRec({x + cx + lean, by - y - 0.5f, 0.5f, 0.5f}, c);
         }
     }
 }
 
-// The chest art as textures, so it can tumble.
-void drawChest(float cx, float cy, float ang, bool open)
+// A live flame rooted at (x, y), about 7 * s units tall, with its glow and the odd spark.
+void drawFlame(float x, float y, float s, int seed)
 {
-    static Texture2D tex[2] = {};
-    int k = open ? 1 : 0;
-    if (!tex[k].id)
+    float fl = hash2(seed, G.frame / 4, 9);
+    BeginBlendMode(BLEND_ADDITIVE);
+    DrawCircleGradient((int)x, (int)(y - 3 * s), 9 * s + fl * 2, {255, 140, 50, 60}, {255, 140, 50, 0});
+    EndBlendMode();
+    flameShape(x, y, 3.2f * s, 7.5f * s, seed, 1);
+    flameShape(x + (fl - 0.5f) * s, y, 2.0f * s, 5.0f * s, seed + 5, 1);
+    if (fl > 0.84f) spawnParticle(x + G.rcx + frange(-s, s), y + G.rcy - 6 * s, frange(-0.2f, 0.2f), -0.45f, 28, {255, 180, 70, 255}, -0.004f);
+}
+
+// Fire you can't miss: a glare round the body and tongues of flame licking up its length, taller where the oil is,
+// with embers and smoke rising off it.
+void drawBurning(const Mob& m, int camX, int camY)
+{
+    float x0 = std::floor(m.x) - camX, top = std::floor(m.y) - camY, h = (float)m.h, w = (float)m.w, f = (float)G.frame;
+    BeginBlendMode(BLEND_ADDITIVE);
+    float pulse = 0.85f + 0.15f * std::sin(f * 0.3f);
+    DrawCircleGradient((int)(x0 + w / 2), (int)(top + h * 0.5f), h * 0.95f * pulse, {255, 120, 30, 70}, {255, 80, 20, 0});
+    EndBlendMode();
+    int n = 5 + (int)(w / 4) + (m.oily ? 3 : 0);
+    for (int i = 0; i < n; i++)
     {
-        const HDSprite& s = open ? HD_CHEST_OPEN : HD_CHEST;
+        int seed = m.id * 13 + i + (G.frame / 14 + i * 3) / 5 * 31; // tongues pop up in new places now and then
+        float fx = x0 + 0.5f + (w - 1) * hash2(seed, i, 41), fy = top + h * (0.3f + 0.65f * hash2(seed, i, 43));
+        float th = h * (m.oily ? 0.55f : 0.38f) * (0.7f + 0.5f * hash2(seed, i, 47));
+        flameShape(fx, fy, std::max(2.4f, w * 0.38f), th, seed, 0.95f);
+    }
+    if (G.frame % 3 == 0)
+        spawnParticle(m.x + frange(0, w), m.y + frange(0, h * 0.5f), frange(-0.1f, 0.1f), frange(-0.5f, -0.25f), irange(20, 36), {255, 170, 60, 255}, -0.004f);
+    if (G.frame % 6 == 0)
+        spawnParticle(m.x + frange(0, w), m.y - 1, frange(-0.1f, 0.1f), frange(-0.4f, -0.2f), irange(40, 70), {60, 56, 58, 120}, -0.002f);
+}
+
+// A detailed sprite as a texture, made the first time it's asked for.
+static const Texture2D& hdTexture(const HDSprite& s)
+{
+    static std::map<const HDSprite*, Texture2D> cache;
+    Texture2D& t = cache[&s];
+    if (!t.id)
+    {
         Image img = GenImageColor(s.w, s.h, BLANK);
         for (int y = 0; y < s.h; y++)
             for (int x = 0; x < s.w; x++)
                 if (s.rows[y][x] != '.') ImageDrawPixel(&img, x, y, s.pal[std::strchr(HD_ALPHABET, s.rows[y][x]) - HD_ALPHABET]);
-        tex[k] = LoadTextureFromImage(img);
+        t = LoadTextureFromImage(img);
         UnloadImage(img);
     }
-    const Texture2D& t = tex[k];
+    return t;
+}
+
+// The chest art as textures, so it can tumble.
+void drawChest(float cx, float cy, float ang, bool open, Color tint, float sink)
+{
+    const Texture2D& t = hdTexture(open ? HD_CHEST_OPEN : HD_CHEST);
     float w = t.width * 0.5f, h = t.height * 0.5f; // half a unit a pixel, like the rest of the fine art
-    DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {cx, cy, w, h}, {w / 2, h / 2}, ang * RAD2DEG, WHITE);
+    if (sink > 0) // sunk into the sand: lowered, and whatever is under the ground line left undrawn
+    {
+        float vis = h - sink;
+        DrawTexturePro(t, {0, 0, (float)t.width, vis * 2}, {cx - w / 2, cy - h / 2 + sink, w, vis}, {0, 0}, 0, tint);
+        return;
+    }
+    DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {cx, cy, w, h}, {w / 2, h / 2}, ang * RAD2DEG, tint);
+}
+
+// A rune bomb: knotwork on blued iron, its fuse lit (tools: the user's reference art, redrawn at 15x19).
+static const Color HDP_BOMB[] = {{20, 26, 38, 255}, {39, 50, 74, 255}, {54, 69, 106, 255}, {76, 95, 134, 255}, {145, 169, 201, 255}, {100, 124, 159, 255}, {30, 37, 50, 255}, {255, 224, 112, 255}, {255, 154, 60, 255}, {196, 212, 232, 255}};
+static const char* const HDR_BOMB[] = {
+    ".......8.......",
+    "......878......",
+    ".......8.......",
+    "......606......",
+    ".....06660.....",
+    "......000......",
+    "....9033300....",
+    "..09333432200..",
+    "..03354545220..",
+    ".0335432245220.",
+    ".0335422245220.",
+    ".0334244424110.",
+    ".0345224225410.",
+    ".0225524255110.",
+    ".0024445444100.",
+    "..02221111110..",
+    "...021111110...",
+    "....0000000....",
+    "...............",
+};
+static const HDSprite HD_BOMB = {15, 19, HDP_BOMB, HDR_BOMB};
+void drawBomb(float cx, float cy, float ang, float scale)
+{
+    const Texture2D& t = hdTexture(HD_BOMB);
+    float w = t.width * 0.5f * scale, h = t.height * 0.5f * scale;
+    DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {cx, cy, w, h}, {w / 2, h * 0.62f}, ang * RAD2DEG, WHITE);
+}
+
+// Background decorations (IT_DECOR) at half a unit per pixel, the same grain as the creatures: each variant is
+// painted once into a texture. House style: no outline, lit from the upper left, a ramp of five tones.
+static Image decorImage(int kind, int var)
+{
+    auto rnd = [&](int k) { return hash2(var * 31 + k, kind * 7, 4242); };
+    auto put = [](Image& im, int x, int y, Color c) { if (x >= 0 && y >= 0 && x < im.width && y < im.height) ImageDrawPixel(&im, x, y, c); };
+    if (kind == DK_CACTUS)
+    {
+        const Color G5[5] = {{24, 46, 30, 255}, {36, 66, 40, 255}, {52, 90, 52, 255}, {74, 118, 66, 255}, {100, 146, 84, 255}};
+        const Color spine = {214, 206, 168, 255}, bloom = {232, 120, 150, 255};
+        int h = 34 + (int)(rnd(1) * 28), W = 36, cx = 13;
+        Image im = GenImageColor(W, h + 1, BLANK);
+        auto column = [&](int x0, int y0, int y1, int w) { // a ribbed stem, rounded on top, lit on its left
+            for (int y = y0; y <= y1; y++)
+                for (int k = 0; k < w; k++)
+                {
+                    int top = y - y0;
+                    if ((top == 0 && (k < 2 || k >= w - 2)) || (top == 1 && (k == 0 || k == w - 1))) continue;
+                    int t = k % 3 == 0 ? 1 : 2;   // grooves between the ribs
+                    if (k <= 1) t = 3;            // the lit flank
+                    if (k == 1 && k % 3) t = 4;
+                    if (k >= w - 2) t = 1;        // the shaded one
+                    if (top < 2 && t > 0) t++;    // the crown catches the light
+                    put(im, x0 + k, y, G5[std::min(4, t)]);
+                    if (k % 3 == 0 && (y + k) % 5 == 0 && top > 2) put(im, x0 + k + (k == 0 ? -1 : 0), y, spine); // spines along the grooves
+                }
+        };
+        column(cx, 0, h, 10);
+        for (int sd : {-1, 1})
+        {
+            if (rnd(sd + 5) < 0.3f) continue;
+            int ay = (int)(h * (0.35f + 0.3f * rnd(sd + 9))), reach = 4 + (int)(rnd(sd + 11) * 3), up = 8 + (int)(rnd(sd + 13) * 10);
+            int ax = sd > 0 ? cx + 10 : cx - reach;
+            for (int y = ay; y < ay + 5; y++) for (int k = 0; k < reach; k++) put(im, ax + k, y, G5[y == ay ? 3 : (y == ay + 4 ? 1 : 2)]);
+            int colX = sd > 0 ? cx + 10 + reach - 6 : cx - reach;
+            column(colX, ay - up, ay + 4, 6);
+        }
+        if (rnd(20) < 0.35f) for (int k = 3; k < 7; k++) put(im, cx + k, 0, bloom), put(im, cx + k - 1, 1, k % 2 ? bloom : Color{250, 220, 120, 255});
+        return im;
+    }
+    if (kind == DK_BUSH)
+    {
+        const Color T[4] = {{58, 42, 30, 255}, {86, 62, 42, 255}, {116, 88, 60, 255}, {146, 116, 82, 255}};
+        Image im = GenImageColor(28, 20, BLANK);
+        std::function<void(float, float, float, float, int)> twig = [&](float x, float y, float a, float len, int depth) {
+            for (float d = 0; d < len; d += 0.5f)
+            {
+                int px = (int)(x + std::cos(a) * d), py = (int)(y + std::sin(a) * d);
+                put(im, px, py, T[std::min(3, depth + (std::cos(a) < 0 ? 1 : 0))]);
+                if (depth == 0) put(im, px + 1, py, T[0]);
+            }
+            if (depth >= 3) return;
+            float ex = x + std::cos(a) * len, ey = y + std::sin(a) * len;
+            twig(ex, ey, a - 0.5f - rnd(depth * 3 + (int)len) * 0.3f, len * 0.65f, depth + 1);
+            twig(ex, ey, a + 0.45f + rnd(depth * 5 + (int)len) * 0.3f, len * 0.6f, depth + 1);
+        };
+        for (int b = 0; b < 3; b++) twig(13.0f + b, 19.5f, -PI / 2 + (b - 1) * 0.5f + (rnd(b) - 0.5f) * 0.4f, 7 + rnd(b + 3) * 4, 0);
+        return im;
+    }
+    if (kind == DK_GIANT) // the bones of a giant beast, half swallowed by the sand: skull, sagging spine, a cage of ribs
+    {
+        const Color B5[5] = {{70, 62, 48, 255}, {112, 102, 84, 255}, {160, 152, 130, 255}, {196, 190, 166, 255}, {224, 220, 200, 255}};
+        Image im = GenImageColor(210, 100, BLANK);
+        const int gy = 99;
+        auto spineY = [&](int x) { return gy - 10 + (int)(std::sin(x * 0.03f) * 6); };
+        for (int r = 0; r < 7; r++) // ribs first, so the spine lies over their roots
+        {
+            int rx = 70 + r * 19, rh = 70 - std::abs(r - 2) * 9, base = spineY(rx);
+            float stop = rnd(30 + r) < 0.3f ? 0.55f + 0.2f * rnd(40 + r) : 1.0f; // some snapped off
+            for (float a = 0; a < PI * stop; a += 0.01f)
+            {
+                int x = rx + (int)(10 * std::cos(a)), y = base - (int)(rh * std::sin(a));
+                for (int t = 0; t < 3; t++) put(im, x + t, y, B5[t == 0 ? (std::cos(a) > 0 ? 3 : 4) : (t == 2 ? 1 : 2)]);
+            }
+        }
+        for (int x = 40; x < 208; x++) // the spine, vertebra by vertebra
+            for (int t = 0; t < 6; t++)
+            {
+                int y = spineY(x) - 2 + t;
+                bool notch = x % 9 == 0 && t < 2;
+                if (!notch) put(im, x, y, B5[t == 0 ? 4 : (t >= 4 ? 1 : (x % 9 < 2 ? 2 : 3))]);
+            }
+        for (int y = gy - 34; y <= gy; y++) // the skull, its long snout in the sand
+            for (int x = 0; x < 56; x++)
+            {
+                float dx = (x - 30) / 26.0f, dy = (y - (gy - 16)) / 15.0f;
+                float snout = x < 22 ? (x - 2) / 20.0f : 1; // tapering to the left
+                if (dx * dx + dy * dy > snout * snout + 0.05f) continue;
+                put(im, x, y, B5[dx + dy < -0.7f ? 4 : (dx + dy > 0.6f ? 1 : (dy > 0.2f ? 2 : 3))]);
+            }
+        for (int y = gy - 24; y <= gy - 16; y++) for (int x = 32; x <= 40; x++) // the eye, a dark hollow
+        {
+            float dx = (x - 36) / 4.5f, dy = (y - (gy - 20)) / 4.5f;
+            if (dx * dx + dy * dy <= 1) put(im, x, y, dy < -0.3f ? B5[1] : B5[0]);
+        }
+        for (int x = 6; x < 30; x += 4) put(im, x, gy - 5, B5[0]), put(im, x + 1, gy - 4, B5[4]); // teeth
+        for (float a = 0; a < 1.6f; a += 0.02f) // a horn sweeping back
+            for (int t = 0; t < 4 - (int)(a * 1.5f); t++) put(im, 42 + (int)(std::sin(a) * 22) + t, gy - 28 - (int)((1 - std::cos(a)) * 16), B5[t == 0 ? 4 : 2]);
+        return im;
+    }
+    // DK_SKELETON: someone who didn't make it, sprawled on the floor, skull at the left
+    const Color B5[5] = {{70, 62, 48, 255}, {112, 102, 84, 255}, {160, 152, 130, 255}, {200, 194, 172, 255}, {228, 224, 206, 255}};
+    Image im = GenImageColor(48, 18, BLANK);
+    const int gy = 17; // the floor line
+    auto bone = [&](float x0, float y0, float x1, float y1) { // a long bone: lit top, shaded underside, knobbed ends
+        int n = (int)std::max(std::fabs(x1 - x0), std::fabs(y1 - y0)) * 2 + 1;
+        for (int i = 0; i <= n; i++)
+        {
+            float t = (float)i / n;
+            int x = (int)std::lround(x0 + (x1 - x0) * t), y = (int)std::lround(y0 + (y1 - y0) * t);
+            put(im, x, y, B5[3]); put(im, x, y + 1, B5[1]);
+        }
+        put(im, (int)x0, (int)y0 - 1, B5[4]); put(im, (int)x1, (int)y1 - 1, B5[4]); put(im, (int)x1 + 1, (int)y1, B5[2]);
+    };
+    // the skull, lying on its side
+    for (int y = gy - 8; y <= gy - 1; y++)
+        for (int x = 1; x <= 9; x++)
+        {
+            float dx = (x - 5) / 4.5f, dy = (y - (gy - 5)) / 4.0f;
+            if (dx * dx + dy * dy > 1) continue;
+            put(im, x, y, B5[dx + dy < -0.6f ? 4 : (dx + dy > 0.7f ? 1 : 3)]);
+        }
+    for (int x = 6; x <= 11; x++) put(im, x, gy - 2, (x % 2) ? B5[4] : B5[1]), put(im, x, gy - 1, B5[2]); // the jaw and its teeth
+    put(im, 6, gy - 5, B5[0]); put(im, 7, gy - 5, B5[0]); put(im, 6, gy - 6, B5[0]); put(im, 7, gy - 6, B5[1]); // the eye socket
+    put(im, 9, gy - 4, B5[0]); // the nose
+    // the spine, the ribcage arching over it, the pelvis
+    for (int x = 12; x <= 29; x++) { put(im, x, gy - 2, B5[2]); if (x % 2 == 0) put(im, x, gy - 3, B5[3]); put(im, x, gy - 1, B5[1]); }
+    int sprung = (int)(rnd(2) * 3);
+    for (int r = 0; r < 5; r++)
+    {
+        int rx = 13 + r * 3, rh = 7 - std::abs(r - 1) - (r == sprung ? 3 : 0);
+        for (int k = 0; k < rh; k++) put(im, rx + k / 3, gy - 3 - k, k == rh - 1 ? B5[4] : B5[3]), put(im, rx + k / 3 + 1, gy - 3 - k, B5[1]);
+    }
+    for (int y = gy - 6; y <= gy - 1; y++)
+        for (int x = 29; x <= 34; x++)
+        {
+            bool hole = x >= 31 && x <= 32 && y >= gy - 4 && y <= gy - 3;
+            if (!hole) put(im, x, y, B5[y == gy - 6 ? 4 : (x == 34 || y == gy - 1 ? 1 : 3)]);
+        }
+    // limbs: an arm flung up (or lying along), a leg drawn up at the knee (or straight)
+    if (rnd(3) < 0.5f) { bone(14, gy - 3, 11, gy - 10); bone(11, gy - 10, 16, gy - 14); }
+    else { bone(14, gy - 2, 20, gy - 1); bone(20, gy - 1, 26, gy - 1); }
+    if (rnd(4) < 0.5f) { bone(34, gy - 3, 39, gy - 9); bone(39, gy - 9, 45, gy - 2); }
+    else { bone(34, gy - 2, 40, gy - 2); bone(40, gy - 2, 46, gy - 1); }
+    bone(33, gy - 2, 38, gy - 1);
+    return im;
+}
+
+// Önd, the breath Odin gave the first people: a glass orb with a wind spiralling inside, bound in twisted roots,
+// moss and a few sea crystals. Painted once, at half a unit per pixel.
+void drawOnd(float cx, float cy, float scale)
+{
+    static Texture2D t{};
+    if (!t.id)
+    {
+        const int N = 26;
+        Image im = GenImageColor(N, N, BLANK);
+        auto put = [&](int x, int y, Color c) { if (x >= 0 && y >= 0 && x < N && y < N) ImageDrawPixel(&im, x, y, c); };
+        const float c0 = 12.5f;
+        for (int y = 0; y < N; y++) // the glass: deep sea-blue at its rim, pale at heart, lit from the upper left
+            for (int x = 0; x < N; x++)
+            {
+                float dx = x + 0.5f - c0, dy = y + 0.5f - c0, d = std::sqrt(dx * dx + dy * dy) / 9.0f;
+                if (d > 1) continue;
+                float lit = clampf(0.55f - d * 0.5f - (dx + dy) * 0.02f, 0, 1);
+                put(x, y, lerpColor(Color{18, 70, 96, 255}, Color{120, 214, 232, 255}, lit));
+            }
+        for (int arm = 0; arm < 2; arm++) // the breath inside: a double spiral of wind
+            for (float a = 0; a < 7.5f; a += 0.05f)
+            {
+                float r = 0.6f + a * 0.95f, ang = a + arm * 3.14159f;
+                if (r > 8) break;
+                put((int)(c0 + std::cos(ang) * r), (int)(c0 + std::sin(ang) * r * 0.8f), a > 5 ? Color{150, 230, 245, 255} : Color{220, 252, 255, 255});
+            }
+        put(8, 7, WHITE); put(9, 6, WHITE); put(8, 6, {230, 250, 255, 255}); put(16, 15, {200, 240, 250, 255}); // glints
+        for (float a = 0; a < 6.283f; a += 0.02f) // roots twisting round it, two strands crossing, moss in the crooks
+            for (int s = 0; s < 2; s++)
+            {
+                float r = 10.2f + (s ? 1 : -1) * std::sin(a * 6) * 1.1f;
+                int x = (int)(c0 + std::cos(a) * r), y = (int)(c0 + std::sin(a) * r);
+                bool over = (std::sin(a * 6) > 0) == (s == 0);
+                put(x, y, over ? Color{112, 92, 60, 255} : Color{64, 50, 36, 255});
+                if (hash2((int)(a * 40), s, 77) > 0.86f) put(x + (s ? 1 : -1), y, {74, 120, 66, 255});
+            }
+        for (auto c : {Vector2{21, 3}, Vector2{22, 4}, Vector2{3, 19}, Vector2{4, 20}, Vector2{20, 21}}) put((int)c.x, (int)c.y, {150, 236, 230, 255}); // sea crystals
+        t = LoadTextureFromImage(im);
+        UnloadImage(im);
+    }
+    float w = t.width * 0.5f * scale;
+    DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {cx - w / 2, cy - w / 2, w, w}, {0, 0}, 0, WHITE);
+}
+
+void drawDecor(const Interact& it, float x, float y)
+{
+    static std::map<int, Texture2D> cache;
+    int var = it.style & 63, key = (it.w << 14) | (it.data * 64 + var);
+    auto c = cache.find(key);
+    if (c == cache.end())
+    {
+        Image im = it.data < DK_DRESSER ? decorImage(it.data, var) : decorImageFine(it.data, var, it.w);
+        c = cache.emplace(key, LoadTextureFromImage(im)).first;
+        UnloadImage(im);
+    }
+    const Texture2D& t = c->second;
+    float w = t.width * 0.5f, h = t.height * 0.5f;
+    bool flip = it.style & 64;
+    int an = it.data < DK_DRESSER ? 0 : decorAnchor(it.data, var);
+    float top = an == 0 ? y - h + 0.5f : (an == 1 ? y : y - h / 2); // a standing one has its foot just in the ground
+    DrawTexturePro(t, {0, 0, (float)(flip ? -t.width : t.width), (float)t.height}, {x - w / 2, top, w, h}, {0, 0}, 0, WHITE);
+}
+
+// The wyrm-head dart trap: its slab sunk 3 units into the wall, the head jutting out along `dir`, its jaws
+// (sprite pixel 15.5 down) at mouthY. Shakes and reddens for `hit` frames after a blow.
+void drawDartTrap(float faceX, float mouthY, int dir, bool broken, int hit, int hp)
+{
+    const Texture2D& t = hdTexture(broken ? HD_DART_TRAP_BROKEN : HD_DART_TRAP);
+    float w = t.width * 0.5f, h = t.height * 0.5f, j = hit > 0 ? (hit % 2 ? 0.5f : -0.5f) : 0;
+    float left = dir > 0 ? faceX - 3 : faceX + 3 - w;
+    Color tint = hit > 0 ? Color{255, 190, 180, 255} : WHITE;
+    DrawTexturePro(t, {0, 0, (float)(dir > 0 ? t.width : -t.width), (float)t.height}, {left + j, mouthY - 7.75f, w, h}, {0, 0}, 0, tint);
+    if (broken) return;
+    float hx = faceX + dir * 5.0f + j, hy = mouthY - 1.0f; // cracks across the head, one more for every blow it's taken
+    const Color CR = {34, 30, 28, 255};
+    if (hp <= 2) { DrawLineEx({hx - dir * 2.5f, hy - 4}, {hx - dir * 0.5f, hy - 1.5f}, 0.7f, CR); DrawLineEx({hx - dir * 0.5f, hy - 1.5f}, {hx + dir * 1.0f, hy - 2.5f}, 0.7f, CR); }
+    if (hp <= 1) { DrawLineEx({hx + dir * 2.5f, hy + 2.5f}, {hx, hy + 0.5f}, 0.7f, CR); DrawLineEx({hx, hy + 0.5f}, {hx - dir * 2.0f, hy + 3.0f}, 0.7f, CR); }
 }
 
 void drawSpriteNative(const Sprite& s, float x, float bottom, bool flip)
@@ -818,145 +926,20 @@ void drawSpriteBig(const Sprite& s, float x, float bottom, bool flip, Color tint
     drawBig(bigOf(s, tint, SC_FINE2), x, bottom, flip, 1, 1, 0, BLANK, 1);
 }
 
-const Sprite& enemySprite(const Mob& m)
-{
-    bool alt = ((int)m.anim) & 1;
-    switch (m.type)
-    {
-    case E_GOBLIN: return alt ? SPR_GOBLIN_B : SPR_GOBLIN_A;
-    case E_BOMBER: return SPR_BOMBER;
-    case E_SKELETON: return alt ? SPR_SKELETON_B : SPR_SKELETON_A;
-    case E_ARCHER: return SPR_ARCHER;
-    case E_BAT: return ((G.frame / 6 + m.id) & 1) ? SPR_BAT_B : SPR_BAT_A;
-    case E_SLIME: return SPR_SLIME;
-    case E_CULTIST: return SPR_CULTIST;
-    case E_KNIGHT: return alt ? SPR_KNIGHT_B : SPR_KNIGHT_A;
-    case E_IMP: return SPR_IMP;
-    case E_WRAITH: return SPR_WRAITH;
-    case E_GOLEM: return SPR_GOLEM;
-    case E_BLACKKNIGHT: return SPR_BLACKKNIGHT;
-    case E_WOLF: return alt ? SPR_WOLF_B : SPR_WOLF_A;
-    case E_REDCAP: return SPR_REDCAP;
-    case E_DRAUGR: return SPR_DRAUGR;
-    case E_TROLL: return SPR_TROLL;
-    case E_BANSHEE: return SPR_BANSHEE;
-    case E_KELPIE: return SPR_KELPIE;
-    case E_GUARD: return alt ? SPR_GUARD_B : SPR_GUARD_A;
-    case E_RISEN: return alt ? SPR_RISEN_B : SPR_RISEN_A;
-    default: return SPR_LICH;
-    }
-}
-
-// Enemies drawn with detailed art from tools/art_hd.py (half a world cell per pixel). None use it yet;
-// to try one, map it here, e.g.  case E_GUARD: return alt ? &HD_WARRIOR_AXE_B : &HD_WARRIOR_AXE_A;
-static const HDSprite* hdArt(const Mob& m)
-{
-    switch (m.type)
-    {
-    default: return nullptr;
-    }
-}
-
-static const BigSprite& mobArt(const Mob& m)
-{
-    if (const HDSprite* hd = hdArt(m)) return bigOfHD(*hd);
-    static const Color coats[5] = {{132, 128, 122, 255}, {128, 92, 60, 255}, {64, 60, 62, 255}, {204, 200, 190, 255}, {156, 98, 54, 255}}; // grey, brown, black, white, russet
-    return bigOf(enemySprite(m), m.type == E_WOLF ? coats[(m.id * 7) % 5] : WHITE, m.boss ? SC_FINE2 : SC_FINE);
-}
-
 static const RigSpec* rigFor(int type);
-static void drawMobRig(const Mob& m, const RigSpec& R, int camX, int camY);
+static const AnimSheet& animFor(int type);
+static void drawAnimMob(const Mob& m, const AnimSheet& A, int camX, int camY);
 
 void drawMobAnimated(const Mob& m, int camX, int camY)
 {
-    if (const RigSpec* R = rigFor(m.type)) // drawn limb by limb on its rig
-    {
-        drawMobRig(m, *R, camX, camY);
-        if (m.hp < m.maxHp && !m.boss)
-        {
-            int bw = std::max(m.w, 10);
-            int bx = (int)(std::floor(m.x) + m.w * 0.5f - camX - bw / 2.0f), by = (int)(std::floor(m.y) - camY - 7);
-            DrawRectangle(bx - 1, by - 1, bw + 2, 4, {10, 6, 10, 200});
-            DrawRectangle(bx, by, (int)(bw * std::max(0.0f, m.hp / m.maxHp)), 2, {230, 40, 40, 255});
-        }
-        return;
-    }
-    const BigSprite& b = mobArt(m);
-    const EnemyDef& d = ENEMIES[m.type];
-    bool flying = d.ai == AI_FLY || d.ai == AI_FLYCAST || d.ai == AI_BOSS_LICH;
-
-    float sys = m.squash, bob = 0, lunge = 0;
-    if (!flying && !m.onGround) sys *= 1 + clampf(-m.vy * 0.04f, -0.12f, 0.18f);
-    if (m.onGround && std::fabs(m.vx) < 0.1f) sys *= 1 + 0.04f * std::sin(G.frame * 0.08f + m.id); // breathing
-    if (flying) bob = std::sin(G.frame * 0.12f + m.id) * 2.0f;
-    if (m.type == E_SLIME) sys *= 1 + 0.12f * std::sin(G.frame * 0.15f + m.id);
-    float lean = clampf(m.vx * 0.35f, -0.45f, 0.45f);
-    float sxs = 1.0f / sys;
-    if (m.atkPhase == 1) // winding up: rocked back, coiled, trembling at the last
-    {
-        float k = 1 - clampf(m.atkT / 15.0f, 0, 1);
-        lunge = -m.facing * (1.0f + 2.0f * k) + (m.atkT < 6 ? std::sin(G.frame * 2.1f) * 0.6f : 0);
-        lean -= m.facing * 0.25f * k;
-        sxs *= 1 + 0.1f * k;
-        sys *= 1 - 0.1f * k;
-    }
-    else if (m.atkPhase == 2) // the strike: thrown forward, stretched
-    {
-        lunge = m.facing * 3.5f;
-        lean += m.facing * 0.3f;
-        sxs *= 1.15f;
-        sys *= 0.9f;
-    }
-    else if (m.attackT > 0)
-    {
-        bool wind = m.attackT > 8; // anticipation, then the strike
-        lunge = m.facing * (wind ? -2.0f : 4.0f);
-        sxs *= wind ? 0.9f : 1.12f;
-        sys *= wind ? 1.08f : 0.92f;
-    }
-    if (m.hurtFlash > 0) { sxs *= 1.1f; sys *= 0.9f; }
-    float recoil = 0;
-    if (m.hitT > 0) // struck: snapped back the way the blow went, a little lift, easing back upright
-    {
-        float k = m.hitT / 14.0f, e = k * k;
-        lean = clampf(lean + m.hitDir * (flying ? 0.35f : 0.6f) * e, -0.9f, 0.9f);
-        recoil = m.hitDir * 2.5f * e;
-        bob -= std::sin(k * PI) * 1.5f;
-        sxs *= 1 + 0.12f * e;
-        sys *= 1 - 0.1f * e;
-    }
-
-    float ax = std::floor(m.x) + m.w * 0.5f - camX + lunge + recoil, ay = std::floor(m.y) + m.h - camY + bob;
-    Color flash = m.hurtFlash > 0 ? WHITE : BLANK;
-    if (m.type == E_BLACKKNIGHT && m.state == 2 && (G.frame / 3) % 2) flash = {255, 60, 60, 255};
-    coatMob = (m.wet || m.oily || m.bloody || m.burn) ? &m : nullptr;
-    drawBig(b, ax, ay, m.facing < 0, sxs, sys, lean, flash, m.type == E_WRAITH ? 0.75f : 1.0f);
-    coatMob = nullptr;
-
+    drawAnimMob(m, animFor(m.type), camX, camY); // painted frame by frame (tools/anim.py)
     if (m.hp < m.maxHp && !m.boss)
     {
         int bw = std::max(m.w, 10);
-        int bx = (int)(std::floor(m.x) + m.w * 0.5f - camX - bw / 2.0f), by = (int)(std::floor(m.y) - camY - 5 + bob);
+        int bx = (int)(std::floor(m.x) + m.w * 0.5f - camX - bw / 2.0f), by = (int)(std::floor(m.y) - camY - 7);
         DrawRectangle(bx - 1, by - 1, bw + 2, 4, {10, 6, 10, 200});
         DrawRectangle(bx, by, (int)(bw * std::max(0.0f, m.hp / m.maxHp)), 2, {230, 40, 40, 255});
     }
-}
-
-// Shatter a sprite into its pixels.
-void burstSprite(const Mob& m)
-{
-    const BigSprite& b = mobArt(m);
-    float u = b.unit, ox = m.cx() - b.w * u / 2.0f, oy = m.y + m.h - b.h * u;
-    int step = u < 1 ? 2 : 1; // one particle per world cell
-    for (int j = 0; j < b.h; j += step)
-        for (int i = 0; i < b.w; i += step)
-        {
-            Color c = b.px[j * b.w + i];
-            if (c.a < 200) continue;
-            float x = ox + (m.facing < 0 ? b.w - 1 - i : i) * u, y = oy + j * u;
-            float dx = x - m.cx(), dy = y - m.cy();
-            spawnParticle(x, y, dx * 0.08f + frange(-0.6f, 0.6f) + m.vx * 0.5f, dy * 0.05f + frange(-2.0f, -0.4f), irange(30, 70), c, 0.12f);
-        }
 }
 
 // ---------------------------------------------------------------- ragdolls
@@ -1082,14 +1065,12 @@ void drawRagdolls(int camX, int camY)
 
 // ---------------------------------------------------------------- limb rigs
 // Creatures are drawn as parts (painted by tools/art_hd.py into sprites_hd.h) hung on a skeleton of joints.
-// Alive, rigPose lays the joints out every frame - walking, swinging, recoiling. Dead, the same joints
+// Alive, each frame of its sheet carries the joints (tools/anim.py). Dead, the same joints
 // become a Verlet ragdoll: points joined by sticks (one per limb, plus braces holding shoulders and hips
 // to the torso), knees, elbows and the neck kept within limits, every point colliding with the world. So
 // a corpse falls in a heap with its arms and legs flopping, and a hard enough blow breaks sticks - limbs
 // come off, spurting. Angles: 0 points down, positive turns towards the way the creature faces, PI is up.
 
-enum { J_NECK, J_PELVIS, J_HEADB, J_HEADT, J_SHF, J_ELF, J_HAF, J_SHN, J_ELN, J_HAN, J_HIPF, J_KNF, J_FTF, J_HIPN, J_KNN, J_FTN, J_WB, J_WT };
-static_assert(J_WT + 1 == RJ_COUNT, "joint count");
 enum { G_HEAD = 1, G_ARMF = 2, G_ARMN = 4, G_LEGF = 8, G_LEGN = 16, G_WAIST = 32, G_WEAPON = 64, G_MIN = 128 }; // what a cut can sever; G_MIN: a brace that only pushes apart
 
 namespace Tune // every ragdoll tunable, in one place
@@ -1107,39 +1088,39 @@ const float FOLD_MIN = 0.55f;             // a limb can't fold tighter than this
 const float JET = 2.6f, JET_FADE = 0.993f, SEEP_FADE = 0.997f;
 }
 
-static const RigSpec* rigFor(int type)
+static const RigSpec* rigFor(int type) // its corpse's parts, cut from its painting
 {
     switch (type)
     {
-    case E_GOBLIN: return &RIG_GOBLIN;
-    case E_BOMBER: return &RIG_BOMBER;
-    case E_SKELETON: return &RIG_SKELETON;
-    case E_ARCHER: return &RIG_ARCHER;
-    case E_BAT: return &RIG_BAT;
-    case E_CULTIST: return &RIG_CULTIST;
-    case E_KNIGHT: return &RIG_KNIGHT;
-    case E_IMP: return &RIG_IMP;
-    case E_WRAITH: return &RIG_WRAITH;
-    case E_GOLEM: return &RIG_GOLEM;
-    case E_WOLF: return &RIG_WOLF;
-    case E_REDCAP: return &RIG_REDCAP;
-    case E_DRAUGR: return &RIG_DRAUGR;
-    case E_TROLL: return &RIG_TROLL;
-    case E_BANSHEE: return &RIG_BANSHEE;
-    case E_KELPIE: return &RIG_KELPIE;
-    case E_GUARD: return &RIG_GUARD;
-    case E_RISEN: return &RIG_RISEN;
-    case E_BLACKKNIGHT: return &RIG_BLACKKNIGHT;
-    case E_LICH: return &RIG_LICH;
-    default: return nullptr; // the slime keeps its single wobbling sprite
+    case E_GOBLIN: return &RIG_A_GOBLIN;
+    case E_BOMBER: return &RIG_A_BOMBER;
+    case E_SKELETON: return &RIG_A_SKELETON;
+    case E_ARCHER: return &RIG_A_ARCHER;
+    case E_BAT: return &RIG_A_BAT;
+    case E_CULTIST: return &RIG_A_CULTIST;
+    case E_KNIGHT: return &RIG_A_KNIGHT;
+    case E_IMP: return &RIG_A_IMP;
+    case E_WRAITH: return &RIG_A_WRAITH;
+    case E_GOLEM: return &RIG_A_GOLEM;
+    case E_WOLF: return &RIG_A_WOLF;
+    case E_REDCAP: return &RIG_A_REDCAP;
+    case E_DRAUGR: return &RIG_A_DRAUGR;
+    case E_TROLL: return &RIG_A_TROLL;
+    case E_BANSHEE: return &RIG_A_BANSHEE;
+    case E_KELPIE: return &RIG_A_KELPIE;
+    case E_GUARD: return &RIG_A_GUARD;
+    case E_RISEN: return &RIG_A_RISEN;
+    case E_RAIDER: return &RIG_A_RAIDER;
+    case E_BLACKKNIGHT: return &RIG_A_BLACKKNIGHT;
+    case E_LICH: return &RIG_A_LICH;
+    default: return nullptr; // the slime bursts
     }
 }
 
 static float boneLen(const RigPart& p) { return p.spr ? std::hypot(p.ex - p.px, p.ey - p.py) * Tune::UNIT : 0; }
 static Vector2 dirA(float a) { return {std::sin(a), std::cos(a)}; }
-static Vector2 scl(Vector2 a, float k) { return {a.x * k, a.y * k}; }
 static Vector2 lerpV(Vector2 a, Vector2 b, float t) { return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t}; }
-static bool weaponNear(const RigSpec& R) { return !R.part[RS_SHIELD].spr; } // with a shield on the near arm, the weapon's in the far hand
+static bool weaponNear(const RigSpec& R) { return !R.part[RS_SHIELD].spr || R.shieldFar; } // with a shield on the near arm, the weapon's in the far hand
 
 // The limb segments a wound can sit on, per kind of rig (pairs of joints).
 static const uint8_t SEGS[][2] = {{J_NECK, J_PELVIS}, {J_HEADB, J_HEADT}, {J_SHF, J_ELF}, {J_ELF, J_HAF}, {J_SHN, J_ELN}, {J_ELN, J_HAN},
@@ -1148,10 +1129,20 @@ static int segCount(const RigSpec& R) { return R.kind == RK_BAT ? 1 : (R.part[RS
 
 // ---- textures: each part, and a white silhouette of it for the flash when struck
 struct PartTex { Texture2D tex, white; };
+// Palette alpha 254 takes the armour's metal (grey 156 becomes the metal's own colour), 253 its glow.
+static Color recolour(Color c)
+{
+    Color to = c.a == 254 ? rigMetal : (c.a == 253 ? rigGlow : BLANK);
+    auto tone = [](unsigned char v, unsigned char t) { return (unsigned char)std::min(255.0f, v * (0.2f + 0.8f * t / 156.0f)); };
+    if (to.a) c = {tone(c.r, to.r), tone(c.g, to.g), tone(c.b, to.b), 255};
+    c.a = 255;
+    return c;
+}
 static const PartTex& partTex(const HDSprite* s)
 {
-    static std::map<const HDSprite*, PartTex> cache;
-    auto it = cache.find(s);
+    static std::map<std::tuple<const HDSprite*, unsigned, unsigned>, PartTex> cache;
+    auto key = std::make_tuple(s, (unsigned)ColorToInt(rigMetal), (unsigned)ColorToInt(rigGlow));
+    auto it = cache.find(key);
     if (it != cache.end()) return it->second;
     Image a = GenImageColor(s->w, s->h, BLANK), b = GenImageColor(s->w, s->h, BLANK);
     for (int y = 0; y < s->h; y++)
@@ -1159,13 +1150,13 @@ static const PartTex& partTex(const HDSprite* s)
         {
             char ch = s->rows[y][x];
             if (ch == '.') continue;
-            ((Color*)a.data)[y * s->w + x] = s->pal[std::strchr(HD_ALPHABET, ch) - HD_ALPHABET];
+            ((Color*)a.data)[y * s->w + x] = recolour(s->pal[std::strchr(HD_ALPHABET, ch) - HD_ALPHABET]);
             ((Color*)b.data)[y * s->w + x] = WHITE;
         }
     PartTex t{LoadTextureFromImage(a), LoadTextureFromImage(b)};
     UnloadImage(a);
     UnloadImage(b);
-    return cache[s] = t;
+    return cache[key] = t;
 }
 
 // One part, hung from joint `a` with its bone pointing at `b` (both in render-texture units).
@@ -1232,136 +1223,174 @@ static void drawRig(const RigSpec& R, const Vector2* J, int f, Color tint, bool 
     drawPart(P[RS_SHIN], J[J_KNF], J[J_FTF], f, far, white);
     drawPart(P[RS_TORSO], J[J_NECK], J[J_PELVIS], f, tint, white);
     drawPart(P[RS_HEAD], J[J_HEADB], J[J_HEADT], f, tint, white);
+    if (P[RS_SHIELD].spr && R.shieldFar) drawAttached(P[RS_SHIELD], J[J_HAF], localAng(J[J_ELF], J[J_HAF], f) + R.sgrip, f, tint, white);
     drawPart(P[RS_THIGH], J[J_HIPN], J[J_KNN], f, tint, white);
     drawPart(P[RS_SHIN], J[J_KNN], J[J_FTN], f, tint, white);
     if (wn) drawPart(P[RS_WEAPON], J[J_WB], J[J_WT], f, tint, white);
     drawPart(P[RS_UARM], J[J_SHN], J[J_ELN], f, tint, white);
     drawPart(P[RS_FARM], J[J_ELN], J[J_HAN], f, tint, white);
-    if (P[RS_SHIELD].spr) drawAttached(P[RS_SHIELD], J[J_HAN], localAng(J[J_ELN], J[J_HAN], f) + R.sgrip, f, tint, white);
+    if (P[RS_SHIELD].spr && !R.shieldFar) drawAttached(P[RS_SHIELD], J[J_HAN], localAng(J[J_ELN], J[J_HAN], f) + R.sgrip, f, tint, white);
     if (P[RS_WING].spr) drawAttached(P[RS_WING], J[J_SHN], torso - PI - 1.7f + flap * 0.8f, f, tint, white);
 }
 
-// Lays a living creature's joints out in world units.
-static void rigPose(const Mob& m, const RigSpec& R, Vector2* J)
+// ---------------------------------------------------------------- frame-by-frame animation
+// Creatures painted whole, frame by frame (tools/anim.py -> sprites_anim.h): every pose is its own crisp picture,
+// nothing rotated. Each frame also carries its rig joints, so wounds and bolts sit on the limbs, and when the
+// creature dies its corpse (the rig parts above, cut from the same painting) starts from the pose it died in.
+
+static const AnimSheet& animFor(int type)
+{
+    switch (type)
+    {
+    case E_GOBLIN: return ANIM_GOBLIN;
+    case E_BOMBER: return ANIM_BOMBER;
+    case E_SKELETON: return ANIM_SKELETON;
+    case E_ARCHER: return ANIM_ARCHER;
+    case E_BAT: return ANIM_BAT;
+    case E_SLIME: return ANIM_SLIME;
+    case E_CULTIST: return ANIM_CULTIST;
+    case E_KNIGHT: return ANIM_KNIGHT;
+    case E_IMP: return ANIM_IMP;
+    case E_WRAITH: return ANIM_WRAITH;
+    case E_GOLEM: return ANIM_GOLEM;
+    case E_WOLF: return ANIM_WOLF;
+    case E_REDCAP: return ANIM_REDCAP;
+    case E_DRAUGR: return ANIM_DRAUGR;
+    case E_TROLL: return ANIM_TROLL;
+    case E_BANSHEE: return ANIM_BANSHEE;
+    case E_KELPIE: return ANIM_KELPIE;
+    case E_GUARD: return ANIM_GUARD;
+    case E_RISEN: return ANIM_RISEN;
+    case E_SERPENT: return ANIM_SERPENT;
+    case E_SCORPION: return ANIM_SCORPION;
+    case E_RAIDER: return ANIM_RAIDER;
+    case E_BLACKKNIGHT: return ANIM_BLACKKNIGHT;
+    default: return ANIM_LICH;
+    }
+}
+
+static const PartTex& sheetTex(const AnimSheet& A)
+{
+    static std::map<std::tuple<const AnimSheet*, unsigned, unsigned>, PartTex> cache;
+    auto key = std::make_tuple(&A, (unsigned)ColorToInt(rigMetal), (unsigned)ColorToInt(rigGlow));
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    int n = A.fw * A.fh * A.frames;
+    Image a = GenImageColor(A.fw, A.fh * A.frames, BLANK), b = GenImageColor(A.fw, A.fh * A.frames, BLANK);
+    for (int i = 0; i < n; i++)
+    {
+        if (A.px[i] == '.') continue;
+        ((Color*)a.data)[i] = recolour(A.pal[std::strchr(HD_ALPHABET, A.px[i]) - HD_ALPHABET]);
+        ((Color*)b.data)[i] = WHITE;
+    }
+    PartTex t{LoadTextureFromImage(a), LoadTextureFromImage(b)};
+    UnloadImage(a);
+    UnloadImage(b);
+    return cache[key] = t;
+}
+
+// A frame of clip `clip`, `k` (0..1) of the way through it; a creature without the clip stands idle.
+static int clipFrame(const AnimSheet& A, int clip, float k)
+{
+    int n = A.clip[clip][1];
+    if (!n) clip = AC_IDLE, n = A.clip[AC_IDLE][1];
+    return A.clip[clip][0] + std::min(n - 1, std::max(0, (int)(k * n)));
+}
+
+static int mobFrame(const Mob& m, const AnimSheet& A)
 {
     const EnemyDef& d = ENEMIES[m.type];
-    const RigPart* P = R.part;
     bool flying = d.ai == AI_FLY || d.ai == AI_FLYCAST || d.ai == AI_BOSS_LICH;
-    const float f = (float)m.facing, t = m.anim * PI, mv = clampf(std::fabs(m.vx) / 0.6f, 0, 1);
-    const float idle = std::sin(G.frame * 0.06f + m.id);
-    Vector2 L[RJ_COUNT] = {};
-    float lean = clampf(m.vx * f * 0.3f, -0.2f, 0.35f), lunge = 0, nod = idle * 0.04f, recoil = 0, k = 0;
-    if (m.atkPhase == 1) { k = 1 - clampf(m.atkT / 15.0f, 0, 1); lunge = -(1 + 2 * k); lean -= 0.25f * k; }
-    else if (m.atkPhase == 2) { k = 1; lunge = 3.0f; lean += 0.3f; }
-    else if (m.atkPhase == 3) lean += 0.1f;
-    if (m.hitT > 0) // struck: snapped back the way the blow went
+    bool ranged = d.ai == AI_RANGED || d.ai == AI_BOMB || d.ai == AI_FLYCAST || d.ai == AI_BOSS_LICH;
+    bool leaps = m.type == E_WOLF || m.type == E_KELPIE || m.type == E_SERPENT || m.type == E_SLIME || m.type == E_BAT; // their strike is a lunge, pounce or dive
+    if (m.type == E_BLACKKNIGHT && (m.state == 2 || m.state == 3)) // the blade lowered like a lance, then the charge
     {
-        float e = m.hitT / 14.0f;
-        e *= e;
-        lean = clampf(lean + m.hitDir * f * 0.6f * e, -0.8f, 0.8f);
-        nod += m.hitDir * f * 0.5f * e;
-        recoil = m.hitDir * 2.5f * e;
+        int n = A.clip[AC_CHARGE][1] - 1;
+        return m.state == 2 ? A.clip[AC_CHARGE][0] : A.clip[AC_CHARGE][0] + 1 + (int)(std::fmod(m.anim, 2.6f) / 2.6f * n) % n;
     }
-    float bob = flying ? std::sin(G.frame * 0.12f + m.id) * 2.0f : 0;
-    float rootX = m.cx() + lunge * f + recoil, rootY = m.y + m.h;
+    if (m.atkPhase == 1) return clipFrame(A, AC_WINDUP, 1 - (float)m.atkT / windupFor(m.type));
+    if (m.atkPhase == 2) return clipFrame(A, AC_STRIKE, 1 - m.atkT / (m.type == E_SLIME ? 45.0f : m.type == E_BAT ? 32.0f : leaps ? 30.0f : 6.0f));
+    if (m.atkPhase == 3) return clipFrame(A, AC_RECOVER, 1 - m.atkT / (leaps ? 18.0f : m.w > 16 ? 22.0f : 14.0f));
+    if (m.hitT > 0) return clipFrame(A, AC_HURT, 1 - m.hitT / 14.0f);
+    if (m.attackT > 0) return clipFrame(A, A.clip[AC_CAST][1] ? AC_CAST : AC_STRIKE, 1 - m.attackT / 15.0f); // the shot, the throw, the spell let go
+    if (ranged && m.aggro && m.los && m.cd > 0 && m.cd <= 16) return clipFrame(A, AC_WINDUP, 1 - m.cd / 16.0f); // drawing, aiming, gathering it
+    if (flying) return clipFrame(A, AC_IDLE, std::fmod((G.frame + m.id * 7) / 24.0f, 1.0f)); // wingbeats, drifting
+    if (!m.onGround && !m.inLiquid) return clipFrame(A, AC_WALK, 0.3f);
+    if (m.squash < 0.9f && A.clip[AC_LAND][1]) return clipFrame(A, AC_LAND, 0); // just come down hard
+    if (std::fabs(m.vx) > 0.08f) return clipFrame(A, AC_WALK, std::fmod(m.anim, 2.6f) / 2.6f); // a stride per ~9 units walked
+    return clipFrame(A, AC_IDLE, std::fmod((G.frame + m.id * 13) / 54.0f, 1.0f));
+}
 
-    if (R.kind == RK_BAT)
-    {
-        float bl = boneLen(P[RS_TORSO]), wl = boneLen(P[RS_UARM]), fl = std::sin(G.frame * 0.5f + m.id);
-        rootY = m.cy() + bob;
-        L[J_NECK] = {0, -bl / 2};
-        L[J_PELVIS] = {0, bl / 2};
-        L[J_SHF] = L[J_SHN] = add(L[J_NECK], {0, 1.2f});
-        L[J_ELF] = add(L[J_SHF], scl(dirA(-2.0f + fl), wl));
-        L[J_ELN] = add(L[J_SHN], scl(dirA(-2.4f + fl), wl));
-    }
-    else if (R.kind == RK_QUAD)
-    {
-        float B = boneLen(P[RS_TORSO]), fu = boneLen(P[RS_UARM]), fl = boneLen(P[RS_FARM]), ru = boneLen(P[RS_THIGH]), rl = boneLen(P[RS_SHIN]);
-        float g = std::sin(t) * 0.6f * mv, kn = 0.15f + 0.6f * std::max(0.0f, std::cos(t)) * mv, kf = 0.15f + 0.6f * std::max(0.0f, -std::cos(t)) * mv;
-        float crouch = m.atkPhase == 1 ? 2 * k : 0, reach = m.atkPhase == 2 ? 0.7f : 0;
-        auto hgt = [](float a, float b, float x, float y) { return a * std::cos(x) + b * std::cos(x - y); };
-        float hf = std::max(hgt(fu, fl, g + reach, -kn), hgt(fu, fl, -g + reach, -kf)), hr = std::max(hgt(ru, rl, -g, kn), hgt(ru, rl, g, kf));
-        L[J_NECK] = {B / 2, -hf + crouch};
-        L[J_PELVIS] = {-B / 2, -hr + crouch * 0.5f};
-        L[J_SHN] = add(L[J_NECK], {-0.8f, 0}); L[J_SHF] = add(L[J_NECK], {-1.4f, 0});
-        L[J_HIPN] = add(L[J_PELVIS], {0.8f, 0}); L[J_HIPF] = add(L[J_PELVIS], {0.3f, 0});
-        L[J_ELN] = add(L[J_SHN], scl(dirA(g + reach), fu)); L[J_HAN] = add(L[J_ELN], scl(dirA(g + reach + kn), fl)); // front knees bend back
-        L[J_ELF] = add(L[J_SHF], scl(dirA(-g + reach), fu)); L[J_HAF] = add(L[J_ELF], scl(dirA(-g + reach + kf), fl));
-        L[J_KNN] = add(L[J_HIPN], scl(dirA(-g), ru)); L[J_FTN] = add(L[J_KNN], scl(dirA(-g - kn), rl)); // hocks bend forward
-        L[J_KNF] = add(L[J_HIPF], scl(dirA(g), ru)); L[J_FTF] = add(L[J_KNF], scl(dirA(g - kf), rl));
-        L[J_HEADB] = add(L[J_NECK], {0.8f, -0.8f});
-        L[J_HEADT] = add(L[J_HEADB], scl(dirA(m.atkPhase >= 1 ? 1.65f : 1.95f + 0.05f * idle), boneLen(P[RS_HEAD])));
-        L[J_WB] = add(L[J_PELVIS], {-0.6f, -0.8f});
-        L[J_WT] = add(L[J_WB], scl(dirA(-2.1f + 0.3f * std::sin(t * 2 + G.frame * 0.05f)), boneLen(P[RS_TAIL])));
-    }
-    else
-    {
-        float th = boneLen(P[RS_THIGH]), sh = boneLen(P[RS_SHIN]), to = boneLen(P[RS_TORSO]), hd = boneLen(P[RS_HEAD]);
-        float ua = boneLen(P[RS_UARM]), fa = boneLen(P[RS_FARM]), wl = boneLen(P[RS_WEAPON]);
-        float sw = 0.55f * std::sin(t) * mv;
-        float tN = sw, tF = -sw, kN = 0.12f + 0.9f * std::max(0.0f, std::cos(t)) * mv, kF = 0.12f + 0.9f * std::max(0.0f, -std::cos(t)) * mv;
-        if (!m.onGround && !m.inLiquid && !flying) { tN = 0.6f; kN = 1.1f; tF = 0.15f; kF = 0.5f; } // airborne: knees up
-        if (flying) { tN = 0.25f + 0.1f * idle; kN = 0.5f; tF = 0.05f; kF = 0.35f; }
-        auto legH = [&](float a, float b) { return th * std::cos(a) + sh * std::cos(a - b); };
-        Vector2 pel;
-        if (R.kind == RK_GHOST) pel = {0, -((P[RS_TORSO].spr->h - P[RS_TORSO].ey) * Tune::UNIT - 1) + bob - 1};
-        else pel = {0, -std::max(legH(tN, kN), legH(tF, kF)) - std::fabs(std::sin(t)) * 0.5f * mv + (flying ? bob - 2 : 0) + (m.onGround && mv < 0.1f ? 0.2f * idle : 0)};
-        L[J_PELVIS] = pel;
-        L[J_NECK] = add(pel, scl(dirA(PI - lean), to));
-        L[J_HEADB] = add(L[J_NECK], scl(dirA(PI - lean), 0.6f));
-        L[J_HEADT] = add(L[J_HEADB], scl(dirA(PI - lean * 0.4f - nod), hd));
-        Vector2 sho = lerpV(L[J_NECK], pel, R.shoulder);
-        float spS = R.sw * Tune::UNIT, spH = R.hw * Tune::UNIT; // a full figure, turned side-on: shoulders and hips spread across it
-        L[J_SHN] = add(sho, {spS, 0});
-        L[J_SHF] = add(sho, {-spS, 0});
-        L[J_HIPN] = add(pel, {spH, 0});
-        L[J_HIPF] = add(pel, {-spH, 0});
-        L[J_KNN] = add(L[J_HIPN], scl(dirA(tN), th)); L[J_FTN] = add(L[J_KNN], scl(dirA(tN - kN), sh));
-        L[J_KNF] = add(L[J_HIPF], scl(dirA(tF), th)); L[J_FTF] = add(L[J_KNF], scl(dirA(tF - kF), sh));
-        // arms: swinging with the stride, unless they're busy
-        float aN = -sw * 0.8f + idle * 0.04f, fN = aN + 0.35f, aF = sw * 0.8f, fF = aF + 0.35f;
-        static const float HOLD[6][2] = {{0, 0}, {0.35f, 1.0f}, {0.5f, 0.9f}, {1.35f, 1.55f}, {0.4f, 1.0f}, {0.2f, 0.7f}};
-        int wc = R.weapon;
-        float wa = HOLD[wc][0], wf = HOLD[wc][1], grip = R.grip;
-        bool busy = wc != RW_NONE;
-        if (m.atkPhase)
+// Frame `fr` with its feet at (x, y) (render-texture units), snapped to whole pixels.
+static void drawSheet(const AnimSheet& A, int fr, float x, float y, int facing, Color tint, bool white)
+{
+    const PartTex& t = sheetTex(A);
+    const float U = Tune::UNIT, w = (float)A.fw, h = (float)A.fh;
+    float left = std::floor((facing < 0 ? x - (w - A.ax) * U : x - A.ax * U) / U) * U, top = std::floor((y - A.ay * U) / U) * U;
+    DrawTexturePro(white ? t.white : t.tex, {0, fr * h, facing < 0 ? -w : w, h}, {left, top, w * U, h * U}, {0, 0}, 0, tint);
+}
+
+// A villager (0 man, 1 woman, 2 child) with its feet at (x, y) in render-texture units; its coat takes `coat`'s colour.
+int folkLooks(int kind) { return kind == 0 || kind == 1 ? 4 : 3; }
+void drawFolk(int kind, int look, float anim, bool walking, int dir, float x, float y, Color coat, int seed)
+{
+    static const AnimSheet* const FOLK[3][4] = {{&ANIM_FOLK_M0, &ANIM_FOLK_M1, &ANIM_FOLK_M2, &ANIM_FOLK_M3},
+                                                {&ANIM_FOLK_F0, &ANIM_FOLK_F1, &ANIM_FOLK_F2, &ANIM_FOLK_F3},
+                                                {&ANIM_FOLK_C0, &ANIM_FOLK_C1, &ANIM_FOLK_C2, &ANIM_FOLK_C0}};
+    const AnimSheet& A = *FOLK[kind % 3][look % folkLooks(kind)];
+    int fr = walking ? clipFrame(A, AC_WALK, std::fmod(anim, 2.6f) / 2.6f) : clipFrame(A, AC_IDLE, std::fmod((G.frame + seed * 17) / 70.0f, 1.0f));
+    Color keep = rigMetal;
+    rigMetal = coat;
+    drawSheet(A, fr, x, y, dir, WHITE, false);
+    rigMetal = keep;
+}
+
+static void animJoints(const AnimSheet& A, int fr, float x, float y, int facing, Vector2* J)
+{
+    const float* j = A.joints + fr * RJ_COUNT * 2;
+    for (int i = 0; i < RJ_COUNT; i++) J[i] = {x + j[i * 2] * Tune::UNIT * facing, y + j[i * 2 + 1] * Tune::UNIT};
+}
+
+// A living creature's joints in world units, from the frame it's showing.
+static void poseJoints(const Mob& m, Vector2* J)
+{
+    const AnimSheet& A = animFor(m.type);
+    animJoints(A, mobFrame(m, A), m.cx(), m.y + m.h, m.facing, J);
+}
+
+static void drawAnimMob(const Mob& m, const AnimSheet& A, int camX, int camY)
+{
+    int fr = mobFrame(m, A);
+    float x = m.cx() - camX, y = m.y + m.h - camY;
+    drawSheet(A, fr, x, y, m.facing, coatTint(m), m.hurtFlash > 0);
+    const RigSpec* R = rigFor(m.type);
+    if (!m.nWounds || !R) return;
+    Vector2 J[RJ_COUNT];
+    animJoints(A, fr, x, y, m.facing, J);
+    for (int k = 0; k < m.nWounds; k++)
+        if (m.woundK[k] == WK_BOLT && m.woundS[k] < segCount(*R))
         {
-            busy = true;
-            if (wc == RW_POLE) // a thrust: drawn back, then driven straight out
-            {
-                float w0 = m.atkPhase == 1 ? k : 1;
-                wa = m.atkPhase == 1 ? -0.2f * k + 0.5f * (1 - k) : (m.atkPhase == 2 ? 1.45f : 0.9f);
-                wf = m.atkPhase == 1 ? 1.3f : (m.atkPhase == 2 ? 1.55f : 1.0f);
-                grip = grip + (0.05f - grip) * w0;
-            }
-            else if (m.atkPhase == 1) { wa = wa + (-2.4f - wa) * k; wf = wf + (-1.6f - wf) * k; } // raised up and back
-            else if (m.atkPhase == 2) { wa = 1.5f; wf = 1.9f; }                                  // brought down
-            else { wa = 1.0f; wf = 0.8f; }                                                        // following through
-            if (wc == RW_NONE) wc = RW_BLADE; // claws and fists swing like blades
+            Vector2 a = J[SEGS[m.woundS[k]][0]], b = J[SEGS[m.woundS[k]][1]];
+            bolt(lerpV(a, b, m.woundT[k]), std::atan2(b.y - a.y, b.x - a.x) + m.woundA[k], 6);
         }
-        else if (m.attackT > 0) // shooting, casting, throwing
+}
+
+// Shatter a creature into its pixels, a particle per world unit, from the frame it died in.
+void burstSprite(const Mob& m)
+{
+    const AnimSheet& A = animFor(m.type);
+    const char* px = A.px + (size_t)mobFrame(m, A) * A.fw * A.fh;
+    const float U = Tune::UNIT;
+    for (int j = 0; j < A.fh; j += 2)
+        for (int i = 0; i < A.fw; i += 2)
         {
-            busy = true;
-            if (wc == RW_BOW) { wa = 1.5f; wf = 1.57f; }
-            else if (wc == RW_THROW) { if (m.attackT > 8) { wa = -2.4f; wf = -1.9f; } else { wa = 1.6f; wf = 1.9f; } }
-            else if (wc == RW_STAFF || wc == RW_NONE) { wa = 2.2f; wf = 2.6f; }
-            else if (m.attackT > 8) { wa = -2.2f; wf = -1.5f; }
-            else { wa = 1.5f; wf = 1.8f; }
+            char ch = px[j * A.fw + i];
+            if (ch == '.') continue;
+            Color c = recolour(A.pal[std::strchr(HD_ALPHABET, ch) - HD_ALPHABET]);
+            float x = m.cx() + (i - A.ax) * U * m.facing, y = m.y + m.h + (j - A.ay) * U;
+            float dx = x - m.cx(), dy = y - m.cy();
+            spawnParticle(x, y, dx * 0.08f + frange(-0.6f, 0.6f) + m.vx * 0.5f, dy * 0.05f + frange(-2.0f, -0.4f), irange(30, 70), c, 0.12f);
         }
-        bool wn = weaponNear(R);
-        if (busy) { if (wn) { aN = wa; fN = wf; } else { aF = wa; fF = wf; } }
-        if (!wn) { aN = 0.1f + 0.04f * idle; fN = 0.65f; } // the shield held up close before the body
-        if (wc == RW_BOW && m.attackT > 0) { aF = 1.3f; fF = -0.3f; } // the other hand draws the string
-        if (R.kind == RK_GHOST && !busy) { aN = 0.6f + 0.1f * idle; fN = 1.1f; aF = 0.4f - 0.1f * idle; fF = 0.9f; } // reaching
-        L[J_ELN] = add(L[J_SHN], scl(dirA(aN), ua)); L[J_HAN] = add(L[J_ELN], scl(dirA(fN), fa));
-        L[J_ELF] = add(L[J_SHF], scl(dirA(aF), ua)); L[J_HAF] = add(L[J_ELF], scl(dirA(fF), fa));
-        Vector2 hand = wn ? L[J_HAN] : L[J_HAF];
-        float wang = (wn ? fN : fF) + grip;
-        L[J_WB] = add(hand, scl(dirA(wang), 0.5f));
-        L[J_WT] = add(hand, scl(dirA(wang), wl));
-    }
-    for (int i = 0; i < RJ_COUNT; i++) J[i] = {rootX + L[i].x * f, rootY + L[i].y};
 }
 
 static Color coatTint(const Mob& m)
@@ -1378,27 +1407,12 @@ static Color coatTint(const Mob& m)
     return c;
 }
 
-static void drawMobRig(const Mob& m, const RigSpec& R, int camX, int camY)
-{
-    Vector2 J[RJ_COUNT];
-    rigPose(m, R, J);
-    for (auto& j : J) { j.x -= camX; j.y -= camY; }
-    drawRig(R, J, m.facing, coatTint(m), m.hurtFlash > 0, std::sin(G.frame * 0.45f + m.id));
-    int segs = segCount(R);
-    for (int k = 0; k < m.nWounds; k++)
-        if (m.woundK[k] == WK_BOLT && m.woundS[k] < segs)
-        {
-            Vector2 a = J[SEGS[m.woundS[k]][0]], b = J[SEGS[m.woundS[k]][1]];
-            bolt(lerpV(a, b, m.woundT[k]), std::atan2(b.y - a.y, b.x - a.x) + m.woundA[k], 6);
-        }
-}
-
 bool rigLocate(const Mob& m, Vector2 at, float ang, uint8_t& seg, float& t, float& rel)
 {
     const RigSpec* R = rigFor(m.type);
     if (!R) return false;
     Vector2 J[RJ_COUNT];
-    rigPose(m, *R, J);
+    poseJoints(m, J);
     float best = 1e9f;
     for (int s = 0; s < segCount(*R); s++)
     {
@@ -1415,7 +1429,7 @@ Vector2 rigWoundPos(const Mob& m, int k)
     const RigSpec* R = rigFor(m.type);
     if (!R || m.woundS[k] >= segCount(*R)) return {m.cx(), m.cy()};
     Vector2 J[RJ_COUNT];
-    rigPose(m, *R, J);
+    poseJoints(m, J);
     return lerpV(J[SEGS[m.woundS[k]][0]], J[SEGS[m.woundS[k]][1]], m.woundT[k]);
 }
 
@@ -1473,7 +1487,7 @@ void spawnCorpse(const Mob& m)
     c.rig = R;
     c.facing = m.facing;
     c.gore = d.gore;
-    rigPose(m, *R, c.p);
+    poseJoints(m, c.p);
     const RigPart* P = R->part;
     // the sticks: one per limb, braces holding shoulders and hips to the torso, the weapon fixed in the hand
     addStick(c, J_NECK, J_PELVIS, 0);
@@ -1559,11 +1573,13 @@ void spawnCorpse(const Mob& m)
     if ((int)G.corpses.size() > Tune::MAX_CORPSES) G.corpses.erase(G.corpses.begin()); // the oldest of the dead are cleared away
 }
 
-// Out of the rock the shortest way; `respond` also bounces and rubs off its speed.
-static bool collidePoint(Vector2& p, Vector2& pp, bool respond)
+// Out of the rock the shortest way; `respond` also bounces and rubs off its speed. Returns the grip of
+// what it hit (0: nothing).
+static float collidePoint(Vector2& p, Vector2& pp, bool respond)
 {
     int x = (int)std::floor(p.x), y = (int)std::floor(p.y);
-    if (!isSolid(x, y)) return false;
+    if (!isSolid(x, y)) return 0;
+    float g = gripAt(x, y);
     Vector2 v = {p.x - pp.x, p.y - pp.y}, was = p;
     bool up = false;
     for (int d = 1; d <= 4; d++)
@@ -1573,11 +1589,11 @@ static bool collidePoint(Vector2& p, Vector2& pp, bool respond)
         if (!isSolid(x + d, y)) { p.x = (float)(x + d) + 0.01f; break; }
         if (!isSolid(x, y + d)) { p.y = (float)(y + d) + 0.01f; break; }
     }
-    if (!respond) { pp.x += p.x - was.x; pp.y += p.y - was.y; return true; } // a push-out moves it, it doesn't fling it
-    if (up) { pp.y = p.y; pp.x = p.x - v.x * (1 - Tune::FRICTION); } // landing: no bounce, and it rubs along the ground
+    if (!respond) { pp.x += p.x - was.x; pp.y += p.y - was.y; return g; } // a push-out moves it, it doesn't fling it
+    if (up) { pp.y = p.y; pp.x = p.x - v.x * (1 - std::min(1.0f, Tune::FRICTION * g)); } // landing: no bounce, and it rubs along the ground
     else if (p.x != was.x) pp.x = p.x;
     else pp.y = p.y;
-    return true;
+    return g;
 }
 
 static void stepCorpse(Corpse& c)
@@ -1604,12 +1620,15 @@ static void stepCorpse(Corpse& c)
             a.x += dx * k; a.y += dy * k;
             b.x -= dx * k; b.y -= dy * k;
         }
-        bool touched = false;
+        float touched = 0; // the grippiest ground it's on
         for (int i = 0; i < RJ_COUNT; i++)
-            if ((c.used >> i) & 1) touched = collidePoint(c.p[i], c.pp[i], it == Tune::ITERS - 1) || touched;
-        if (touched && it == Tune::ITERS - 1)
+            if ((c.used >> i) & 1) touched = std::max(touched, collidePoint(c.p[i], c.pp[i], it == Tune::ITERS - 1));
+        if (touched > 0 && it == Tune::ITERS - 1)
+        {
+            float damp = 1 - std::min(1.0f, (1 - Tune::GROUND_DAMP) * touched); // ice barely slows it
             for (int i = 0; i < RJ_COUNT; i++)
-                if ((c.used >> i) & 1) { c.pp[i].x = c.p[i].x - (c.p[i].x - c.pp[i].x) * Tune::GROUND_DAMP; c.pp[i].y = c.p[i].y - (c.p[i].y - c.pp[i].y) * Tune::GROUND_DAMP; }
+                if ((c.used >> i) & 1) { c.pp[i].x = c.p[i].x - (c.p[i].x - c.pp[i].x) * damp; c.pp[i].y = c.p[i].y - (c.p[i].y - c.pp[i].y) * damp; }
+        }
     }
     float moved = 0; // how far it really went this step (gravity pressing it into the floor doesn't count)
     for (int i = 0; i < RJ_COUNT; i++)
@@ -1732,8 +1751,8 @@ void shiftCorpses(float dx, float dy)
 void ragdollForPlayer()
 {
     Mob& m = G.p.m;
-    Look k = playerLook();
-    spawnRagdoll(m.cx(), m.y + m.h, (float)m.h + 3, m.vx + frange(-0.5f, 0.5f), m.vy - 1.5f, k.metal ? k.A : k.hairD, k.tunic, k.pants, false, CellMaterial::Blood);
+    // the Viking's colours (tools/viking.py): a steel helm, a yellow tunic, dark trousers
+    spawnRagdoll(m.cx(), m.y + m.h, (float)m.h + 3, m.vx + frange(-0.5f, 0.5f), m.vy - 1.5f, {152, 160, 180, 255}, {206, 132, 38, 255}, {50, 38, 70, 255}, false, CellMaterial::Blood);
 }
 
 // ---------------------------------------------------------------- held weapon
@@ -2043,6 +2062,7 @@ static Texture2D weaponTex(const Weapon& w)
 // Draws a weapon sprite turned to `ang` about its grip (or its middle, for icons). `scale`: units per pixel.
 void drawWeaponSprite(const Weapon& w, Vector2 at, float ang, float scale, bool centred)
 {
+    if (weapon3dDraw(w, at, ang, scale, centred)) return; // the 3D-modelled weapon (tools/weapons3d.py); the old painted art below is the fallback
     const WeaponArt& a = WART[w.type];
     if (!a.rows[0]) return;
     Texture2D t = weaponTex(w);
@@ -2055,6 +2075,7 @@ void drawWeaponSprite(const Weapon& w, Vector2 at, float ang, float scale, bool 
 
 float weaponLength(const Weapon& w) // grip to tip, in world cells, as drawn
 {
+    if (float l3 = weapon3dLength(w)) return l3;
     const WeaponArt& a = WART[w.type];
     float best = 0;
     for (int y = 0; a.rows[y]; y++)
@@ -2081,9 +2102,25 @@ void attackPose(float& ang, float& ext, int back)
     {
     case ATK_SLASH:
     {
-        float k = fin ? 1.3f : 1.0f, tt = (float)left / len;
-        ang = P.aim - P.swingDir * 1.4f * k + P.swingDir * 2.8f * k * (1 - tt * tt);
+        // coil back a little, then the whole sweep inside a few frames around the hit, easing out into the follow-through
+        float k = fin ? 1.3f : 1.0f, p0 = hp * 0.45f;
+        float u = clampf((p - p0) / (hp * 0.55f + 0.2f), 0, 1), w = 1 - (1 - u) * (1 - u) * (1 - u);
+        if (p < p0) w = -0.18f * std::sin(PI * p / std::max(0.01f, p0));
+        ang = P.aim - P.swingDir * 1.4f * k + P.swingDir * 2.8f * k * w;
+        float rec = clampf((p - 0.55f) / 0.45f, 0, 1); // then the blade comes back down to its guard instead of hanging in the air
+        ang += std::remainder((f > 0 ? 1.0f : PI - 1.0f) - ang, 2 * PI) * rec * rec * (3 - 2 * rec);
         if (fin) ext = 1.5f * std::sin(PI * p);
+        break;
+    }
+    case ATK_SWEEP: // a flat sweep seen from the side: the blade swings from behind to in front under the arm, the circle squashed
+    {         // so it stays low and level. Odd blows go back to front, even ones front to back.
+        float p0 = hp * 0.45f;
+        float u = clampf((p - p0) / (hp * 0.55f + 0.2f), 0, 1), w = 1 - (1 - u) * (1 - u) * (1 - u);
+        if (p < p0) w = -0.15f * std::sin(PI * p / std::max(0.01f, p0)); // drawn back first
+        float s = P.swingDir < 0 ? w : 1 - w, al = PI * (1 - s);
+        ang = P.aim + f * std::atan2(0.5f * std::sin(al), std::cos(al));
+        float rec = clampf((p - 0.55f) / 0.45f, 0, 1);
+        ang += std::remainder((f > 0 ? 1.0f : PI - 1.0f) - ang, 2 * PI) * rec * rec * (3 - 2 * rec);
         break;
     }
     case ATK_STAB:
@@ -2147,25 +2184,38 @@ void drawHeld(float ox, float oy)
             {
                 // a smear behind the blade through the fast part of the swing, brightest at its leading edge
                 float a0, e0;
-                attackPose(a0, e0, 3);
-                bool fast = P.atkStyle == ATK_SLASH || (p > hp * 0.75f && p <= hp + 0.01f);
+                attackPose(a0, e0, P.atkStyle == ATK_SLASH ? 4 : 3);
+                bool fast = ((P.atkStyle == ATK_SLASH || P.atkStyle == ATK_SWEEP) && p < hp + 0.3f) || (P.atkStyle != ATK_SLASH && P.atkStyle != ATK_SWEEP && p > hp * 0.75f && p <= hp + 0.01f);
                 float span = std::remainder(a - a0, 2 * PI);
-                if (P.atkStyle != ATK_SLASH) // overhead blows turn more than half a circle: follow their real direction
+                if (P.atkStyle != ATK_SLASH && P.atkStyle != ATK_SWEEP) // overhead blows turn more than half a circle: follow their real direction
                 {
                     span = std::fmod(a - a0, 2 * PI);
                     if (f > 0 && span < 0) span += 2 * PI;
                     if (f < 0 && span > 0) span -= 2 * PI;
                 }
-                if (fast && std::fabs(span) > 0.05f)
+                if (fast && std::fabs(span) > 0.05f && std::fabs(span) < 3.0f)
                 {
                     float r0 = std::max(2.0f, L * 0.35f), r1 = L + ext + 2.5f;
-                    float lo = std::min(a0, a0 + span) * RAD2DEG, hi = std::max(a0, a0 + span) * RAD2DEG;
-                    float heavy = P.atkStyle == ATK_SLASH ? 1.0f : 1.4f;
-                    DrawRing({ox, oy}, r0, r1, lo, hi, 20, {sm.r, sm.g, sm.b, (unsigned char)(70 * heavy)});
-                    DrawRing({ox, oy}, r1 - 3.0f, r1, lo, hi, 20, {sm.r, sm.g, sm.b, (unsigned char)(140 * heavy)});
-                    DrawRing({ox, oy}, r1 - 1.0f, r1 + 0.6f, lo, hi, 20, {255, 255, 255, 190});
-                    float lead = (span > 0 ? hi : lo) * DEG2RAD; // a hot spark at the tip
-                    DrawCircleV({ox + std::cos(lead) * r1, oy + std::sin(lead) * r1}, 1.2f, {255, 255, 240, 220});
+                    float heavy = P.atkStyle == ATK_SLASH || P.atkStyle == ATK_SWEEP ? 1.0f : 1.4f;
+                    // a crescent: a sliver at the tail, widest and brightest at the blade, with a white edge on the outside
+                    int n = std::max(4, (int)(std::fabs(span) * 9));
+                    auto at = [&](float t, float r) { float an = a0 + span * t; return Vector2{ox + std::cos(an) * r, oy + std::sin(an) * r}; };
+                    auto tri = [](Vector2 u, Vector2 v, Vector2 w, Color c)
+                    {
+                        float cr = (v.x - u.x) * (w.y - u.y) - (v.y - u.y) * (w.x - u.x);
+                        if (cr < 0) DrawTriangle(u, v, w, c); else DrawTriangle(u, w, v, c); // raylib wants them counter-clockwise on screen (y down)
+                    };
+                    for (int i = 0; i < n; i++)
+                    {
+                        float t0 = (float)i / n, t1 = (float)(i + 1) / n, tm = (t0 + t1) * 0.5f;
+                        float i0 = r1 - (r1 - r0) * t0 * t0, i1 = r1 - (r1 - r0) * t1 * t1; // the inner edge sweeps out as it nears the blade
+                        Color c = {sm.r, sm.g, sm.b, (unsigned char)std::min(255.0f, 190 * heavy * tm * tm)};
+                        tri(at(t0, r1), at(t1, r1), at(t1, i1), c);
+                        tri(at(t0, r1), at(t1, i1), at(t0, i0), c);
+                        DrawLineEx(at(t0, r1), at(t1, r1), 1.0f, {255, 255, 255, (unsigned char)(220 * tm)});
+                    }
+                    Vector2 tip = at(1, r1); // a hot spark at the tip
+                    DrawCircleV(tip, 1.3f, {255, 255, 240, 230});
                 }
             }
             EndBlendMode();

@@ -5,6 +5,8 @@
 #include <vector>
 #include <algorithm>
 #include <cstdio>
+#include <thread>
+#include <functional>
 #include "game.h"
 #include "util.h"
 #include <rlgl.h>
@@ -19,7 +21,7 @@ static const int SUB = 2; // must match the play grid's scale (world.scale)
 static void setupView()
 {
     int sw = GetScreenWidth(), sh = GetScreenHeight();
-    int scale = 3; // fixed: a bigger window or fullscreen shows more of the world, not the same view bigger
+    int scale = 4; // fixed: a bigger window or fullscreen shows more of the world, not the same view bigger
     int vw = (sw + scale - 1) / scale, vh = (sh + scale - 1) / scale;
     if (rt.id && vw == G.vw && vh == G.vh && scale == G.scale)
         return;
@@ -45,9 +47,9 @@ static void setupView()
 
 static const int LS = 2; // world pixels per light texel
 static Texture2D lightTex{};
-static int lw = 0, lh = 0, lox = 0, loy = 0, lightId = 0;
-static std::vector<float> lr, lg, lb, lsky, er, eg, eb, llast;
-static std::vector<int> lstamp, ltop, lwet;
+static int lw = 0, lh = 0, lox = 0, loy = 0;
+static std::vector<float> lr, lg, lb, lsky, er, eg, eb;
+static std::vector<int> ltop, lwet;
 static std::vector<Color> lpix;
 
 static bool opaque(int x, int y) // x, y in world units: the light map works in units, sampling one cell of each
@@ -82,31 +84,76 @@ static void boxBlur(std::vector<float>& v, int w, int h, int rx, int ry)
 
 // Rays fan out from the light and lose strength in each opaque cell, so walls catch a lit rim
 // and cast shadows behind them. Overlapping rays keep the brightest value, not the sum.
+// The frame's lights are gathered first, then cast on several threads, each into its own buffer (the world is
+// only read), and the buffers summed: the same picture in any order.
+struct PointLight { float x, y, R; Color c; float I; };
+static std::vector<PointLight> plist;
+struct LightAcc
+{
+    std::vector<float> r, g, b, last;
+    std::vector<int> stamp;
+    int id = 0, i0 = 1 << 30, j0 = 1 << 30, i1 = -1, j1 = -1; // the texels it touched this frame
+};
+static std::vector<LightAcc> lacc;
+
 static void pointLight(float x, float y, float R, Color c, float I)
 {
     if (x + R < lox || y + R < loy || x - R > lox + lw * LS || y - R > loy + lh * LS) return;
-    lightId++;
-    float cr = c.r / 255.0f * I, cg = c.g / 255.0f * I, cb = c.b / 255.0f * I;
-    int rays = std::max(48, (int)(R * 3.2f)); // enough that neighbouring rays never skip a light texel
+    plist.push_back({x, y, R, c, I});
+}
+
+static void castLight(LightAcc& A, const PointLight& L)
+{
+    A.id++;
+    float cr = L.c.r / 255.0f * L.I, cg = L.c.g / 255.0f * L.I, cb = L.c.b / 255.0f * L.I;
+    A.i0 = std::max(0, std::min(A.i0, (int)((L.x - L.R - lox) / LS))); A.i1 = std::min(lw - 1, std::max(A.i1, (int)((L.x + L.R - lox) / LS) + 1));
+    A.j0 = std::max(0, std::min(A.j0, (int)((L.y - L.R - loy) / LS))); A.j1 = std::min(lh - 1, std::max(A.j1, (int)((L.y + L.R - loy) / LS) + 1));
+    int rays = std::max(48, (int)(L.R * 3.2f)); // enough that neighbouring rays never skip a light texel
     for (int k = 0; k < rays; k++)
     {
         float a = k * 6.2832f / rays, dx = std::cos(a), dy = std::sin(a), t = 1;
-        for (float d = 0; d < R; d += 1.5f)
+        for (float d = 0; d < L.R; d += (float)LS) // a step per light texel
         {
-            int wx = (int)std::floor(x + dx * d), wy = (int)std::floor(y + dy * d);
+            int wx = (int)std::floor(L.x + dx * d), wy = (int)std::floor(L.y + dy * d);
             if (opaque(wx, wy) && (t *= 0.55f) < 0.04f) break;
             if (wx < lox || wy < loy) continue;
             int i = (wx - lox) / LS, j = (wy - loy) / LS;
             if (i >= lw || j >= lh) continue;
-            float f = 1 - d / R, v = f * f * t;
+            float f = 1 - d / L.R, v = f * f * t;
             size_t q = (size_t)j * lw + i;
-            if (lstamp[q] != lightId) { lstamp[q] = lightId; llast[q] = 0; }
-            if (v <= llast[q]) continue;
-            float inc = v - llast[q];
-            llast[q] = v;
-            lr[q] += inc * cr; lg[q] += inc * cg; lb[q] += inc * cb;
+            if (A.stamp[q] != A.id) { A.stamp[q] = A.id; A.last[q] = 0; }
+            if (v <= A.last[q]) continue;
+            float inc = v - A.last[q];
+            A.last[q] = v;
+            A.r[q] += inc * cr; A.g[q] += inc * cg; A.b[q] += inc * cb;
         }
     }
+}
+
+// Casts every gathered light into lr/lg/lb.
+static void castLights()
+{
+    int nt = workerCount();
+    size_t n = (size_t)lw * lh;
+    int use = std::min(nt, (int)plist.size());
+    if ((int)lacc.size() < nt) lacc.resize(nt);
+    for (int t = 0; t < use; t++)
+        if (lacc[t].r.size() != n) { LightAcc& A = lacc[t]; for (auto* v : {&A.r, &A.g, &A.b, &A.last}) v->assign(n, 0); A.stamp.assign(n, 0); A.id = 0; }
+    auto run = [&](int t) { for (size_t k = t; k < plist.size(); k += use) castLight(lacc[t], plist[k]); };
+    parallelFor(use, run);
+    for (int t = 0; t < use; t++) // sum each buffer's touched box into the map, clearing it for next frame
+    {
+        LightAcc& A = lacc[t];
+        for (int j = A.j0; j <= A.j1; j++)
+            for (int i = A.i0; i <= A.i1; i++)
+            {
+                size_t q = (size_t)j * lw + i;
+                lr[q] += A.r[q]; lg[q] += A.g[q]; lb[q] += A.b[q];
+                A.r[q] = A.g[q] = A.b[q] = 0;
+            }
+        A.i0 = A.j0 = 1 << 30; A.i1 = A.j1 = -1;
+    }
+    plist.clear();
 }
 
 static void buildLight(int cx, int cy)
@@ -121,8 +168,8 @@ static void buildLight(int cx, int cy)
         UnloadImage(img);
         SetTextureFilter(lightTex, TEXTURE_FILTER_BILINEAR);
         size_t n = (size_t)lw * lh;
-        for (auto* v : {&lr, &lg, &lb, &lsky, &er, &eg, &eb, &llast}) v->assign(n, 0);
-        lstamp.assign(n, 0);
+        for (auto* v : {&lr, &lg, &lb, &lsky, &er, &eg, &eb}) v->assign(n, 0);
+        lacc.clear(); // their buffers are the map's size
         lpix.assign(n, WHITE);
     }
     lox = cx - ((cx % LS) + LS) % LS; // texels stay locked to the world grid, so light doesn't crawl as the camera moves
@@ -139,17 +186,20 @@ static void buildLight(int cx, int cy)
     {
         ltop.assign(lw, 0);
         lwet.assign(lw, 1 << 30);
-        for (int i = 0; i < lw; i++)
-        {
-            int x = lox + i * LS + LS / 2, y = 0;
-            while (y < world.hU() && !opaque(x, y))
+        int nt = workerCount();
+        parallelFor(nt, [&](int t) { // each column on its own
+            for (int i = lw * t / nt; i < lw * (t + 1) / nt; i++)
             {
-                if (lwet[i] > y && props(world.get(x * world.scale, y * world.scale).material).kind == Kind::Liquid) lwet[i] = y;
-                if (y - lwet[i] > 260) break; // the moonlight is gone by here: no need to sound the rest of the deep
-                y++;
+                int x = lox + i * LS + LS / 2, y = 0;
+                while (y < world.hU() && !opaque(x, y))
+                {
+                    if (lwet[i] > y && props(world.get(x * world.scale, y * world.scale).material).kind == Kind::Liquid) lwet[i] = y;
+                    if (y - lwet[i] > 260) break; // the moonlight is gone by here: no need to sound the rest of the deep
+                    y++;
+                }
+                ltop[i] = y;
             }
-            ltop[i] = y;
-        }
+        });
         for (int j = 0; j < lh; j++)
             for (int i = 0; i < lw; i++)
             {
@@ -165,20 +215,32 @@ static void buildLight(int cx, int cy)
     std::fill(eg.begin(), eg.end(), 0.0f);
     std::fill(eb.begin(), eb.end(), 0.0f);
     bool anyEmit = false;
-    for (int j = 0; j < lh * LS; j++)
-        for (int i = 0; i < lw * LS; i++)
-        {
-            int x = lox + i, y = loy + j;
-            if (!world.inU(x, y)) continue;
-            const Cell& c = world.get(x * world.scale, y * world.scale);
-            Color gl = (c.flags & CF_BURNING) ? props(CellMaterial::Fire).glow : props(c.material).glow; // burning things glow like fire
-            if (!gl.a) continue;
-            size_t q = (size_t)(j / LS) * lw + i / LS;
-            er[q] += gl.r / 255.0f; eg[q] += gl.g / 255.0f; eb[q] += gl.b / 255.0f;
-            anyEmit = true;
-        }
-    if (anyEmit)
-        for (auto* v : {&er, &eg, &eb}) { boxBlur(*v, lw, lh, 7, 7); boxBlur(*v, lw, lh, 7, 7); }
+    { // in bands of whole light rows, one per thread (each writes only its own rows)
+        int nt = workerCount();
+        std::vector<char> any(nt, 0);
+        auto band = [&](int t) {
+            for (int jl = lh * t / nt; jl < lh * (t + 1) / nt; jl++)
+                for (int j = jl * LS; j < jl * LS + LS; j++)
+                    for (int i = 0; i < lw * LS; i++)
+                    {
+                        int x = lox + i, y = loy + j;
+                        if (!world.inU(x, y)) continue;
+                        const Cell& c = world.get(x * world.scale, y * world.scale);
+                        Color gl = (c.flags & CF_BURNING) ? props(CellMaterial::Fire).glow : props(c.material).glow; // burning things glow like fire
+                        if (!gl.a) continue;
+                        size_t q = (size_t)jl * lw + i / LS;
+                        er[q] += gl.r / 255.0f; eg[q] += gl.g / 255.0f; eb[q] += gl.b / 255.0f;
+                        any[t] = 1;
+                    }
+        };
+        parallelFor(nt, band);
+        for (char a : any) anyEmit = anyEmit || a;
+    }
+    if (anyEmit) // the three channels blur side by side
+    {
+        std::vector<float>* ch[3] = {&er, &eg, &eb};
+        parallelFor(3, [&](int k) { boxBlur(*ch[k], lw, lh, 7, 7); boxBlur(*ch[k], lw, lh, 7, 7); });
+    }
 
     std::fill(lr.begin(), lr.end(), 0.0f);
     std::fill(lg.begin(), lg.end(), 0.0f);
@@ -195,11 +257,14 @@ static void buildLight(int cx, int cy)
     for (auto& l : G.lamps) if (!l.smoke) pointLight(l.x, l.y, l.r, l.c, l.flame ? 0.88f + 0.12f * hash2((int)l.x, G.frame / 4, 9) : 0.85f);
     for (auto& p : G.projs)
         if (p.kind == PK_SPELL && p.spell != SP_DIG && p.spell != SP_BOMB) pointLight(p.x, p.y, 34, p.col, 0.9f);
+    for (auto& pu : G.pickups) // Önd glows: you can find it in the dark of the deep
+        if (pu.kind == PU_OND && pu.alive) pointLight(pu.b.x + 4, pu.b.y + 3, 44, {140, 230, 250, 255}, 0.85f);
     if (G.p.m.alive && G.p.hasWisp) pointLight(G.p.wx, G.p.wy, 150, {255, 238, 200, 255}, 0.8f); // Baldr's Offering
     if (G.p.m.alive) pointLight(G.p.m.cx(), G.p.m.cy() - 4, 64, {255, 236, 210, 255}, 0.5f); // enough to see your own feet
     for (auto& m : G.mobs) // anything on fire lights its surroundings
         if (m.burn > 0) pointLight(m.cx(), m.cy() - 4, 48, {255, 140, 50, 255}, 0.8f);
     if (G.p.m.alive && G.p.m.burn > 0) pointLight(G.p.m.cx(), G.p.m.cy() - 4, 70, {255, 140, 50, 255}, 0.95f);
+    castLights();
 
     const float moon[3] = {0.66f, 0.72f, 0.92f};
     for (size_t q = 0; q < n; q++)
@@ -218,9 +283,12 @@ static void buildLight(int cx, int cy)
 static void renderScene()
 {
     int cx = G.rcx, cy = G.rcy;
+    double pt = GetTime();
     renderWorld(pix.data(), cx * SUB, cy * SUB, G.vw * SUB, G.vh * SUB);
     UpdateTexture(worldTex, pix.data());
+    profLap(pt, PF_WORLD);
     buildLight(cx, cy);
+    profLap(pt, PF_LIGHT);
     prepareStallArt();
     BeginTextureMode(rt);
     ClearBackground(BLACK);
@@ -228,6 +296,7 @@ static void renderScene()
     rlPushMatrix();
     rlScalef(SUB, SUB, 1); // entities draw in world units as before
     drawEntities(cx, cy);
+    profLap(pt, PF_DRAW);
     BeginBlendMode(BLEND_MULTIPLIED);
     DrawTexturePro(lightTex, {0, 0, (float)lw, (float)lh}, {(float)(lox - cx), (float)(loy - cy), (float)lw * LS, (float)lh * LS}, {0, 0}, 0, WHITE);
     EndBlendMode();
@@ -287,6 +356,23 @@ static void drawOverlay(const char* title, const std::string& sub, const char* h
     centered(hint, sh * 0.3f + 130 * u, 20 * u, GRAY);
 }
 
+// The loading screen, redrawn from inside the slow generators so the bar moves: `frac` 0..1, `what` the step in hand.
+void loadStep(float frac, const char* what)
+{
+    if (!IsWindowReady() || IsWindowHidden()) return;
+    float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight(), u = sh / 768.0f;
+    BeginDrawing();
+    DrawRectangle(0, 0, (int)sw, (int)sh, {10, 8, 14, 255});
+    centered("Sailing for distant shores...", sh * 0.40f, 40 * u, {220, 200, 160, 255});
+    float bw = sw * 0.42f, bh = 14 * u, bx = (sw - bw) / 2, by = sh * 0.40f + 90 * u;
+    DrawRectangle((int)bx - 3, (int)by - 3, (int)bw + 6, (int)bh + 6, {70, 56, 40, 255});
+    DrawRectangle((int)bx, (int)by, (int)bw, (int)bh, {26, 22, 28, 255});
+    DrawRectangle((int)bx, (int)by, (int)(bw * std::min(1.0f, std::max(0.0f, frac))), (int)bh, {214, 170, 70, 255});
+    DrawRectangle((int)bx, (int)by, (int)(bw * std::min(1.0f, std::max(0.0f, frac))), (int)(bh * 0.35f), {244, 214, 120, 255});
+    centered(what, by + 34 * u, 20 * u, {170, 156, 130, 255});
+    EndDrawing();
+}
+
 int main(int argc, char** argv)
 {
     rngState() = (uint32_t)time(nullptr) * 2654435761u | 1u;
@@ -303,6 +389,307 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (argc > 2 && std::string(argv[1]) == "--ui") // dev: <dir>/hud.png and inv.png (the HUD and the inventory, 1366x768)
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "ui");
+        setupView();
+        initUI();
+        newGameKit(false);
+        generateVillage();
+        G.state = GS_PLAY;
+        G.p.m.hp = G.p.m.maxHp * 0.7f;
+        G.p.stamina = 62;
+        for (int s = 0; s < SC_COUNT; s++) G.p.scrolls.push_back(s); // so the screenshot shows the scrolls
+        G.p.hasMap = true;
+        G.p.breath = 70;
+        for (int f = 0; f < 60; f++) updateGame();
+        for (int k = 0; k < 4; k++) // along the street: vil0..3.png
+        {
+            G.camX = 30 + k * 400; G.camY = G.p.m.cy() - G.vh / 2.0f;
+            syncRenderCamera();
+            BeginDrawing(); ClearBackground(BLACK); renderScene(); EndDrawing();
+            Image img = LoadImageFromScreen();
+            ExportImage(img, (std::string(argv[2]) + "/vil" + std::to_string(k) + ".png").c_str());
+            UnloadImage(img);
+        }
+        for (int pass = 0; pass < 2; pass++)
+        {
+            G.state = pass ? GS_INVENTORY : GS_PLAY;
+            G.camX = G.p.m.cx() - G.vw / 2.0f; G.camY = G.p.m.cy() - G.vh / 2.0f;
+            syncRenderCamera();
+            for (int f = 0; f < 3; f++)
+            {
+                BeginDrawing(); ClearBackground(BLACK); renderScene(); drawHUD();
+                if (pass) updateDrawInventory();
+                EndDrawing();
+            }
+            Image img = LoadImageFromScreen();
+            ExportImage(img, (std::string(argv[2]) + (pass ? "/inv.png" : "/hud.png")).c_str());
+            UnloadImage(img);
+        }
+        for (int shop = 0; shop < 3; shop++) // the three stalls' counters: shop0..2.png
+        {
+            G.state = GS_SHOP; G.shopId = shop; META.bank = 2500;
+            for (int f = 0; f < 3; f++) { BeginDrawing(); ClearBackground(BLACK); renderScene(); drawHUD(); updateDrawShop(); EndDrawing(); }
+            Image img = LoadImageFromScreen();
+            ExportImage(img, (std::string(argv[2]) + "/shop" + std::to_string(shop) + ".png").c_str());
+            UnloadImage(img);
+        }
+        return 0;
+    }
+
+    if (argc > 2 && std::string(argv[1]) == "--fx") // dev: close-ups of fire, torches and hangings, <dir>/fx0..3.png
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "fx");
+        setupView();
+        newGameKit(false);
+        generateVillage();
+        G.state = GS_PLAY;
+        Player& P = G.p;
+        P.m.x = 150;
+        { int yy = (int)P.m.y - 80; while (world.get(150 * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++; P.m.y = (float)yy - P.m.h; }
+        float px = P.m.cx(), fy = P.m.y + P.m.h;
+        for (int i = 0; i < 3; i++) // two torches and a hanging
+        {
+            G.inter.push_back({IT_TORCH, px - 40.0f + i * 22, fy});
+        }
+        Interact t{IT_DECOR, px + 30, fy - 52, false, DK_TAPESTRY, 8 + 16};
+        t.w = 30;
+        G.inter.push_back(t);
+        for (int k = 0; k < 4; k++) { Interact tt{IT_DECOR, px + 62 + k * 24.0f, fy - 52, false, DK_TAPESTRY, k * 2 + (k << 3)}; tt.w = 26; G.inter.push_back(tt); }
+        G.lamps.push_back({px - 60, fy - 3, 90, {255, 160, 80, 255}, true});
+        Mob e = makeEnemy(0, px + 10, fy); e.burn = 200; e.facing = 1; G.mobs.push_back(e);
+        P.m.burn = 200;
+        paintCircle((int)(px - 90) * world.scale, (int)(fy - 6) * world.scale, 5 * world.scale, CellMaterial::Fire, true);
+        for (int k = 0; k < 50; k++) updateGame();
+        for (int i = 0; i < 4; i++)
+        {
+            for (int k = 0; k < 7; k++) { updateGame(); P.m.burn = 200; for (auto& mm : G.mobs) mm.burn = 200; }
+            printf("burn %d mobs %d alive %d\n", P.m.burn, (int)G.mobs.size(), (int)P.m.alive);
+            G.camX = px - 20; G.camY = fy - G.vh * 0.6f;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            if (i < 2) ImageCrop(&img, {(px - 100 - G.rcx) * 2, (fy - 70 - G.rcy) * 2, 360, 160}); else ImageCrop(&img, {(px - 8 - G.rcx) * 2, (fy - 34 - G.rcy) * 2, 90, 80});
+            ImageResizeNN(&img, img.width * (i < 2 ? 3 : 7), img.height * (i < 2 ? 3 : 7));
+            ExportImage(img, (std::string(argv[2]) + "/fx" + std::to_string(i) + ".png").c_str());
+            UnloadImage(img);
+        }
+        return 0;
+    }
+
+    if (argc > 2 && std::string(argv[1]) == "--sea") // dev: the nearest wreck's chest, anchor and the opening animation, <dir>/sea0..3.png
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "sea");
+        setupView();
+        newGameKit(false);
+        startRun();
+        G.state = GS_PLAY;
+        Interact* chest = nullptr;
+        for (auto& it : G.inter) if (it.type == IT_CHEST && it.style == 1 && (!chest || (argc > 3 ? it.y > chest->y : it.x > chest->x))) chest = &it; // (a third argument: the deepest one)
+        if (!chest) { printf("no sea chest\n"); return 1; }
+        for (int i = 0; i < 4; i++)
+        {
+            if (i == 1) { chest->used = true; chest->fade = 84; }
+            else if (i > 1) for (int k = 0; k < 28; k++) updateGame();
+            G.camX = chest->x - 130; G.camY = chest->y - 130;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ImageCrop(&img, {(chest->x - 100 - G.rcx) * 2, (chest->y - 110 - G.rcy) * 2, 420, 240});
+            ImageResizeNN(&img, img.width * 3, img.height * 3);
+            ExportImage(img, (std::string(argv[2]) + "/sea" + std::to_string(i) + ".png").c_str());
+            UnloadImage(img);
+        }
+        return 0;
+    }
+
+    if (argc > 2 && std::string(argv[1]) == "--door") // dev: a farmhouse door closed, mid-swing and open, and spell pickups, <dir>/door0..3.png
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "door");
+        setupView();
+        newGameKit(false);
+        startRun();
+        G.state = GS_PLAY;
+        Interact* door = nullptr;
+        for (auto& it : G.inter) if (it.type == IT_CRATE && it.style > 0 && (!door || it.x < door->x)) door = &it;
+        if (!door) { printf("no door\n"); return 1; }
+        for (int s = 0; s < SC_COUNT; s++) addPickup(door->x + 30 + s * 14, door->y - 30, PU_SCROLL), G.pickups.back().spell = s;
+        for (int i = 0; i < 4; i++)
+        {
+            if (i == 1) { door->used = true; door->fade = 1; }
+            if (i == 2) door->fade = 14;
+            if (i == 3) door->fade = 30;
+            for (int k = 0; k < (i == 0 ? 40 : 2); k++) { updateGame(); if (i > 1) door->fade = i == 2 ? 14 : 30; }
+            G.camX = door->x - 60; G.camY = door->y - 80;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ImageCrop(&img, {(door->x - 20 - G.rcx) * 2, (door->y - 50 - G.rcy) * 2, 360, 120});
+            ImageResizeNN(&img, img.width * 3, img.height * 3);
+            ExportImage(img, (std::string(argv[2]) + "/door" + std::to_string(i) + ".png").c_str());
+            UnloadImage(img);
+        }
+        return 0;
+    }
+
+    if (argc > 2 && std::string(argv[1]) == "--vik") // dev: the Viking in every weapon and state, <dir>/vik0.png...
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "vik");
+        setupView();
+        newGameKit(false);
+        generateVillage();
+        G.state = GS_PLAY;
+        Player& P = G.p;
+        P.m.x = 150;
+        { int yy = (int)P.m.y - 80; while (world.get(150 * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++; P.m.y = (float)yy - P.m.h; }
+        float px = P.m.cx(), fy = P.m.y + P.m.h;
+        struct Shot { std::string name; std::function<void()> setup; };
+        std::vector<Shot> shots;
+        auto reset = [&]() {
+            P.rollT = 0; P.prone = P.crouch = P.climb = false; P.onWall = 0; P.hook = 0; P.swingT = 0; P.combatT = 0; P.recoil = 0; P.squash = 1;
+            P.m.onGround = true; P.m.inLiquid = false; P.m.vx = P.m.vy = 0; P.m.facing = 1; P.m.iframes = 0; P.m.hurtFlash = 0; P.aim = 0; P.m.y = fy - P.m.h; P.armour = -1;
+        };
+        int types[] = {W_DAGGER, W_SWORD, W_AXE, W_SPEAR, W_MACE, W_PAN, W_CROSSBOW, W_STAFF};
+        const char* tn[] = {"dagger", "sword", "axe", "spear", "mace", "pan", "crossbow", "staff"};
+        auto weapon = [&](int t) { Weapon w; w.type = t; w.metal = M_IRON; if (t == W_STAFF) w.staff.gem = SKYBLUE; P.hotbar = {w}; P.sel = 0; };
+        for (int i = 0; i < 8; i++) shots.push_back({std::string("idle_") + tn[i], [&, i]() { weapon(types[i]); }});
+        for (int i = 0; i < 8; i++) shots.push_back({std::string("run_") + tn[i], [&, i]() { weapon(types[i]); P.m.vx = 1.5f; P.runPhase = 0.8f * i; }});
+        for (int k = 0; k < 8; k++) shots.push_back({"axe_atk" + std::to_string(k), [&, k]() { weapon(W_AXE); P.atkStyle = ATK_CHOP; P.atkLen = 22; P.atkHitAt = 10; P.combo = 0; P.swingT = 22 - k * 3; P.combatT = 60; }});
+        for (int k = 0; k < 6; k++) shots.push_back({"sword_atk" + std::to_string(k), [&, k]() { weapon(W_SWORD); P.atkStyle = ATK_SWEEP; P.atkLen = 16; P.atkHitAt = 5; P.combo = 0; P.swingT = 16 - k * 3; P.combatT = 60; }});
+        for (int k = 0; k < 5; k++) shots.push_back({"spear_atk" + std::to_string(k), [&, k]() { weapon(W_SPEAR); P.atkStyle = ATK_THRUST; P.atkLen = 15; P.atkHitAt = 5; P.combo = 0; P.swingT = 15 - k * 3; P.combatT = 60; }});
+        shots.push_back({"roll_in", [&]() { weapon(W_AXE); P.rollT = 18; }});
+        for (int k = 0; k < 4; k++) shots.push_back({"roll" + std::to_string(k), [&, k]() { weapon(W_AXE); P.rollT = 15 - k * 3; }});
+        shots.push_back({"crawl", [&]() { weapon(W_AXE); P.prone = true; }});
+        shots.push_back({"crouch", [&]() { weapon(W_AXE); P.crouch = true; }});
+        shots.push_back({"climb", [&]() { weapon(W_AXE); P.climb = true; }});
+        shots.push_back({"jump", [&]() { weapon(W_AXE); P.m.onGround = false; P.m.vy = -1.5f; P.m.y = fy - P.m.h - 12; }});
+        shots.push_back({"fall", [&]() { weapon(W_AXE); P.m.onGround = false; P.m.vy = 1.5f; P.m.y = fy - P.m.h - 12; }});
+        shots.push_back({"swim", [&]() { weapon(W_AXE); P.m.onGround = false; P.m.inLiquid = true; P.m.vx = 1.0f; P.m.y = fy - P.m.h - 6; }});
+        shots.push_back({"wall", [&]() { weapon(W_AXE); P.onWall = 1; }});
+        shots.push_back({"hang", [&]() { weapon(W_AXE); P.hook = 2; P.hx = px + 6; P.hy = fy - 60; P.m.onGround = false; P.m.y = fy - P.m.h - 8; }});
+        for (int k = 0; k < 5; k++) shots.push_back({"xbow_aim" + std::to_string(k), [&, k]() { weapon(W_CROSSBOW); P.combatT = 60; P.aim = (-1.2f + k * 0.6f); P.m.facing = 1; }});
+        shots.push_back({"xbow_fire", [&]() { weapon(W_CROSSBOW); P.combatT = 60; P.aim = -0.3f; P.recoil = 4; }});
+        shots.push_back({"staff_aim", [&]() { weapon(W_STAFF); P.combatT = 60; P.aim = -0.5f; }});
+        shots.push_back({"hookaim", [&]() { weapon(W_AXE); P.hook = 1; P.hx = px + 40; P.hy = fy - 40; }});
+        shots.push_back({"left_axe", [&]() { weapon(W_AXE); P.m.facing = -1; }});
+        for (int k = 0; k < 4; k++) shots.push_back({"armour_run" + std::to_string(k), [&, k]() { weapon(W_SWORD); P.armour = M_IRON; P.m.vx = 1.5f; P.runPhase = k * 1.5f; }});
+        for (int am : std::initializer_list<int>{M_COPPER, M_IRON, M_STEEL, 4, 8}) shots.push_back({"armour" + std::to_string(am), [&, am]() { weapon(W_SWORD); P.armour = am; }});
+        const int CW = 150, CH = 120, COLS = 8;
+        int rows = ((int)shots.size() + COLS - 1) / COLS;
+        Image sheet = GenImageColor(CW * COLS, CH * rows, {24, 18, 36, 255});
+        for (size_t i = 0; i < shots.size(); i++)
+        {
+            reset();
+            shots[i].setup();
+            G.frame = 12 + (int)i * 3;
+            G.camX = px - 40; G.camY = fy - G.vh * 0.6f;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ImageCrop(&img, {(px - 37 - G.rcx) * 2, (fy - 52 - G.rcy) * 2, (float)CW, (float)CH});
+            ImageDraw(&sheet, img, {0, 0, (float)CW, (float)CH}, {(float)(i % COLS) * CW, (float)(i / COLS) * CH, (float)CW, (float)CH}, WHITE);
+            UnloadImage(img);
+            printf("%d %s\n", (int)i, shots[i].name.c_str());
+        }
+        ImageResizeNN(&sheet, sheet.width * 2, sheet.height * 2);
+        ExportImage(sheet, (std::string(argv[2]) + "/vik.png").c_str());
+        return 0;
+    }
+
+    if (argc > 2 && std::string(argv[1]) == "--scr") // dev: read each scroll in turn and watch it fly, <dir>/scr.png
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "scr");
+        setupView();
+        newGameKit(false);
+        generateVillage();
+        G.state = GS_PLAY;
+        Player& P = G.p;
+        P.m.x = 150;
+        { int yy = (int)P.m.y - 80; while (world.get(150 * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++; P.m.y = (float)yy - P.m.h; }
+        float px = P.m.cx(), fy = P.m.y + P.m.h;
+        const int CW = 300, CH = 170, COLS = 3;
+        Image sheet = GenImageColor(CW * COLS * 2, CH * 4, {24, 18, 36, 255});
+        int n = 0;
+        for (int sc = 0; sc < SC_COUNT; sc++)
+            for (int ph = 0; ph < 2; ph++)
+            {
+                if (ph == 0)
+                {
+                    G.projs.clear();
+                    P.scrolls = {sc};
+                    P.scrollSel = 0;
+                    P.aim = -0.25f;
+                    P.m.facing = 1;
+                    readScroll();
+                    for (int k = 0; k < 6; k++) updateGame();
+                }
+                else for (int k = 0; k < 14; k++) updateGame();
+                G.camX = px - 40; G.camY = fy - G.vh * 0.6f;
+                syncRenderCamera();
+                BeginDrawing(); renderScene(); EndDrawing();
+                Image img = LoadImageFromTexture(rt.texture);
+                ImageFlipVertical(&img);
+                ImageCrop(&img, {(px - 30 - G.rcx) * 2, (fy - 70 - G.rcy) * 2, (float)CW, (float)CH});
+                ImageDraw(&sheet, img, {0, 0, (float)CW, (float)CH}, {(float)((n % (COLS * 2)) * CW), (float)((n / (COLS * 2)) * CH), (float)CW, (float)CH}, WHITE);
+                UnloadImage(img);
+                n++;
+            }
+        ImageResizeNN(&sheet, sheet.width * 1, sheet.height * 1);
+        ExportImage(sheet, (std::string(argv[2]) + "/scr.png").c_str());
+        return 0;
+    }
+
+    if (argc > 2 && std::string(argv[1]) == "--corpse") // dev: each starter foe killed and let fall, <dir>/corpse.png
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "corpse");
+        setupView();
+        newGameKit(false);
+        generateVillage();
+        G.state = GS_PLAY;
+        Player& P = G.p;
+        P.m.x = 150;
+        { int yy = (int)P.m.y - 80; while (world.get(150 * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++; P.m.y = (float)yy - P.m.h; }
+        float fy = P.m.y + P.m.h;
+        int types[] = {E_GOBLIN, E_BOMBER, E_REDCAP, E_RAIDER, E_RISEN, E_BAT, E_SLIME, E_SCORPION, E_SERPENT, E_WOLF};
+        const int CW = 200, CH = 110;
+        Image sheet = GenImageColor(CW * 5, CH * 2, {24, 18, 36, 255});
+        int n = 0;
+        for (int t : types)
+        {
+            G.corpses.clear(); G.mobs.clear();
+            P.m.x = 150; P.m.y = fy - P.m.h;
+            float x = 150 + 22;
+            Mob e = makeEnemy(t, x, fy - 36);
+            e.facing = 1; e.vx = 1.0f; e.hp = 0;
+            spawnCorpse(e);
+            for (int k = 0; k < 90; k++) updateGame();
+            G.camX = x - 50; G.camY = fy - G.vh * 0.6f;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ImageCrop(&img, {(x - 40 - G.rcx) * 2, (fy - 50 - G.rcy) * 2, (float)CW, (float)CH});
+            ImageDraw(&sheet, img, {0, 0, (float)CW, (float)CH}, {(float)((n % 5) * CW), (float)((n / 5) * CH), (float)CW, (float)CH}, WHITE);
+            UnloadImage(img);
+            n++;
+        }
+        ImageResizeNN(&sheet, sheet.width * 2, sheet.height * 2);
+        ExportImage(sheet, (std::string(argv[2]) + "/corpse.png").c_str());
+        return 0;
+    }
+
     if (argc > 2 && std::string(argv[1]) == "--shot") // dev: lit screenshots of Hearthwick's stalls, <dir>/stall0..2.png
     {
         SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -311,22 +698,25 @@ int main(int argc, char** argv)
         newGameKit(false);
         generateVillage();
         G.state = GS_PLAY;
-        { // a line-up of the detailed enemies beside the player, for shot.png
-            float fx = G.p.m.cx() + 30, fy = G.p.m.y + G.p.m.h;
-            int types[] = {E_GUARD, E_GUARD, E_GUARD, E_KNIGHT, E_KNIGHT, E_BLACKKNIGHT};
-            for (int k = 0; k < 6; k++)
+        for (int page = 0; page < 2; page++) // every enemy beside the player, in two line-ups (lineup0/1.png, 3x)
+        {
+            float fx = G.p.m.cx() + 24, fy = G.p.m.y + G.p.m.h, x = fx;
+            for (int t = page * 11; t < std::min((int)ENEMY_COUNT, page * 11 + 11); t++)
             {
-                Mob e = makeEnemy(types[k], fx + k * 22 + (k == 5 ? 10 : 0), fy);
-                e.id = k % 3; e.facing = -1; e.anim = 0;
-                if (types[k] == E_KNIGHT) e.id = k - 3;
+                Mob e = makeEnemy(t, x, fy - (ENEMIES[t].ai == AI_FLY || ENEMIES[t].ai == AI_FLYCAST ? 14 : 0));
+                e.y = fy - e.h - (ENEMIES[t].ai == AI_FLY || ENEMIES[t].ai == AI_FLYCAST ? 8 : 0);
+                e.facing = 1; e.anim = 0;
                 G.mobs.push_back(e);
+                x += e.w + 18;
             }
-            G.camX = G.p.m.cx() - 40; G.camY = fy - G.vh * 0.7f;
+            G.camX = G.p.m.cx() - 20; G.camY = fy - G.vh * 0.6f;
             syncRenderCamera();
             BeginDrawing(); renderScene(); EndDrawing();
             Image img = LoadImageFromTexture(rt.texture);
             ImageFlipVertical(&img);
-            ExportImage(img, (std::string(argv[2]) + "/lineup.png").c_str());
+            ImageCrop(&img, {(G.p.m.cx() - 12 - G.rcx) * 2, (fy - 80 - G.rcy) * 2, std::min((x - G.p.m.cx() + 16) * 2, (float)img.width), 180});
+            ImageResizeNN(&img, img.width * 3, img.height * 3);
+            ExportImage(img, (std::string(argv[2]) + "/lineup" + std::to_string(page) + ".png").c_str());
             UnloadImage(img);
             G.mobs.clear();
         }
@@ -412,6 +802,25 @@ int main(int argc, char** argv)
             ImageFlipVertical(&img);
             ExportImage(img, (std::string(argv[2]) + "/cave.png").c_str());
             UnloadImage(img);
+            for (auto& t : G.traps) // trap.png: the first dart trap, whole and then broken
+            {
+                if (t.type != TR_ARROW) continue;
+                G.camX = t.x - G.vw / 2.0f; G.camY = t.y - G.vh / 2.0f;
+                syncRenderCamera();
+                G.rcx = (int)G.camX; G.rcy = (int)G.camY;
+                const char* names[2] = {"/trap.png", "/trap_broken.png"};
+                for (int k = 0; k < 2; k++)
+                {
+                    t.done = k == 1;
+                    BeginDrawing(); renderScene(); EndDrawing();
+                    Image ti = LoadImageFromTexture(rt.texture);
+                    ImageFlipVertical(&ti);
+                    ImageCrop(&ti, {(float)(t.x - G.rcx) * 2 - 120, (float)(t.y - G.rcy) * 2 - 60, 240, 120});
+                    ExportImage(ti, (std::string(argv[2]) + names[k]).c_str());
+                    UnloadImage(ti);
+                }
+                break;
+            }
             generateVillage();
         }
         for (auto& it : G.inter)
@@ -461,11 +870,16 @@ int main(int argc, char** argv)
             if (IsKeyPressed(KEY_ESCAPE)) quit = true;
             break;
         case GS_PLAY:
+        {
+            bool mapUp = G.devMap;
+            devUpdate();
+            if (mapUp) break; // the dev map has the keys and the mouse; the world waits
             updateGame();
             if (G.state == GS_PLAY && (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_I))) { G.state = GS_INVENTORY; G.invSel = G.p.sel; }
             else if (G.state == GS_PLAY && IsKeyPressed(KEY_ESCAPE)) G.state = GS_PAUSE;
             if (IsKeyPressed(KEY_F1)) G.showHelp = !G.showHelp;
             break;
+        }
         case GS_INVENTORY:
             if (stateAge > 3 && (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_I)))
             {
@@ -499,7 +913,7 @@ int main(int argc, char** argv)
             break;
         }
 
-        if (G.state == GS_PLAY) { if (!IsCursorHidden()) HideCursor(); }
+        if (G.state == GS_PLAY && !G.devMap) { if (!IsCursorHidden()) HideCursor(); }
         else if (IsCursorHidden()) ShowCursor();
 
         BeginDrawing();
@@ -515,7 +929,10 @@ int main(int argc, char** argv)
         else
         {
             renderScene();
+            double ht = GetTime();
             drawHUD();
+            profLap(ht, PF_HUD);
+            if (G.state == GS_PLAY) devDraw();
             switch (G.state)
             {
             case GS_INVENTORY: updateDrawInventory(); break;
