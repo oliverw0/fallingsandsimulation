@@ -108,15 +108,18 @@ SPEAR_LUNGE = [(-72, (9, 14), -86, 0, (7, -8), 70), (-12, (-4, 8), -100, 4, (6, 
 
 
 def side_swings(rest, hold):
-    """The heavy weapons' first two blows of the chain: a diagonal cut from high behind down across the front (the left swing), then the
-    backhand, rising from low behind up and across (the right swing). The third blow is the overhead chop/slam."""
+    """The heavy weapons' first two blows of the chain, level sweeps across the body. Seen side-on, the head swings out of the picture
+    toward the viewer and shortens ('fore', with its depth) as it crosses in front, then opens out again: the left swing runs from behind
+    across the near side to the front; the right swing comes back across the far side, behind him, to the rear. Extra fields: fore, head depth."""
     r = (rest, hold, -84, 0, (7, -8), 80)
-    a = [r, (-165, (-2, -6), -94, 2, (8, -9), 70), (-172, (-6, -14), -100, 3, (9, -10), 110), (-100, (8, -14), -92, 2, (12, -10), 32),
-         (-35, (18, -4), -80, 3, (14, -10), 30), (35, (22, 8), -70, 4, (15, -11), 30), (60, (22, 12), -66, 5, (15, -12), 110),
-         (40, (16, 8), -74, 3, (13, -11), 70), (rest, hold, -84, 1, (7, -8), 90)]
-    b = [r, (140, (6, 8), -92, 2, (8, -9), 70), (156, (0, 12), -98, 4, (9, -10), 110), (112, (8, 14), -90, 3, (12, -10), 32),
-         (50, (18, 10), -80, 3, (14, -10), 30), (-15, (22, 0), -70, 3, (15, -11), 30), (-60, (20, -8), -66, 4, (15, -11), 110),
-         (-30, (14, 0), -76, 2, (13, -11), 70), (rest, hold, -84, 1, (7, -8), 90)]
+    a = [r, (172, (-4, 5), -92, 2, (8, -9), 70, 0.95, 12), (178, (-9, 4), -96, 3, (9, -10), 110, 1.0, 12),
+         (170, (-2, 5), -92, 3, (12, -10), 32, 0.7, 19), (100, (8, 6), -86, 3, (14, -10), 30, 0.2, 24),
+         (8, (16, 5), -80, 3, (15, -11), 30, 0.7, 18), (-4, (20, 5), -76, 4, (15, -12), 110, 0.97, 12),
+         (-14, (15, 5), -80, 3, (13, -11), 70, 1.0, 12), (rest, hold, -84, 1, (7, -8), 90)]
+    b = [r, (10, (14, 4), -88, 2, (8, -9), 70, 0.92, 12), (14, (19, 4), -92, 3, (9, -10), 110, 1.0, 12),
+         (-6, (18, 4), -88, 3, (12, -10), 32, 0.75, 4), (-72, (8, 4), -92, 3, (14, -10), 30, 0.2, -8),
+         (-170, (-4, 5), -96, 3, (15, -11), 30, 0.75, 6), (-186, (-10, 4), -98, 4, (15, -12), 110, 1.0, 10),
+         (-194, (-6, 5), -92, 3, (13, -11), 70, 1.0, 12), (rest, hold, -84, 1, (7, -8), 90)]
     return a, b
 
 
@@ -138,7 +141,7 @@ def attack(w, variant=0):
     if w == 'dagger' and variant == 1: s0, s1 = 3, 4
     out, ms = [], []
     prev = None
-    for k, (ang, g, lean, crouch, feet, dur) in enumerate(table):
+    for k, (ang, g, lean, crouch, feet, dur, *ex) in enumerate(table):
         hip = (0.0, -HIP_REST + crouch)
         c = chest_of(hip, lean)
         g = (g[0], g[1] + DROP.get(w, 0))
@@ -146,12 +149,13 @@ def attack(w, variant=0):
         rest = k in (0, len(table) - 1)
         if HOLD[w]['h2'] is None and w in ('axe', 'mace'):
             # a two-handed swing: the far hand on the grip, the near hand 9 up the haft
-            if not rest: hn, hf = tup(V(*held['g']) + dirv(ang) * 9.0), held['g']
+            if not rest: hn, hf = tup(V(*held['g']) + dirv(ang) * 9.0 * (ex[0] if ex else 1.0)), held['g']
             else: hn, hf = held['g'], None
         if hf is None: hf = (-1.0, -29.0) if rest or w in ('sword', 'dagger', 'pan') else (-2.0, -26.0)
         if w in ('sword', 'dagger', 'pan') and not rest:
             hf = (-3.0 + 0.2 * g[0], -26.0 + 0.4 * g[1])        # the free arm swings out for balance
         if not rest and w in ('axe', 'mace'): held['zh'] = 12.0
+        if ex: held['fore'] = ex[0]; held['zh'] = ex[1]
         if not rest and w in ('pan',): held['zh'] = 9.0
         P = pose(hip=hip, lean=lean, head=lean + 3.0, fn=(feet[0], 0.0), ff=(feet[1], 0.0), hn=hn, hf=hf, held=held,
                  eye=(w == 'axe' and k == 3), skirt=(-10.0 if s0 <= k <= s1 else 0.0), beard=(-3.0 if s0 <= k <= s1 else 0.0))

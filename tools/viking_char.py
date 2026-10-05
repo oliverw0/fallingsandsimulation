@@ -88,12 +88,13 @@ def draw_held(d, H, k=1.0):
     zg, zh = H.get('zg', 12.0), H.get('zh', 12.0)
     pt = lambda base, u, v: base + a * u + s * (v * k)
     if t == 'axe':
-        L = 48
+        fo = H.get('fore', 1.0)       # a horizontal sweep seen side-on: the weapon turns toward or away from the viewer and shortens
+        L = 48 * fo
         head = g + a * L
         hk = 1 + 0.55 * (k - 1)
         d.cap(g - a * 4, head - a * 1.0, 1.9 * k, 1.9 * k, zg, zh, 'wood', tex=binding(0.0, 0.2))
         d.ball(g - a * 4.8, 2.4 * k, zg, 'steel')
-        pts = [head + a * (u * hk) + s * (v * hk) for v, u in AXE_HEAD]
+        pts = [head + a * (u * hk * fo) + s * (v * hk) for v, u in AXE_HEAD]
         d.poly(pts, zh, 'steel', nfn=lambda lx, ly: _tilt(head, a, s, lx, ly, 6.0, 0.5, 0.5), aux_fn=lambda X, Y: _edge_aux(d, head, a, s, X, Y, 12.0 * hk))
     elif t == 'sword':
         # a Norse sword, weathered: a broad parallel-edged blade with a fuller and a rounded point, nicked along the edge and
@@ -122,16 +123,17 @@ def draw_held(d, H, k=1.0):
         d.cap(tip, tip + a * 3, 1.8 * k, 1.4 * k, zh, zh, 'steel')
         d.poly([pt(tip, 2, 2.4), pt(tip, 8, 3.4), pt(tip, 15, 0), pt(tip, 8, -3.4), pt(tip, 2, -2.4)], zh, 'steel', aux_fn=lambda X, Y: _blade_faces(d, tip, a, s, X, Y))
     elif t == 'mace':
-        head = g + a * 29
+        fo = H.get('fore', 1.0)
+        head = g + a * 29 * fo
         d.cap(g - a * 4, head, 1.7 * k, 1.7 * k, zg, zh, 'wood', tex=binding(0.0, 0.2))
         d.ball(g - a * 4.8, 2.2 * k, zg, 'steel')
         hk = 1 + 0.35 * (k - 1)
-        d.ball(head + a * 3, 5.6 * hk, zh, 'steel')
+        d.ball(head + a * 3 * fo, 5.6 * hk, zh, 'steel')
         for q in range(6):
             th = q * math.pi / 3
-            p = head + a * 3 + (a * 5.4 * math.cos(th) + s * 5.4 * math.sin(th)) * hk
+            p = head + a * 3 * fo + (a * 5.4 * math.cos(th) * fo + s * 5.4 * math.sin(th)) * hk
             d.ball(p, 1.8 * hk, zh + 2 * math.cos(th + 1), 'steel')
-        d.cap(head + a * 7.5 * hk, head + a * 11 * hk, 1.5 * hk, 0.3, zh, zh, 'steel')
+        d.cap(head + a * 7.5 * hk * fo, head + a * 11 * hk * fo, 1.5 * hk, 0.3, zh, zh, 'steel')
     elif t == 'pan':
         hk = 1 + 0.3 * (k - 1)
         d.cap(g - a * 3, g + a * 17, 1.4 * k, 1.6 * k, zg, zh, 'belt', tex=binding(-1, 0.3))

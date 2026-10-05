@@ -23,8 +23,9 @@ def held_polys(H):
     s = np.array([-a[1], a[0]])
     pt = lambda base, u, v: base + a * u + s * v
     if t == 'axe':
-        head = g + a * 48
-        return [[head + a * u + s * v for v, u in AXE_HEAD]]
+        fo = H.get('fore', 1.0)
+        head = g + a * 48 * fo
+        return [[head + a * u * fo + s * v for v, u in AXE_HEAD]]
     if t in ('sword', 'dagger'):
         L = 46 if t == 'sword' else 21
         return [[pt(g, 2, 2.4), pt(g, L, 2.4), pt(g, L + 2, 0), pt(g, L, -2.4), pt(g, 2, -2.4)]]
@@ -32,8 +33,9 @@ def held_polys(H):
         tip = g + a * 34
         return [[pt(tip, -14, 2.5), pt(tip, 14, 4), pt(tip, 16, 0), pt(tip, 14, -4), pt(tip, -14, -2.5)]]
     if t == 'mace':
-        c = g + a * 32
-        return [[c + a * 7.5 * math.cos(q) + s * 7.5 * math.sin(q) for q in np.linspace(0, 2 * math.pi, 12, endpoint=False)]]
+        fo = H.get('fore', 1.0)
+        c = g + a * 32 * fo
+        return [[c + a * 7.5 * fo * math.cos(q) + s * 7.5 * math.sin(q) for q in np.linspace(0, 2 * math.pi, 12, endpoint=False)]]
     if t == 'pan':
         c = g + a * 25
         return [[c + a * 9.5 * math.cos(q) + s * 9.0 * math.sin(q) for q in np.linspace(0, 2 * math.pi, 16, endpoint=False)]]
@@ -52,6 +54,7 @@ def smear_layer(P, prev, d, w, h, steps=14):
         gy = prev['g'][1] + (cur['g'][1] - prev['g'][1]) * (1 - u + 0)
         H['g'] = (gx, gy)
         H['ang'] = prev['ang'] + (cur['ang'] - prev['ang']) * (1 - u + 0)
+        H['fore'] = prev.get('fore', 1.0) + (cur.get('fore', 1.0) - prev.get('fore', 1.0)) * (1 - u)
         age = u                                   # 1 = the previous frame's position, 0 = now
         # (the loop runs from old to new: u falls from 1 to 1/steps)
         for poly in held_polys(H):
