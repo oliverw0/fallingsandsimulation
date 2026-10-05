@@ -284,6 +284,7 @@ static void renderScene()
 {
     int cx = G.rcx, cy = G.rcy;
     double pt = GetTime();
+    world.pushX = G.p.m.cx() * SUB; world.pushY = (G.p.m.y + G.p.m.h) * SUB;
     renderWorld(pix.data(), cx * SUB, cy * SUB, G.vw * SUB, G.vh * SUB);
     UpdateTexture(worldTex, pix.data());
     profLap(pt, PF_WORLD);
@@ -404,6 +405,20 @@ int main(int argc, char** argv)
         G.p.hasMap = true;
         G.p.breath = 70;
         for (int f = 0; f < 60; f++) updateGame();
+        for (auto& it : G.inter) // sail0..1.png: aboard the longship at the pier, then under way
+            if (it.type == IT_BOAT && !it.used)
+                for (int k = 0; k < 2; k++)
+                {
+                    G.sailT = 1 + k * 60;
+                    for (int f = 0; f < 4; f++) updateGame();
+                    G.camX = it.x - G.vw / 2.0f; G.camY = it.y - G.vh / 2.0f;
+                    syncRenderCamera();
+                    for (int r = 0; r < 2; r++) { BeginDrawing(); ClearBackground(BLACK); renderScene(); EndDrawing(); } // (the screen read lags a frame)
+                    Image si = LoadImageFromScreen();
+                    ExportImage(si, (std::string(argv[2]) + "/sail" + std::to_string(k) + ".png").c_str());
+                    UnloadImage(si);
+                }
+        G.sailT = 0;
         for (int k = 0; k < 4; k++) // along the street: vil0..3.png
         {
             G.camX = 30 + k * 400; G.camY = G.p.m.cy() - G.vh / 2.0f;
@@ -690,6 +705,38 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (argc > 2 && std::string(argv[1]) == "--decor") { exportDecorSheet(argv[2]); return 0; } // dev: a contact sheet of every decor kind, 3x
+    if (argc > 2 && std::string(argv[1]) == "--terr") // dev: lit shots of the run's terrain and buildings along the surface, <dir>/terr0..N.png (x offsets from argv[3...])
+    {
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(1366, 768, "terr");
+        setupView();
+        newGameKit(false);
+        startRun();
+        G.state = GS_PLAY;
+        printf("start x=%d seaEnd=%d duneEnd=%d storm=%d..%d world=%d\n", (int)G.p.m.x, G.seaEnd, G.duneEnd, G.stormX0, G.stormX1, world.w / world.scale);
+        std::vector<float> xs;
+        for (int i = 3; i < argc; i++) xs.push_back((float)atof(argv[i]));
+        if (xs.empty()) xs = {0, 250, 500, 800, 1100, 1500};
+        for (size_t i = 0; i < xs.size(); i++)
+        {
+            float x = xs[i];
+            if (x <= -1000) { int n = (int)(-x - 1000); x = 5000; for (auto& it : G.inter) if (it.type == IT_DECOR && it.data == DK_TARGET && n-- == 0) { x = it.x; break; } } // -1000-n: the n-th archery butt
+            else if (x < 0) { int n = (int)-x - 1; x = 5000; for (auto& it : G.inter) if (it.type == IT_DECOR && it.data == DK_SPEARPOST && n-- == 0) { x = it.x; break; } } // negative: the n-th planted spear
+            int yy = 0; while (yy < world.h / world.scale - 1 && world.get((int)x * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++;
+            G.p.m.x = x; G.p.m.y = (float)yy - G.p.m.h - 2;
+            G.camX = x - G.vw / 2.0f; G.camY = (float)yy - G.vh * 0.55f + (getenv("TERR_DY") ? (float)atof(getenv("TERR_DY")) : 0.0f);
+            syncRenderCamera();
+            for (int k = 0; k < 3; k++) { BeginDrawing(); renderScene(); EndDrawing(); }
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ExportImage(img, (std::string(argv[2]) + "/terr" + std::to_string(i) + ".png").c_str());
+            UnloadImage(img);
+            printf("terr%d x=%d surf=%d\n", (int)i, (int)x, yy);
+        }
+        return 0;
+    }
+
     if (argc > 2 && std::string(argv[1]) == "--shot") // dev: lit screenshots of Hearthwick's stalls, <dir>/stall0..2.png
     {
         SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -802,6 +849,33 @@ int main(int argc, char** argv)
             ImageFlipVertical(&img);
             ExportImage(img, (std::string(argv[2]) + "/cave.png").c_str());
             UnloadImage(img);
+            for (int k = 0; k < 4; k++) // plains0..3.png: the parallax backdrop along the road
+            {
+                G.camX = px + k * 1300 - G.vw / 2.0f; G.camY = py - G.vh / 2.0f;
+                syncRenderCamera();
+                G.rcx = (int)G.camX; G.rcy = (int)G.camY;
+                BeginDrawing(); renderScene(); EndDrawing();
+                Image pi = LoadImageFromTexture(rt.texture);
+                ImageFlipVertical(&pi);
+                ExportImage(pi, (std::string(argv[2]) + "/plains" + std::to_string(k) + ".png").c_str());
+                UnloadImage(pi);
+            }
+            { // castle0..5.png: the keep from outside, its roofs, then the halls
+                int kx = (int)px;
+                while (kx < world.w / world.scale - 2 && world.get(kx * world.scale, (int)(py - 120) * world.scale).material != CellMaterial::Masonry) kx++;
+                struct V { float x, y; } views[] = {{kx - 60.0f, py - 420}, {kx + 380.0f, py - 420}, {kx + 150.0f, py - 100}, {kx + 480.0f, py - 100}, {kx + 820.0f, py - 100}, {kx + 1160.0f, py - 100}, {kx + 1500.0f, py - 100}, {kx + 1840.0f, py - 100}};
+                for (int k = 0; k < 8; k++)
+                {
+                    G.camX = views[k].x; G.camY = views[k].y;
+                    syncRenderCamera();
+                    G.rcx = (int)G.camX; G.rcy = (int)G.camY;
+                    BeginDrawing(); renderScene(); EndDrawing();
+                    Image ci = LoadImageFromTexture(rt.texture);
+                    ImageFlipVertical(&ci);
+                    ExportImage(ci, (std::string(argv[2]) + "/castle" + std::to_string(k) + ".png").c_str());
+                    UnloadImage(ci);
+                }
+            }
             for (auto& t : G.traps) // trap.png: the first dart trap, whole and then broken
             {
                 if (t.type != TR_ARROW) continue;

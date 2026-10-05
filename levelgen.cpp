@@ -1,3 +1,4 @@
+#include <array>
 #include "game.h"
 #include "util.h"
 #include <algorithm>
@@ -349,46 +350,175 @@ static void paintSkeleton(int x, int fy, int dir)
 }
 
 // Cobweb strung across a ceiling corner: spokes fanning down and towards `dir`, joined by threads.
-static void paintCobweb(int x, int y, int dir)
+static void paintCobweb(int x, int y, int dir) { addDecor(DK_COBWEB, (float)x, (float)y, -1, irange(7, 12), dir < 0); }
+
+// ---- trees: three Norse kinds (oak, spruce, birch), painted onto the back wall a unit at a time (the renderer
+// smooths them to cell diagonals). Trunks flare into roots and taper, bark has grooves and moss, boughs fork and end
+// in bumpy leaf masses lit from the upper left, drawn back to front so the dark gaps between masses show.
+static std::vector<uint8_t> g_tm; // what the tree being painted put where: 1 leaf, 2 wood (so a last pass can light and shade it as one object)
+static int g_tx0, g_ty0, g_tw, g_th;
+static void treePx(int x, int y, Color c, uint8_t m = 2)
 {
-    const Color silk = {196, 196, 206, 255};
-    int L = irange(7, 12);
-    auto put = [&](float r, float a) {
-        int px = x + (int)std::lround(dir * std::cos(a) * r), py = y + (int)std::lround(std::sin(a) * r);
-        if (world.in(px, py) && world.at(px, py).material == M::Empty) bgPut(px, py, silk);
-    };
-    for (int s = 0; s <= 4; s++)
-        for (int r = 1; r <= L; r++) put((float)r, s * 0.3927f);
-    for (int ring = 1; ring <= 3; ring++)
-        for (float a = 0; a <= 1.571f; a += 0.06f) put(L * ring / 3.0f - std::sin(std::fmod(a, 0.3927f) / 0.3927f * 3.14159f) * ring * 0.4f, a); // threads sag between spokes
+    if (!world.in(x, y)) return;
+    world.bgAt(x, y) = c;
+    world.skyAt(x, y) = 0;
+    int lx = x - g_tx0, ly = y - g_ty0;
+    if (lx >= 0 && ly >= 0 && lx < g_tw && ly < g_th) g_tm[(size_t)ly * g_tw + lx] = m;
+}
+static void treeLeaf(int x, int y, Color c) { treePx(x, y, c, 1); }
+
+static Color leafTone(const Color ramp[4], float lit) { int i = (int)clampf(lit * 4.0f, 0, 3.99f); return ramp[i]; }
+
+// A leaf mass: a ring of small bumps round a core, each bump lit on its upper left and dark underneath.
+static void leafMass(int cx, int cy, int rx, int ry, const Color ramp[4], float holes)
+{
+    int bumps = std::max(5, (rx + ry) / 2);
+    for (int pass = 0; pass < 2; pass++) // the dark back layer first, then the lit front
+        for (int b = 0; b < bumps + 1; b++)
+        {
+            float a = b == bumps ? 0 : b * 6.2832f / bumps + hash2(cx, cy + b, seed + 3) * 0.6f;
+            float d = b == bumps ? 0 : 0.55f + 0.3f * hash2(cx + b, cy, seed + 4);
+            int bx = cx + (int)std::lround(std::cos(a) * rx * d), by = cy + (int)std::lround(std::sin(a) * ry * d);
+            int r = std::max(2, (int)(std::min(rx, ry) * (b == bumps ? 0.8f : 0.5f)));
+            for (int dy = -r; dy <= r; dy++)
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    float rr = (float)(dx * dx + dy * dy);
+                    if (rr > r * r + 0.5f || hash2(bx + dx, by + dy, seed + 8) < holes) continue;
+                    float lit = 0.5f + (-dx * 0.55f - dy * 0.85f) / (r * 1.2f) + 0.22f * (hash2(bx + dx, by + dy, seed + 9) - 0.5f);
+                    if (pass == 0) lit -= 0.35f;
+                    else if (dy > r * 0.45f) lit -= 0.3f; // the shaded underside of each bump
+                    treeLeaf(bx + dx, by + dy, leafTone(ramp, lit));
+                }
+        }
+}
+
+static void trunk(int x, int fy, int top, int tw, float lean, Color bark, bool birch)
+{
+    float phase = hash2(x, fy, seed + 21) * 6.28f;
+    for (int y = fy + 2; y >= top; y--)
+    {
+        float t = (float)(fy - y) / std::max(1, fy - top); // 0 at the foot, 1 at the crown
+        int cx = x + (int)std::lround(std::sin(y * 0.11f + phase) * lean * (0.3f + t));
+        int hw = (int)std::lround(tw * (0.5f - 0.18f * t)) + (y > fy - 6 ? (fy - y < 3 ? 2 : 1) : 0); // flares into roots
+        for (int dx = -hw; dx <= hw; dx++)
+        {
+            float k = 0.78f + 0.2f * hash2(cx + dx, y / 4, seed + 77);
+            k += 0.2f - 0.55f * (float)(dx + hw) / std::max(1, 2 * hw); // a rounded trunk: lit on the left, turning to shade on the right
+            if (dx == -hw) k += 0.08f; else if (dx == hw) k -= 0.12f;
+            if (!birch && hash2(cx + dx, y / 6, seed + 78) < 0.2f) k -= 0.16f; // grooves in the bark
+            Color c = shadeC(bark, clampf(k, 0.35f, 1.25f));
+            if (birch && hash2(cx + dx, y, seed + 79) > 0.93f && dx > -hw) c = {46, 42, 40, 255}; // the dark chevrons
+            else if (!birch && dx < 0 && y > fy - 22 && hash2(cx + dx, y / 3, seed + 80) > 0.8f) c = shadeC({78, 110, 52, 255}, 0.7f + 0.3f * hash2(cx, y, seed)); // moss on the weather side
+            treePx(cx + dx, y, c);
+        }
+    }
+}
+
+// A bough from (x, y) going out and up to length `len`, thinning; returns where it ends.
+static std::pair<int, int> bough(int x, int y, int dir, int len, Color bark, int thick)
+{
+    int ex = x, ey = y;
+    for (int k = 0; k < len; k++)
+    {
+        ex = x + dir * k;
+        ey = y - (int)(k * 0.45f) + (int)(std::sin(k * 0.5f + x) * 0.7f);
+        int th = std::max(1, thick - k * thick / std::max(1, len));
+        for (int t = 0; t < th; t++) treePx(ex, ey + t, shadeC(bark, t == 0 ? 1.0f : 0.72f));
+    }
+    return {ex, ey};
+}
+
+// The last pass over a tree: rim light on the top and left edges of every leaf mass, a dark underside, and the canopy's shadow
+// falling down the trunk and boughs beneath it. Works from the mask `treePx` kept.
+static void shadeTree()
+{
+    auto at = [&](int lx, int ly) -> uint8_t { return lx < 0 || ly < 0 || lx >= g_tw || ly >= g_th ? 0 : g_tm[(size_t)ly * g_tw + lx]; };
+    for (int ly = 0; ly < g_th; ly++)
+        for (int lx = 0; lx < g_tw; lx++)
+        {
+            uint8_t m = at(lx, ly);
+            if (!m) continue;
+            int x = g_tx0 + lx, y = g_ty0 + ly;
+            if (!world.in(x, y)) continue;
+            Color& c = world.bgAt(x, y);
+            float k = 1;
+            if (m == 1)
+            {
+                if (!at(lx, ly - 1)) k *= 1.2f;                       // the lit crown of each mass
+                else if (!at(lx - 1, ly) || !at(lx - 1, ly - 1)) k *= 1.1f;
+                if (!at(lx, ly + 1)) k *= 0.7f;                       // its underside
+                else if (!at(lx + 1, ly)) k *= 0.86f;
+                int deep = 0; for (int d = 1; d <= 3; d++) deep += at(lx - d, ly - d) == 1 && at(lx + d, ly + d) == 1; // buried in the mass: dim
+                k *= 1.0f - 0.07f * deep;
+            }
+            else
+            {
+                int up = 0; for (int d = 1; d <= 10; d++) if (at(lx, ly - d) == 1 || at(lx - 1, ly - d) == 1) { up = d; break; }
+                if (up) k *= 0.5f + 0.045f * up; // in the canopy's shadow
+            }
+            c = Color{(unsigned char)clampf(c.r * k, 0, 255), (unsigned char)clampf(c.g * k, 0, 255), (unsigned char)clampf(c.b * k, 0, 255), 255};
+        }
 }
 
 static void placeTree(int x, int fy)
 {
-    int h = irange(26, 50), tw = irange(4, 6);
-    Color bark = {78, 54, 34, 255};
-    for (int y = fy - h; y < fy + 2; y++)
-        for (int xx = -tw / 2; xx <= tw / 2; xx++)
+    g_tx0 = x - 40; g_ty0 = fy - 96; g_tw = 80; g_th = 102; g_tm.assign((size_t)g_tw * g_th, 0);
+    int kind = irand(10) < 4 ? 0 : (irand(10) < 6 ? 1 : 2); // oak, spruce, birch
+    if (kind == 1) // spruce: a straight trunk hung with drooping tiers, narrowing to a spike
+    {
+        int h = irange(46, 74), tiers = h / 6;
+        Color bark = {70, 48, 32, 255};
+        const Color ramp[4] = {{22, 54, 40, 255}, {32, 76, 52, 255}, {48, 102, 62, 255}, {76, 134, 80, 255}};
+        trunk(x, fy, fy - h, 4, 0.4f, bark, false);
+        for (int t = 0; t < tiers; t++)
         {
-            float k = 0.75f + 0.25f * hash2(x + xx, y / 3, seed + 77) - (xx == -tw / 2 ? 0.2f : 0) + (xx == tw / 2 ? 0.1f : 0);
-            bgPut(x + xx, y, shadeC(bark, k));
-        }
-    for (int b = 0; b < 3; b++) // branches
-    {
-        int by = fy - h / 2 - b * h / 6, dir = (b % 2) ? 1 : -1;
-        for (int k = 0; k < 8; k++) bgPut(x + dir * (tw / 2 + k), by - k / 2, shadeC(bark, 0.8f));
-    }
-    for (int blob = 0; blob < 5; blob++)
-    {
-        int cx = x + irange(-10, 10), cy = fy - h + irange(-8, 6), r = irange(7, 12);
-        for (int dy = -r; dy <= r; dy++)
-            for (int dx = -r; dx <= r; dx++)
+            int y0 = fy - h + t * (h - 8) / tiers, hw = 3 + t * (h / 9 + 1) / std::max(1, tiers) * 2 + t, drop = 7 + t / 2;
+            for (int row = 0; row < drop + 3; row++)
             {
-                if (dx * dx + dy * dy > r * r || hash2(cx + dx, cy + dy, seed) < 0.12f) continue;
-                float lit = clampf(0.55f + (-dx - dy) / (2.5f * r) + 0.2f * hash2(cx + dx, cy + dy, seed + 9), 0.4f, 1.1f);
-                bgPut(cx + dx, cy + dy, shadeC(Color{70, 130, 50, 255}, lit * 0.85f));
+                float f = (row + 1.0f) / (drop + 3);
+                int w = (int)(hw * std::min(1.0f, f * 1.15f));
+                for (int dx = -w; dx <= w; dx++)
+                {
+                    float edge = std::abs((float)dx) / std::max(1, w); // ragged, drooping toward the tip of each bough
+                    if (edge > 0.85f && hash2(x + dx, y0 + row, seed + 14) < 0.45f) continue;
+                    int yy = y0 + row + (int)(edge * edge * 3);
+                    float lit = 0.62f - edge * 0.12f + (dx < 0 ? 0.2f : -0.1f) - f * 0.28f + 0.25f * (hash2(x + dx, yy, seed + 15) - 0.5f);
+                    if (row >= drop) lit -= 0.4f; // the shadowed underside
+                    treeLeaf(x + dx, yy, leafTone(ramp, lit));
+                }
             }
+        }
+        for (int dy = 0; dy < 4; dy++) treeLeaf(x, fy - h - dy, leafTone(ramp, 0.5f)); // the leader
+        shadeTree();
+        return;
     }
+    bool birch = kind == 2;
+    int h = birch ? irange(30, 46) : irange(34, 54), tw = birch ? irange(3, 4) : irange(5, 7);
+    Color bark = birch ? Color{212, 206, 192, 255} : Color{88, 62, 40, 255};
+    const Color oak[4] = {{30, 70, 36, 255}, {46, 98, 42, 255}, {70, 128, 50, 255}, {108, 160, 66, 255}};
+    const Color bir[4] = {{58, 96, 40, 255}, {88, 130, 50, 255}, {128, 164, 62, 255}, {176, 190, 84, 255}};
+    const Color* ramp = birch ? bir : oak;
+    float holes = birch ? 0.16f : 0.05f;
+    int crown = fy - h; // the foot of the crown
+    trunk(x, fy, crown + 2, tw, birch ? 1.6f : 1.0f, bark, birch);
+    std::vector<std::pair<int, int>> tips;
+    int boughs = birch ? 3 : 4;
+    for (int b = 0; b < boughs; b++)
+    {
+        int by = fy - h / 2 - b * h / (boughs * 2) + irange(-2, 2), dir = (b % 2) ? 1 : -1;
+        tips.push_back(bough(x, by, dir, irange(birch ? 6 : 9, birch ? 11 : 17), bark, birch ? 2 : 3));
+    }
+    tips.push_back({x + irange(-2, 2), crown - 2});
+    for (int pass = 0; pass < 2; pass++) // far masses behind, near ones in front
+        for (size_t i = 0; i < tips.size(); i++)
+        {
+            if ((i % 2 == 0) != (pass == 0)) continue;
+            int rx = birch ? irange(6, 9) : irange(9, 14), ry = birch ? irange(5, 8) : irange(7, 11);
+            leafMass(tips[i].first, tips[i].second - ry / 3, rx, ry, ramp, holes);
+        }
+    if (!birch) leafMass(x + irange(-3, 3), crown - 6, irange(12, 15), irange(9, 12), ramp, holes); // the crown over all
+    shadeTree();
 }
 
 static const Color LAMP_WARM = {255, 168, 84, 255};
@@ -467,7 +597,6 @@ static void placeHanging(int x, int cy, int kind)
 
 // ---------------------------------------------------------------- back wall
 
-static void farCastle(int cx, int base, int kind, const std::vector<int>& nearRidge);
 static int castleGround = 0; // the castle grounds' level: the lower halls become crypts
 
 static void buildBackground(const StageDef& d, bool skies)
@@ -488,13 +617,8 @@ static void buildBackground(const StageDef& d, bool skies)
             {
                 int ls = localSurf[x];
                 float k = clampf((float)y / (ls + 10), 0, 1);
-                Color sky = lerpColor(Color{4, 6, 16, 255}, Color{30, 38, 68, 255}, k * k); // night, paling to the horizon
-                float mh = ls - 10 - fbm(x * 0.004f, 1.7f, seed + 60, 3) * 90;
-                float mh2 = ls + 10 - fbm(x * 0.009f, 3.1f, seed + 61, 3) * 60;
-                bool open = false;
-                if (y > mh2) sky = Color{12, 13, 22, 255};
-                else if (y > mh) sky = lerpColor(Color{22, 25, 42, 255}, Color{30, 34, 54, 255}, hash2(x / 3, y / 5, seed) * 0.4f);
-                else open = true;
+                Color sky = lerpColor(Color{1, 1, 4, 255}, Color{70, 44, 112, 255}, std::pow(k, 9.0f)); // night, a violet haze paling to the horizon; hills, castles and forest are parallax layers (parallax.cpp)
+                bool open = true;
                 if (y > surf[x] - 2) { sky = lerpColor(sky, c, (y - surf[x] + 2) / 8.0f); open = false; }
                 world.skyAt(x, y) = open;
                 c = sky;
@@ -503,18 +627,6 @@ static void buildBackground(const StageDef& d, bool skies)
                 c = Color{(unsigned char)(c.r * 0.62f), (unsigned char)(c.g * 0.62f), (unsigned char)(c.b * 0.62f), 255};
             world.bgAt(x, y) = c;
         }
-    if (skies && (d.kind == SK_CASTLE || d.kind == SK_PLAINS))
-    {
-        std::vector<int> ridge(W);
-        for (int x = 0; x < W; x++)
-            ridge[x] = std::min(surf[x] - 2, (int)(localSurf[x] + 10 - fbm(x * 0.009f, 3.1f, seed + 61, 3) * 60));
-        auto farHill = [&](int x) { return (int)(localSurf[x] - 10 - fbm(x * 0.004f, 1.7f, seed + 60, 3) * 90) + 10; };
-        std::vector<std::pair<int, int>> spots;
-        if (d.kind == SK_CASTLE) spots = {{200, 0}, {1480, 1}, {1700, 0}};
-        else spots = {{W - 760, 0}, {std::min(W - 1000, 1250), 1}};
-        for (auto& sp : spots)
-            if (sp.first > 60 && sp.first < W - 60) farCastle(sp.first, farHill(sp.first), sp.second, ridge);
-    }
 }
 
 // ---------------------------------------------------------------- stages
@@ -667,7 +779,8 @@ static void paintBoards(int x0, int y0, int x1, int y1, int bw)
 }
 
 // A carved post: a block capital, a zig-zag engraved down its face, a plinth (decor.cpp).
-static void paintPost(int x, int y0, int y1) { addDecor(DK_POST, x + 1.5f, (float)y1, 0, y1 - y0); }
+static std::vector<std::array<int, 3>> postList; // every post and beam painted so far (x, top, foot), so windows keep clear of them
+static void paintPost(int x, int y0, int y1) { postList.push_back({x + 1, y0, y1}); addDecor(DK_POST, x + 1.5f, (float)y1, 0, y1 - y0); }
 
 // A round shield hung on the wall: iron rim, painted halves or quarters or a cross, a boss in the middle.
 static void paintShield(int cx, int cy, int r)
@@ -844,6 +957,7 @@ static void furnishRoom(int x0, int x1, int fy, int ceil, bool hearth, int theme
     int hx = hearth ? (x0 + x1) / 2 + irange(-8, 8) : -1000;
     if (hearth) paintFireplace(hx, fy, ceil);
     int tall = fy - ceil; // room for things hung up high
+    if (chance(3) && x1 - x0 > 30) addDecor(DK_LEANSHIELD, chance(2) ? (float)x0 + 8 : (float)x1 - 8, (float)fy, -1, 0, chance(2)); // a shield leant against the wall
     for (int x = x0 + irange(3, 8); x < x1 - 12;)
     {
         if (x + 26 > hx - 13 && x < hx + 13) { x = hx + 14; continue; } // keep clear of the fireplace
@@ -925,7 +1039,6 @@ static void placeWatchtower(int x, int TW)
         }
     }
     for (int xx = x - ov + 3; xx <= x + TW - 4 + ov; xx++) bgPut(xx, deck - 9, shadeC(HEART, 0.7f)); // the shield rail
-    for (int cx = x - ov + 8; cx < x + TW + ov - 6; cx += 9) paintShield(cx, deck - 6, 4);
     if (roofed) // shingles on a low pitch, eaves past the posts; a lantern hangs from the ridge
     {
         int half = TW / 2 + ov + 5, mid = x + TW / 2;
@@ -967,24 +1080,43 @@ static void placeWatchtower(int x, int TW)
 // A farmhouse of two or three storeys you walk straight through: doorways at both ends, plank floors you
 // climb by jumping up through stairwells (they swap sides), every room furnished and lit by oil lanterns
 // hung from the beams, and maybe a cellar under a trapdoor.
-// A window in a house's back wall: a timber frame round an opening onto the night sky (stars and all), a sill, and a
-// slanting beam of moonlight pouring in across the room to the floor, `len` units below the sill (drawn live: entities.cpp).
+// A window in a house's back wall, Norse fashion: no glass, no shutter, just an opening cut in the planking, narrow at the top and
+// widening down in an upside-down parabola, edged with pale carved oak and a heavy sill. The night sky shows through (stars and all),
+// and a faint slanting beam of moonlight comes in across the room to the floor, `len` units below the sill (drawn live: entities.cpp;
+// Lamp::dim keeps it subtle and leaves out the flat glow a pane would give). It slides sideways to keep clear of every post and beam,
+// and is painted only over plain wall, so nothing already hung or stood there is drawn across by it.
 static void hutWindow(int cx, int top, int w, int h, int len)
 {
-    for (int y = top - 1; y <= top + h; y++)
-        for (int dx = -w / 2 - 1; dx <= w / 2 + 1; dx++)
+    int half = w / 2 + 4;
+    auto clash = [&](int c) { for (const auto& p : postList) if (std::abs(c - p[0]) < half && p[1] <= top + h + 3 && p[2] >= top - 4) return true; return false; };
+    for (int d = 1; d <= 14 && clash(cx); d++)
+        for (int s : {-1, 1}) if (!clash(cx + s * d)) { cx += s * d; d = 99; break; }
+    const Color oak = {138, 98, 60, 255}, plank = {150, 108, 66, 255};
+    float hw = w / 2.0f;
+    auto open = [&](int dx, int y) { // inside the parabola: the half-width grows with the square root of the depth below the apex
+        float t = (y - top + 0.5f) / (h * 0.55f);
+        return y >= top && y < top + h && std::abs(dx) <= hw * std::sqrt(std::min(1.0f, std::max(0.0f, t)));
+    };
+    for (int y = top - 3; y <= top + h + 1; y++)
+        for (int dx = -w / 2 - 3; dx <= w / 2 + 3; dx++)
         {
             int x = cx + dx;
-            bool frame = std::abs(dx) > w / 2 || y < top || y >= top + h;
-            bool bar = !frame && (dx == 0 || y == top + h / 2); // a thin cross of glazing bars
-            if (frame || bar) bgPut(x, y, shadeC({96, 66, 40, 255}, (y >= top + h || dx < 0 ? 0.55f : 0.8f) + 0.08f * hash2(x, y, seed + 31)));
-            else { world.bgAt(x, y) = {52, 72, 128, 255}; world.skyAt(x, y) = 1; } // the sky shows through, as it does beyond the roof
+            if (!world.in(x, y) || world.bgAt(x, y).a == 255) continue; // behind everything: furniture, hangings and posts already painted here stay on top
+            if (y > top + h - 1) { if (y <= top + h && std::abs(dx) <= w / 2 + 3) bgPut(x, y, shadeC(plank, y == top + h ? 1.15f : 0.7f)); continue; } // the sill
+            if (open(dx, y))
+            {
+                bool reveal = dx <= -w / 2 + 1 || !open(dx, y - 2); // the near jamb and the underside of the arch are in shade
+                Color sky = {(unsigned char)(44 + 8 * (y - top) / h), (unsigned char)(62 + 8 * (y - top) / h), (unsigned char)(116 + 6 * (y - top) / h), 255};
+                world.bgAt(x, y) = reveal ? shadeC(sky, 0.62f) : sky;
+                world.skyAt(x, y) = reveal ? 0 : 1;
+                continue;
+            }
+            bool edge = false; // within two cells of the opening: the carved frame
+            for (int k = 1; k <= 2 && !edge; k++) edge = open(dx - k, y) || open(dx + k, y) || open(dx, y + k) || open(dx - k, y + k) || open(dx + k, y + k);
+            if (edge) bgPut(x, y, shadeC(oak, (dx < 0 || y < top + 2 ? 1.0f : 0.66f) + 0.1f * hash2(x, y, seed + 33) - ((x + y) % 5 == 0 ? 0.18f : 0))); // knot-carved notches along it
         }
-    for (int dx = -w / 2 - 2; dx <= w / 2 + 2; dx++) bgPut(cx + dx, top + h + 1, {120, 84, 52, 255}); // the sill
-    Lamp l{(float)cx, (float)top + h / 2.0f, 110, {170, 200, 255, 255}};
-    l.beam = (float)len;
-    l.w = (float)w;
-    l.wh = (float)h;
+    Lamp l{(float)cx, (float)top + h / 2.0f, 90, {150, 180, 235, 255}};
+    l.beam = (float)len; l.w = (float)(w - 2); l.wh = (float)h; l.dim = 0.6f;
     G.lamps.push_back(l);
 }
 
@@ -998,6 +1130,7 @@ static void placeHouse(int x, int w, int shop = -1)
     const int S = 26;
     int storeys = shop == TH_ARMORY || shop == TH_PORT ? 2 : (w < 100 ? irange(1, 2) : irange(2, 3)), wallTop = g - storeys * S - irange(3, 7);
     Hall hall = paintHall(x, w, g, wallTop, true, g - 24);
+    postList.push_back({x + 4, wallTop, g}); postList.push_back({x + w - 4, wallTop, g}); // the end posts (painted below), known before the windows so they keep clear
     int first = chance(2); // which side the first stairwell is on
     auto wellX = [&](int k) { return (k + first) % 2 ? x + 8 : x + w - 26; };
     for (int k = 0; k < storeys; k++)
@@ -1146,20 +1279,40 @@ struct Room { int x0, y0, x1, y1; }; // interior; the floor is the row below y1
 
 // ---------------------------------------------------------------- the Norse castle: hall furnishings
 
-// A window of leaded lattice under a round arch, pale with moonlight.
+// A tall arched window, open to the night: no glass and no lattice, just a dressed-stone arch (alternating voussoirs, a pale sill, a
+// deep shadowed reveal on its far side) round a round-topped opening onto the stars. A faint, narrow shaft of moonlight comes in
+// below it (Lamp::dim keeps the shaft subtle and leaves out the flat glow a pane would give).
 static void latticeWindow(int cx, int top, int w, int h)
 {
+    int R2 = w / 2;
     for (int y = top; y < top + h; y++)
-        for (int dx = -w / 2; dx <= w / 2; dx++)
+        for (int dx = -R2; dx <= R2; dx++)
         {
-            int ay = top + w / 2 - y;
-            if (ay > 0 && dx * dx + ay * ay > (w / 2) * (w / 2)) continue;
+            int ay = top + R2 - y; // above the springing of the arch
+            float r = std::sqrt((float)(dx * dx + ay * ay));
+            if (ay > 0 && r > R2 + 0.5f) continue;
             int x = cx + dx;
-            bool frame = std::abs(dx) >= w / 2 - 1 || y >= top + h - 2;
-            bool lead = ((x + y) % 4 == 0) || ((x - y + 400) % 4 == 0);
-            Color c = frame ? Color{44, 30, 20, 255} : (lead ? Color{34, 24, 18, 255} : shadeC({150, 160, 186, 255}, 0.75f + 0.25f * (1 - (float)(y - top) / h)));
-            bgPut(x, y, c);
+            bool arch = ay > 0, ring = arch ? r > R2 - 2.2f : std::abs(dx) >= R2 - 1;
+            bool sill = y >= top + h - 2;
+            if (!world.in(x, y)) continue;
+            if (sill) { bgPut(x, y, y == top + h - 2 ? Color{138, 132, 146, 255} : Color{96, 90, 104, 255}); continue; }
+            if (ring)
+            {
+                int seg = arch ? (int)((std::atan2((float)ay, (float)dx) + 3.15f) * 3.2f) : y / 5;
+                Color c = seg % 2 ? Color{122, 118, 132, 255} : Color{92, 88, 102, 255};
+                if (dx < 0 && !arch) c = shadeC(c, 1.12f);
+                bgPut(x, y, c);
+                continue;
+            }
+            float depth = (float)(y - top) / h; // the sky pales toward the horizon
+            Color sky = {(unsigned char)(20 + 16 * depth), (unsigned char)(28 + 20 * depth), (unsigned char)(60 + 30 * depth), 255};
+            bool reveal = dx <= -R2 + 3 || (arch && r > R2 - 3.4f); // the reveal on the near side and under the arch is in shadow
+            world.bgAt(x, y) = reveal ? shadeC(sky, 0.6f) : sky;
+            world.skyAt(x, y) = reveal ? 0 : 1;
         }
+    Lamp l{(float)cx, (float)top + h / 2.0f, 80, {150, 180, 235, 255}};
+    l.beam = std::min(34.0f, (float)h); l.w = (float)(w - 6); l.wh = (float)h; l.dim = 0.9f;
+    G.lamps.push_back(l);
 }
 
 // A red pillar carved with interlaced dragons, on a dark plinth under a dark capital.
@@ -1169,7 +1322,7 @@ static void dragonPillar(int cx, int y0, int y1, int hw = 4) { (void)hw; addDeco
 static void idolPillar(int cx, int y0, int y1) { addDecor(DK_IDOL, cx + 0.5f, (float)y1, 0, y1 - y0); }
 
 // A black banner with a white triskele and a fringe.
-static void triskeleBanner(int cx, int top, int len) { addDecor(DK_TAPESTRY, (float)cx, (float)(top - 1), 6 | (chance(2) ? 32 : 0), len); }
+static void triskeleBanner(int cx, int top, int len) { addDecor(DK_TAPESTRY, (float)cx, (float)(top - 1), 6 | 32, len); } // always the wide cloth, so the triskele has room
 
 // An elk skull with antlers, hung on the wall.
 static void antlerSkull(int cx, int cy) { addDecor(DK_ANTLERS, cx + 0.5f, (float)(cy + 1)); }
@@ -1198,69 +1351,7 @@ static void sarcophagus(int x0, int fy)
     place(x0 + 4, fy - 11, M::Stone); place(x0 + 5, fy - 11, M::Stone); // its head
 }
 
-// ---------------------------------------------------------------- the Norse castle: far off in the night
-
-// A castle on the far hills: drum towers and curtain walls, or a broken chapel by a square tower, with a
-// few windows lit by candles. Painted only over sky and the far hills, behind the nearer ridge.
-static void farCastle(int cx, int base, int kind, const std::vector<int>& nearRidge)
-{
-    const Color stone = {46, 48, 64, 255};
-    auto put = [&](int x, int y, Color c) {
-        if (!world.in(x, y) || x < 0 || x >= (int)nearRidge.size() || y >= nearRidge[x]) return;
-        world.bgAt(x, y) = c;
-        world.skyAt(x, y) = 0;
-    };
-    auto block = [&](int x0, int x1, int top, bool round, bool crenel) {
-        for (int x = x0; x <= x1; x++)
-        {
-            float u = (x - x0) / (float)std::max(1, x1 - x0); // drums are lit on the left, shadowed on the right
-            float k = round ? 1.15f - 0.4f * u : (x == x1 ? 0.75f : 1.0f);
-            int t = top - (crenel && ((x - x0) / 3) % 2 == 0 ? 3 : 0);
-            for (int y = t; y < base; y++) put(x, y, shadeC(stone, k * ((y - t) % 4 == 0 ? 0.9f : 1.0f)));
-        }
-    };
-    auto windows = [&](int x0, int x1, int top) {
-        for (int y = top + 6; y < base - 6; y += irange(9, 13))
-            for (int x = x0 + 2; x < x1 - 2; x += irange(5, 9))
-            {
-                bool lit = chance(3);
-                Color c = lit ? Color{255, 190, 104, 255} : Color{24, 24, 34, 255};
-                put(x, y, c); put(x, y + 1, lit ? Color{214, 136, 64, 255} : c);
-                if (lit && chance(2)) put(x + 1, y + 1, Color{170, 100, 50, 255});
-            }
-    };
-    if (kind == 0) // drum towers along a curtain wall, a tall keep behind with a flagpole
-    {
-        block(cx - 22, cx + 12, base - 62, false, true);
-        for (int y = base - 82; y < base - 62; y++) put(cx - 4, y, stone);
-        windows(cx - 22, cx + 12, base - 62);
-        block(cx - 60, cx + 52, base - 34, false, true);
-        for (int t : {-58, -36, 18, 40})
-        {
-            block(cx + t, cx + t + 13, base - 44 - irand(6), true, true);
-            windows(cx + t, cx + t + 13, base - 44);
-        }
-        windows(cx - 60, cx + 52, base - 34);
-    }
-    else // a ruined chapel: a broken gable with a tall arched window, and its square tower
-    {
-        for (int x = cx - 24; x <= cx + 4; x++) // the gable
-        {
-            int top = base - 30 - (int)(16 - std::abs(x - (cx - 10)) * 1.1f);
-            if ((x * 7) % 11 == 0) top += 3; // weathered, broken edge
-            for (int y = top; y < base; y++)
-            {
-                bool arch = std::abs(x - (cx - 10)) < 4 && y > base - 34 && y < base - 8;
-                put(x, y, arch ? Color{14, 14, 22, 255} : shadeC(stone, x < cx - 10 ? 1.05f : 0.85f));
-            }
-        }
-        block(cx + 5, cx + 21, base - 56, false, true);
-        windows(cx + 5, cx + 21, base - 56);
-        block(cx - 46, cx - 25, base - 12, false, false); // tumbled walls
-        for (int x = cx - 46; x < cx - 25; x += 2) put(x, base - 13 - irand(3), stone);
-    }
-}
-
+static void paintFallen(int x, int g, float k);
 static void decorateRoom(const Room& r, bool grand)
 {
     int w = r.x1 - r.x0, h = r.y1 - r.y0;
@@ -1289,6 +1380,19 @@ static void decorateRoom(const Room& r, bool grand)
         for (int k = irange(1, 2), sx = r.x0 + irange(10, 40); k > 0 && sx < r.x1 - 30; k--, sx += irange(40, 70)) sarcophagus(sx, r.y1 + 1);
     else if (!grand && w > 120 && chance(3)) feastTable(r.x0 + w / 2 - 20, r.x0 + w / 2 + 20, r.y1 + 1);
     for (int tx = r.x0 + 12; tx < r.x1 - 8; tx += irange(50, 80)) G.inter.push_back({IT_TORCH, (float)tx, (float)(r.y1 + 1)});
+    if (w > 60) // where the floor meets the back wall: the fallen slumped against it (painted flat), their blood, racked weapons
+    {
+        int fy = r.y1 + 1;
+        for (int k = crypt ? irange(0, 1) : irange(0, 2); k > 0; k--)
+            if (chance(2))
+            {
+                int bx = irange(r.x0 + 16, r.x1 - 34);
+                paintFallen(bx, fy, 0.3f);
+                addDecor(DK_BLOOD, (float)(bx + irange(-2, 8)), (float)fy, 4 + 6 * irand(10), irange(10, 18));
+            }
+        if (!crypt && chance(2)) paintRack(irange(r.x0 + 10, r.x1 - 34), fy);
+        if (h >= 44 && chance(6)) addDecor(DK_LEAK, (float)irange(r.x0 + 14, r.x1 - 14), (float)irange(r.y0 + 12, std::max(r.y0 + 13, r.y1 - 36)), irand(4)); // a hole where water breaks through
+    }
     if (grand) return;
     // uneven floor: raised steps and plinths
     for (int k = irand(3); k > 0; k--)
@@ -1335,6 +1439,20 @@ static LevelEnds castleLayout(const StageDef& d, int g)
             else if (!keep && y < surf[x] + 14) place(x, y, y < surf[x] + 2 ? M::Grass : M::Dirt);
             else place(x, y, M::Basalt); // dark rock between the halls
         }
+    for (int t0 = keepX0 + 110; t0 + 110 <= keepX1; t0 += 330) // a tiled conical roof on each tower, eaves overhanging the walls
+    {
+        int cx = t0 + 55, top = surf[t0 + 55];
+        for (int x = t0 - 7; x < t0 + 117; x++)
+        {
+            int hr = (int)(96 * std::pow(std::max(0.0f, 1 - std::fabs((float)(x - cx)) / 62.0f), 1.45f)); // a flared, slightly concave cone
+            if (x == cx || x == cx + 1) hr += 14; // a finial on the point
+            for (int y = top - hr; y < top; y++) if (world.in(x, y)) place(x, y, M::Brick);
+        }
+    }
+    for (int dx = 0; dx < 14; dx++) // the keep's two ends rounded off instead of square
+        for (int dy = -8; dy < 14; dy++)
+            if ((14 - dx) * (14 - dx) + (14 - std::max(dy, 0)) * (14 - std::max(dy, 0)) > 196)
+                for (int xx : {keepX0 + dx, keepX1 - 1 - dx}) { int y = surf[xx] + dy; if (world.in(xx, y)) world.at(xx, y) = Cell{}; }
     for (int x = keepX0; x < keepX1; x += 37) // arrow slits in the curtain wall
         for (int y = surf[x] + 18; y < surf[x] + 34; y++) world.at(x, y).shade = 0;
     buildBackground(d, true);
@@ -1875,34 +1993,21 @@ static void placeMine(int mx)
 // An archery butt out in the fields, with a rack of longbows beside it, painted on the back wall.
 static void paintArchery(int x, int fy)
 {
-    const Color ink = {40, 30, 24, 255}, straw = {200, 176, 116, 255}, red = {176, 46, 42, 255}, cream = {230, 224, 204, 255},
-                gold = {224, 182, 62, 255}, wood = {104, 70, 40, 255}, bow = {140, 92, 48, 255};
-    for (int k = 0; k < 15; k++) { bgPut(x + 6 + k * 4 / 15, fy - 1 - k, wood); bgPut(x + 16 - k * 4 / 15, fy - 1 - k, wood); } // stand
-    for (int dy = -9; dy <= 9; dy++)
-        for (int dx = -9; dx <= 9; dx++)
-        {
-            int d2 = dx * dx + dy * dy;
-            if (d2 > 81) continue;
-            bgPut(x + 11 + dx, fy - 19 + dy, d2 > 64 ? ink : (d2 > 36 ? straw : (d2 > 16 ? red : (d2 > 4 ? cream : gold))));
-        }
-    for (int a = 0; a < 2; a++) // arrows stuck in it
-    {
-        int ax = x + 11 + irange(-5, 3), ay = fy - 19 + irange(-5, 5);
-        for (int k = 0; k < 6; k++) bgPut(ax + k, ay - k / 2, wood);
-        bgPut(ax + 6, ay - 3, cream);
-        bgPut(ax + 6, ay - 2, cream);
-    }
-    int rx = x - 26;
-    for (int y = fy - 22; y < fy; y++) { bgPut(rx, y, wood); bgPut(rx + 12, y, wood); }
-    for (int xx = rx; xx <= rx + 12; xx++) bgPut(xx, fy - 21, wood);
-    for (int b = 0; b < 2; b++)
-    {
-        int bx = rx + 3 + b * 5;
-        for (int t = -8; t <= 8; t++)
-        {
-            bgPut(bx + (int)std::lround(2.5f * (1 - (t / 8.0f) * (t / 8.0f))), fy - 12 + t, bow);
-            if (std::abs(t) < 8) bgPut(bx, fy - 12 + t, cream); // string
-        }
+    addDecor(DK_TARGET, (float)x + 16, (float)fy + 1, irand(8)); // the butt: a side-on straw drum on a tripod, arrows in it, hay bales behind
+    { // the longbow rack: dark timber, bows in two rows, a quiver of arrows - painted into the back wall (so the grass grows in front of it), a unit per 2x2 of its sprite
+        Image im = decorImageFine(DK_BOWRACK, irand(8), 0);
+        const Color* src = (const Color*)im.data;
+        int ux0 = x - 18 - im.width / 4, uy0 = fy + 1 - im.height / 2;
+        for (int uy = 0; uy < im.height / 2; uy++)
+            for (int ux = 0; ux < im.width / 2; ux++)
+            {
+                int n = 0, r = 0, g = 0, b = 0;
+                for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) { const Color& c = src[(uy * 2 + j) * im.width + ux * 2 + i]; if (c.a > 128) { n++; r += c.r; g += c.g; b += c.b; } }
+                if (n < 2 || !world.in(ux0 + ux, uy0 + uy)) continue;
+                world.bgAt(ux0 + ux, uy0 + uy) = Color{(unsigned char)(r / n * 0.86f), (unsigned char)(g / n * 0.86f), (unsigned char)(b / n * 0.9f), 255};
+                world.skyAt(ux0 + ux, uy0 + uy) = 0;
+            }
+        UnloadImage(im);
     }
 }
 
@@ -1952,7 +2057,6 @@ static void paintFallen(int x, int g, float k)
         int bx = irange(2, 12);
         for (int t = 0; t < 7; t++) p(bx + (int)std::lround(std::cos(a) * t) * dir, 1 + (int)std::lround(-std::sin(a) * t), t > 4 ? Color{220, 214, 200, 255} : Color{130, 98, 64, 255});
     }
-    if (chance(3)) paintShield(x - dir * irange(5, 8), g - 3, 4);
 }
 
 // The battlefield before Dunmoor: the dead lie thicker the nearer the walls, the ground drinks their blood,
@@ -1980,6 +2084,7 @@ static void decorateBattlefield(int x0, int x1, bool thinning = false, bool stor
             paintFallen(x, gy, k);
             nextBody = x + (int)(irange(16, 34) / (0.45f + k));
         }
+        if (k > 0.1f && irand(14) == 0) addDecor(DK_SPEARPOST, (float)x, (float)gy + 1, irand(32) | (chance(20) ? 32 : 0), irange(22, 34), chance(2)); // a spear driven into the ground; one in twenty has a pennon streaming from it
         if (k > 0.05f && irand(110) == 0) // the risen levy, with the odd skeleton among them
         {
             Mob mb = makeEnemy(chance(4) ? E_SKELETON : E_RISEN, (float)x, (float)gy);
@@ -3237,14 +3342,21 @@ static Cell fineGrain(Cell c, int fx, int fy)
     }
     else if (m == M::Masonry)
     {
-        int row = fy / 10, col = (fx + (row % 2) * 12) / 24;
-        bool mortar = fy % 10 == 0 || (fx + (row % 2) * 12) % 24 == 0;
-        c.shade = mortar ? (uint8_t)irange(0, 18) : clamp8((int)(70 + hash2(col, row, seed + 9) * 120) + jitter(16) + (fy % 10 == 1 ? 25 : 0));
+        // uneven blocks: each stretch of course sits a little high or low, rows start at random offsets, every block has its own
+        // width and height, corners are chipped (a broken one now and then) and the mortar fills the gaps; the odd crack
+        int ph = fy + (int)(hash2(fx / 30, 1, seed + 41) * 5), row = ph / 11, v = ph % 11;
+        int xo = fx + (int)(hash2(row, 2, seed + 42) * 40) + (int)(3.0f * std::sin(fx * 0.09f + row * 1.7f)), col = xo / 22, u = xo % 22;
+        float th = hash2(col, row, seed + 9);
+        int bw = 20 - (int)(hash2(col, row, seed + 43) * 4), bh = 10 - (int)(hash2(col, row, seed + 44) * 3);
+        int du = std::min(u, bw - 1 - u), dv = std::min(v, bh - 1 - v);
+        bool mortar = u >= bw || v >= bh || du + dv < (th > 0.9f ? 5 : 2);
+        bool crack = th > 0.8f && v > 2 && u == 4 + (v * 3 / 2 + (int)(hash2(col, row, seed + 45) * 14)) % std::max(1, bw - 8);
+        c.shade = mortar ? (uint8_t)irange(0, 26) : crack ? (uint8_t)irange(4, 20) : clamp8((int)(70 + th * 120) + jitter(16) + (v == 1 ? 25 : 0) - (v >= bh - 2 ? 18 : 0));
     }
     else if (m == M::Platform)
         c.shade = (fx % 14 == 0) ? 15 : clamp8(c.shade + jitter(10));
     else if (m == M::Wood || m == M::Thatch)
-        c.shade = clamp8(c.shade + ((fy + fx / 5) % 4 == 0 ? -28 : 0) + jitter(10));
+        c.shade = clamp8(c.shade + ((fy + fx / 5) % 4 == 0 ? -28 : 0) + (int)((hash2(fx, fy / 7, seed + 5) - 0.5f) * 34) + (hash2(fx / 3, fy / 3, seed + 6) > 0.96f ? -40 : 0) + jitter(10)); // grain streaks one cell wide, the odd knot
     else if (props(m).kind == Kind::Liquid || props(m).kind == Kind::Gas || m == M::Fire)
         c.shade = (uint8_t)xr();
     else
@@ -3298,7 +3410,16 @@ static void upscaleWorld(int k, bool fineBack = false)
                 for (int i = 0; i < k; i++)
                 {
                     const Cell* src = q[(j * 2 / k) * 2 + (i * 2 / k)];
-                    if (builtMaterial(src->material) != builtMaterial(P.material) || builtMaterial(P.material) || builtMaterial(src->material)) src = &P;
+                    bool roof = P.material == M::Thatch && src->material == M::Thatch; // thatch is smoothed too: a roof pitch is one-cell steps, not two
+                    if (!roof && (builtMaterial(src->material) != builtMaterial(P.material) || builtMaterial(P.material) || builtMaterial(src->material))) src = &P;
+                    else if (!roof && k == 2 && src == &P)
+                    { // ragged ground: now and then a quarter beside a different neighbour takes its stuff, so edges wander by a cell instead of running in two-cell lines
+                        const Cell& H = (i ? B : C), &V = (j ? D : A);
+                        float r = hash2(x * k + i, y * k + j, seed + 61);
+                        auto rag = [&](const Cell& n) { return !builtMaterial(n.material) && (n.material == M::Empty || props(n.material).kind == Kind::Solid); };
+                        if (rag(P) && r < 0.28f && !same(H, P) && rag(H)) src = &H;
+                        else if (rag(P) && r > 0.72f && !same(V, P) && rag(V)) src = &V;
+                    }
                     world.atq(x * k + i, y * k + j) = fineGrain(*src, x * k + i, y * k + j);
                 }
         }
@@ -4483,6 +4604,12 @@ void generateVillage()
                 for (int k = -1; k <= 1; k++)
                     if (y > 0 || k == 0) bgPut(x + k * (y > 1 && y < 5), base - 18 + y, y == 5 ? Color{90, 96, 104, 255} : shadeC({172, 178, 184, 255}, 0.8f + 0.1f * k));
         halls.push_back({rx - 6, rx + 36});
+    }
+    for (int x = 40; x < quay - 50; x += irange(60, 110)) // spears with pennons stood along the street
+    {
+        bool clear = true;
+        for (auto& h : halls) clear = clear && (x < h.first - 4 || x > h.second + 4);
+        if (clear) addDecor(DK_SPEARPOST, (float)x, (float)surf[x] + 1, irand(32) | (chance(3) ? 32 : 0), irange(24, 32), chance(2));
     }
     for (int x = 30; x < quay - 40; x += irange(16, 34)) // trees in the gaps between the buildings
     {

@@ -1,4 +1,4 @@
-﻿#include "game.h"
+#include "game.h"
 #include "util.h"
 #include "sprites.h"
 #include <cmath>
@@ -1978,7 +1978,7 @@ static void updatePlayer()
     wasWet = m.inLiquid;
     if (m.inLiquid && std::fabs(m.vx) > 0.4f && G.frame % 5 == 0) spawnParticle(m.cx() - m.facing * 4, m.cy() + frange(-3, 3), -m.vx * 0.1f, -0.4f, 30, {200, 232, 255, 170}, -0.01f); // a trail of bubbles behind a swimmer
     G.underwater = isLiquidAt((int)m.cx(), (int)m.y + 1);
-    if (P.ondT > 0) { P.ondT--; P.breath = 100; if (G.frame % 6 == 0) spawnParticle(m.cx() + frange(-3, 3), m.y + 2, 0, -0.4f, 30, {170, 240, 250, 160}, -0.01f); } // Önd: no need of air
+    if (P.ondT > 0) { P.ondT--; P.breath = 100; if (G.frame % 6 == 0) spawnParticle(m.cx() + frange(-3, 3), m.y + 2, 0, -0.4f, 30, {170, 240, 250, 160}, -0.01f); } // Ã–nd: no need of air
     else if (G.underwater && P.amulet != AM_NJORD) // head under: about 14 seconds of air
     {
         P.breath = std::max(0.0f, P.breath - 0.12f);
@@ -2834,7 +2834,7 @@ static void updatePickups()
         case PU_OND: // the breath Odin gave the first people: 30 seconds without air
             P.ondT = std::max(P.ondT, 30 * 60);
             P.breath = 100;
-            message("Önd fills your lungs: for 30 seconds you need no air.");
+            message("Ã–nd fills your lungs: for 30 seconds you need no air.");
             playSfx(SFX_POTION, 0.7f, 1.4f);
             for (int k = 0; k < 24; k++) spawnParticle(P.m.cx(), P.m.cy(), frange(-1.2f, 1.2f), frange(-1.4f, 0.4f), irange(30, 60), {170, 240, 250, 220}, -0.02f);
             pu.alive = false;
@@ -3403,57 +3403,93 @@ static void drawTumbleweeds(int camX, int camY)
     }
 }
 
-// A Norse longship: clinker hull, a row of shields, dragon prow, and a striped sail (`sail` 0 furled .. 1 set).
-static void drawLongship(float x, float y, float sail)
+// A Norse longship (flat 2D art baked by tools/ship.py, decor.cpp:longshipImage, at half a unit per pixel): a broad clinker hull with a
+// dragon-headed stem and a curled stern, shields along the rail, the mast and a red-and-cream striped sail (`sail` 0 furled .. 1 set).
+// `wreck`: the beached, broken one. The hull image ends at the waterline (row LS_KEEL); below it the hull is mirrored in the water,
+// broken up by the swell. Hull centre column LS_CX; mast centre column LM_CX, foot at its bottom row.
+static struct ShipTex { Texture2D hull, mast; } shipTex[2];
+static Texture2D shipRefl; static const int REFL_N = 64; // rows of reflection
+static bool shipFront = false; // the hull is redrawn over the player while sailing, so they sit down inside it
+static float shipFx, shipFy;
+static void drawLongship(float x, float y, float sail, bool wreck)
 {
-    const Color ink = {50, 34, 22, 255}, wood = {112, 74, 42, 255}, woodD = {74, 48, 28, 255}, woodL = {150, 104, 62, 255}; // ink: tarred seams, not an outline
-    const int L = 30;
-    for (int dx = -L - 1; dx <= L + 1; dx++)
+    ShipTex& T = shipTex[wreck];
+    if (!T.hull.id)
     {
-        float u = std::fabs((float)dx) / L;
-        int top = (int)(y - 9 - u * u * u * 7), bot = (int)(y - u * u * 7);
-        for (int yy = top - 1; yy <= bot + 1; yy++)
+        Image h = longshipImage(wreck ? 2 : 0), m = longshipImage(wreck ? 3 : 1);
+        if (!wreck) // the reflection: the hull upside down below the waterline, thinned to a checker, tinted by the sea, fading with depth
         {
-            bool edge = yy < top || yy > bot || std::abs(dx) > L;
-            Color c = edge ? ink : ((yy - top) % 3 == 2 ? woodD : (yy == top ? woodL : wood)); // overlapping strakes
-            DrawRectangle((int)x + dx, yy, 1, 1, c);
+            Image r = GenImageColor(h.width, REFL_N, BLANK);
+            Color* hp = (Color*)h.data; Color* rp = (Color*)r.data;
+            for (int j = 0; j < REFL_N; j++)
+                for (int xx = 0; xx < h.width; xx++)
+                {
+                    Color c = hp[std::max(0, LS_KEEL - 1 - j) * h.width + xx];
+                    if (!c.a || ((xx + j) & 1) && j > 6) continue; // (solid at the waterline, thinning to a checker with depth)
+                    float f = 1 - j / (float)REFL_N;
+                    rp[j * h.width + xx] = lerpColor(c, Color{34, 96, 128, 255}, 0.55f);
+                    rp[j * h.width + xx].a = (unsigned char)(235 * f);
+                }
+            shipRefl = LoadTextureFromImage(r); UnloadImage(r);
         }
+        T.hull = LoadTextureFromImage(h); T.mast = LoadTextureFromImage(m);
+        UnloadImage(h); UnloadImage(m);
     }
-    auto stroke = [&](float x0, float y0, float x1, float y1, float th, Color c) { DrawLineEx({x0, y0}, {x1, y1}, th, c); };
-    stroke(x + L, y - 15, x + L + 3, y - 25, 2, wood); // the dragon's neck, and its head looking out to sea
-    DrawRectangle((int)x + L + 1, (int)y - 29, 7, 4, ink);
-    DrawRectangle((int)x + L + 2, (int)y - 28, 5, 2, woodL);
-    DrawRectangle((int)x + L + 5, (int)y - 28, 1, 1, {220, 60, 40, 255});
-    stroke(x - L, y - 15, x - L - 2, y - 22, 2, wood); // the stern curls back over itself
-    stroke(x - L - 2, y - 22, x - L + 1, y - 24, 1.5f, wood);
-    float mx = x - 2;
-    stroke(mx, y - 9, mx, y - 46, 1.5f, woodD); // mast and yard
-    stroke(mx - 14, y - 44, mx + 14, y - 44, 1, woodD);
-    if (sail > 0.02f)
+    float bx = std::floor(x * 2) / 2, by = std::floor(y * 2) / 2 + (wreck ? 2 : 0);
+    if (!wreck) // rows of the reflection, each swaying on its own phase: the water is never still
+        for (int j = 0; j < REFL_N; j++)
+        {
+            float sway = std::sin(G.frame * 0.07f + j * 0.45f) * (0.6f + j * 0.03f) + std::sin(G.frame * 0.031f - j * 0.2f) * 0.8f;
+            DrawTexturePro(shipRefl, {0, (float)j, (float)shipRefl.width, 1}, {std::floor((bx - LS_CX * 0.5f + sway) * 2) / 2, by + j * 0.5f + 0.5f, shipRefl.width * 0.5f, 0.5f}, {0, 0}, 0, WHITE);
+        }
+    float mx = bx - 1, deck = by - 14;                       // the deck amidships is 14 units above the waterline
+    float mtop = deck - (LM_H - 2) * 0.5f;                   // the mast image's top edge
+    DrawTextureEx(T.mast, {mx - LM_CX * 0.5f, mtop}, 0, 0.5f, WHITE);
+    if (!wreck)
     {
-        int sh = (int)(26 * sail);
-        for (int yy = 0; yy < sh; yy++)
-            for (int dx = -13; dx <= 13; dx++)
-            {
-                float belly = std::sin(3.14159f * yy / 26.0f) * 2 * sail; // filled with wind
-                Color c = ((dx + 13) / 5) % 2 ? Color{232, 222, 196, 255} : Color{168, 38, 40, 255};
-                if (std::abs(dx) == 13 || yy == sh - 1) c = brighten(c, -60);
-                DrawRectangle((int)(mx + dx + belly), (int)y - 43 + yy, 1, 1, c);
-            }
+        const int SW = 84, SHT = 76;
+        static const Color cream[5] = {{70, 56, 62, 255}, {136, 116, 108, 255}, {190, 170, 142, 255}, {228, 212, 176, 255}, {248, 238, 208, 255}};
+        static const Color red[5] = {{70, 20, 32, 255}, {116, 30, 40, 255}, {170, 44, 46, 255}, {208, 72, 56, 255}, {236, 112, 84, 255}};
+        float yard = mtop + 6.5f;
+        if (sail > 0.02f) // the canvas drops from the yard, belly full of wind: folds lit in the game's banded light
+        {
+            int sh = (int)(SHT * sail);
+            for (int yy = 0; yy < sh; yy++)
+                for (int dx = -SW / 2; dx < SW / 2; dx++)
+                {
+                    float belly = std::sin(3.14159f * yy / SHT) * 5 * sail;
+                    int mxp = dx + SW / 2;
+                    float fold = std::sin(dx * 0.27f + yy * 0.04f + 1.2f) * 0.55f + std::sin(dx * 0.09f) * 0.3f; // slope of the cloth
+                    float I = 0.18f + 0.82f * std::max(0.0f, 0.55f - fold * 0.5f + 0.3f * (1 - yy / (float)SHT) * 0.5f);
+                    int band = (int)(I * 4.6f);
+                    int stripe = ((mxp + (int)(std::sin(yy * 0.13f + mxp * 0.05f) * 2.0f) + 100) / 12) & 1; // wavy stripes: red, cream, red...
+                    if (mxp % 12 == 0) band -= 1;                                                     // seams between cloths
+                    if (hash2(mxp / 3, yy / 5, 91) > 0.92f) band -= 1;                                // weathering
+                    if (std::abs(dx) >= SW / 2 - 1 || yy >= sh - 2 || yy < 2) band = 1;               // the rope hem
+                    if (yy >= sh - 6 && (mxp + yy) % 9 < 2) continue;                                 // a ragged lower edge
+                    DrawRectangleRec({mx + (dx + (int)belly) * 0.5f, yard + yy * 0.5f, 0.5f, 0.5f}, (stripe ? red : cream)[std::max(0, std::min(4, band))]);
+                }
+        }
+        else
+            for (int dx = -44; dx < 44; dx++) // furled along the yard, lashed
+                for (int yy = 0; yy < 5; yy++)
+                    DrawRectangleRec({mx + dx * 0.5f, yard + yy * 0.5f, 0.5f, 0.5f}, (dx + 44) % 11 == 0 ? Color{60, 40, 36, 255} : cream[std::max(0, 3 - yy / 2)]);
+        // stays: ropes from the masthead down to the stem's head, the stern post and the rail
+        Color rope = {88, 56, 38, 220};
+        float mh = mtop + 4.0f;
+        DrawLineEx({mx, mh}, {bx + 31.0f, by - 23.0f}, 0.5f, rope);
+        DrawLineEx({mx, mh}, {bx - 31.0f, by - 23.0f}, 0.5f, rope);
+        DrawLineEx({mx, mh}, {bx + 16.0f, by - 20.0f}, 0.5f, rope);
+        DrawLineEx({mx, mh}, {bx - 16.0f, by - 20.0f}, 0.5f, rope);
     }
-    else
-    {
-        DrawRectangle((int)mx - 13, (int)y - 44, 27, 3, ink);
-        DrawRectangle((int)mx - 12, (int)y - 43, 25, 1, {200, 180, 150, 255});
-    }
-    static const Color shields[4] = {{176, 44, 40, 255}, {222, 184, 70, 255}, {44, 70, 140, 255}, {226, 220, 200, 255}};
-    for (int k = 0; k < 7; k++) // shields hung along the gunwale
-    {
-        float sx = x - L + 9 + k * 7.3f, sy = y - 8;
-        DrawCircleV({sx, sy}, 3.4f, ink);
-        DrawCircleV({sx, sy}, 2.6f, shields[k % 4]);
-        DrawRectangle((int)sx, (int)sy, 1, 1, {140, 140, 150, 255});
-    }
+    DrawTextureEx(T.hull, {bx - LS_CX * 0.5f, by - LS_KEEL * 0.5f}, 0, 0.5f, WHITE);
+    if (sail > 0 && !wreck) { shipFront = true; shipFx = bx; shipFy = by; }
+}
+static void drawShipFront() // after the player: the near side of the hull in front of whoever sits in it
+{
+    if (!shipFront) return;
+    shipFront = false;
+    DrawTextureEx(shipTex[0].hull, {shipFx - LS_CX * 0.5f, shipFy - LS_KEEL * 0.5f}, 0, 0.5f, WHITE);
 }
 
 // ---------------------------------------------------------------- havens
@@ -3537,8 +3573,9 @@ void updateGame()
             if (it.type == IT_BOAT && !it.used)
             {
                 it.x += std::min(1.4f, G.sailT * 0.012f);
-                pm.x = it.x - 4 - pm.w / 2.0f;
-                pm.y = it.y - 8 - pm.h;
+                if (!G.p.crouch) { pm.y += pm.h - 16; pm.h = 16; G.p.crouch = true; } // sat down in the boat, amidships behind the rail
+                pm.x = it.x + 6 - pm.w / 2.0f;
+                pm.y = it.y - 16 - pm.h;
             }
         pm.vx = pm.vy = 0;
         pm.facing = 1;
@@ -3548,6 +3585,17 @@ void updateGame()
         if (G.sailT > 180) { G.sailT = 0; travelOnward(); }
         return;
     }
+
+    if (G.frame % 2 == 0) // holes in the walls with water breaking through: a thin stream, stopping when a pool has built up below
+        for (auto& it : G.inter)
+        {
+            if (it.type != IT_DECOR || it.data != DK_LEAK || std::fabs(it.x - G.camX - G.vw / 2) > G.vw || std::fabs(it.y - G.camY - G.vh / 2) > G.vh) continue;
+            int cx = (int)(it.x * world.scale), cy = (int)((it.y + 2) * world.scale);
+            if (world.get(cx, cy).material != M::Empty) continue;
+            int wet = 0;
+            for (int y = cy; y < cy + 100 * world.scale && wet < 450; y += 2) for (int x = cx - 24; x <= cx + 24; x += 2) wet += world.get(x, y).material == M::Water;
+            if (wet < 110) setCellC(cx, cy, M::Water);
+        }
 
     double pt = GetTime();
     if (G.sandbox || G.dev) sandboxTools(); // (in a real run, with dev tools on: Ctrl+E, Ctrl+C, Ctrl+mouse)
@@ -4169,7 +4217,7 @@ void drawEntities(int camX, int camY)
         case IT_BOAT:
         {
             float bob = it.used ? 0 : std::sin(G.frame * 0.04f) * 1.0f;
-            drawLongship(x, y + bob, it.used ? 0 : clampf(G.sailT / 50.0f, 0, 1));
+            drawLongship(x, y + bob, it.used ? 0 : clampf(G.sailT / 50.0f, 0, 1), it.used);
             break;
         }
         }
@@ -4184,16 +4232,16 @@ void drawEntities(int camX, int camY)
             float bx = l.x - camX, cy = l.y - camY, ww = l.w, wh = l.wh, len = l.beam * 1.3f, k = 0.9f, br = 0.9f + 0.1f * std::sin(G.frame * 0.03f + l.x);
             float by = cy + wh / 2; // rays leave from the sill
             BeginBlendMode(BLEND_ADDITIVE);
-            DrawCircleGradient((int)bx, (int)cy, std::max(ww, wh) * 1.3f, {170, 205, 255, (unsigned char)(48 * br)}, {170, 205, 255, 0}); // a halo round the glass
-            DrawRectangleRec({bx - ww / 2, cy - wh / 2, ww, wh}, {150, 190, 255, (unsigned char)(70 * br)});                                  // the whole pane glowing
-            DrawRectangleRec({bx - ww / 2 + 1, cy - wh / 2 + 1, ww - 2, wh - 2}, {200, 225, 255, (unsigned char)(40 * br)});
+            DrawCircleGradient((int)bx, (int)cy, std::max(ww, wh) * 1.3f, {170, 205, 255, (unsigned char)(48 * br * l.dim)}, {170, 205, 255, 0}); // a halo round the glass
+            if (l.dim >= 0.99f) DrawRectangleRec({bx - ww / 2, cy - wh / 2, ww, wh}, {150, 190, 255, (unsigned char)(70 * br)});                                  // the whole pane glowing
+            if (l.dim >= 0.99f) DrawRectangleRec({bx - ww / 2 + 1, cy - wh / 2 + 1, ww - 2, wh - 2}, {200, 225, 255, (unsigned char)(40 * br)});
             for (float j = 0; j < len; j += 1)
             {
                 float t = j / len, fall = std::pow(1 - t, 1.8f), xo = -k * j, spread = 1 + 0.5f * t; // the rays fan out and die away with distance
                 for (float c = -ww / 2; c < ww / 2; c += 1)
                 {
                     float ray = 0.35f + 0.65f * vnoise(c * 0.8f + l.x * 0.37f, 7.0f + G.frame * 0.004f, 91); // streaks, some brighter than others
-                    unsigned char a = (unsigned char)(56 * br * fall * ray);
+                    unsigned char a = (unsigned char)(56 * br * fall * ray * l.dim);
                     if (a) DrawRectangleRec({bx + c * spread + xo, by + j, 1, 1}, {170, 205, 255, a});
                 }
             }
@@ -4273,6 +4321,7 @@ void drawEntities(int camX, int camY)
     for (auto& m : G.mobs)
         if (!off(m.cx() - camX, m.cy() - camY, 96)) drawMobAnimated(m, camX, camY);
     drawPlayerViking(camX, camY);
+    drawShipFront();
     for (auto& m : G.mobs)
         if (m.burn > 0 && !off(m.cx() - camX, m.cy() - camY, 40)) drawBurning(m, camX, camY);
     if (G.p.m.alive && G.p.m.burn > 0) drawBurning(G.p.m, camX, camY);

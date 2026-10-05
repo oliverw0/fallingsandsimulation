@@ -285,10 +285,14 @@ enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_TORCH, IT_STONE, IT_SHOP, 
 // everything from DK_DRESSER on; decorAnchor says whether (x, y) is its foot, its hanging point or its centre.
 enum DecorKind { DK_CACTUS, DK_BUSH, DK_SKELETON, DK_GIANT,
                  DK_DRESSER, DK_TABLE, DK_PICTURE, DK_TOOL, DK_SHELF, DK_RACK, DK_ARROWS, DK_BUNK, DK_HEARTH, DK_SHIELD, DK_POST, DK_LADDER, DK_YARD,
-                 DK_TAPESTRY, DK_DRAPE, DK_CHAIN, DK_BLOOD, DK_HORNS, DK_ANTLERS, DK_DRAGONPILLAR, DK_IDOL, DK_CRANE, DK_SPIKE };
+                 DK_TAPESTRY, DK_DRAPE, DK_CHAIN, DK_BLOOD, DK_HORNS, DK_ANTLERS, DK_DRAGONPILLAR, DK_IDOL, DK_CRANE, DK_SPIKE,
+                 DK_LEANSHIELD, DK_SPEARPOST, DK_TARGET, DK_BOWRACK, DK_COBWEB, DK_LEAK };
 Image decorImageFine(int kind, int var, int size);
 int decorAnchor(int kind, int var);
+Color clothTone(int var, int t);
 void exportDecorSheet(const char* path);
+const int LS_CX = 65, LS_KEEL = 47, LM_CX = 52, LM_H = 132; // the hull image's centre column and keel row; the mast image's centre column and height (tools/ship.py)
+Image longshipImage(int part); // decor.cpp: 0 hull, 1 mast, 2 broken hull, 3 broken mast (half a unit per pixel)
 void loadStep(float frac, const char* what); // main.cpp: redraws the loading screen with a progress bar (no-op without a window)
 Image stallImageFine(int kind, int layer); // Hearthwick's market stalls, layers 0 (back) and 1 (counter), 144 x 124 px
 // IT_BOAT: a longship; `used` = beached scenery, otherwise F sets sail. IT_TORCH style 1 = wall sconce.
@@ -331,7 +335,7 @@ struct Particle
 };
 
 // A light with no object of its own (lanterns, lit windows); `flame` also draws a flickering flame.
-struct Lamp { float x, y, r; Color c; bool flame = false; bool smoke = false; float beam = 0, w = 0, wh = 0; }; // smoke: no light, just a curl of smoke (a hall's roof); beam: a window's moonlight, falling this far (w wide)
+struct Lamp { float x, y, r; Color c; bool flame = false; bool smoke = false; float beam = 0, w = 0, wh = 0, dim = 1; }; // smoke: no light, just a curl of smoke (a hall's roof); beam: a window's moonlight, falling this far (w wide)
 
 // A safe area between two biomes. You walk in through `x0`, the gate drops behind you, and the far
 // gate at `x1` opens onto the next biome. A boss's haven stays barred until the boss falls.

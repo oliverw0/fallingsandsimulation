@@ -271,11 +271,12 @@ void shelf(Cv& c, int var)
     }
 }
 
-void spear(Cv& c, int x, int top, int bottom)
-{
-    c.vline(x, top + 8, bottom, WOOD[3]); c.vline(x + 1, top + 8, bottom, WOOD[2]);
-    for (int k = 0; k < 9; k++) { int hw = k < 5 ? k / 2 : (8 - k) / 2; c.hline(x - hw, x + 1 + hw, top + 8 - k, k == 4 ? IRON[4] : IRON[3]); c.px(x + 1 + hw, top + 8 - k, IRON[2]); }
-    c.px(x, top, IRON[4]); c.px(x, top + 1, IRON[3]); // the point
+void spear(Cv& c, int x, int top, int bottom, int lean = 0, int dim = 0)
+{ // a spear, its head `lean` cells off the vertical; dim 1 = standing behind the others (darker, so the rack has depth)
+    auto X = [&](int y) { return x + (int)std::lround(lean * (float)(bottom - y) / std::max(1, bottom - top)); };
+    for (int y = top + 8; y <= bottom; y++) { c.px(X(y), y, tone(WOOD, 3 - dim)); c.px(X(y) + 1, y, tone(WOOD, 2 - dim)); }
+    for (int k = 0; k < 9; k++) { int hw = k < 5 ? k / 2 : (8 - k) / 2, xx = X(top + 8 - k); c.hline(xx - hw, xx + 1 + hw, top + 8 - k, tone(IRON, (k == 4 ? 4 : 3) - dim)); c.px(xx + 1 + hw, top + 8 - k, tone(IRON, 2 - dim)); }
+    c.px(X(top), top, tone(IRON, 4 - dim)); c.px(X(top), top + 1, tone(IRON, 3 - dim)); // the point
 }
 
 void rack(Cv& c, int var)
@@ -284,7 +285,8 @@ void rack(Cv& c, int var)
     for (int sx : {0, W - 3}) plank(c, sx, 6, sx + 2, H - 1, false, 41 + var, 2);
     for (int ry : {H - 30, H - 14}) { plank(c, 0, ry, W - 1, ry + 2, true, 47 + var + ry, 3); c.hline(1, W - 2, ry + 3, tone(WOOD, 0)); }
     int n = std::max(2, (W - 22) / 7);
-    for (int i = 0; i < n; i++) spear(c, 6 + i * 6, i % 2 ? 5 : 1, H - 4);
+    for (int pass = 0; pass < 2; pass++) // the back row leans the other way, darker, behind the front
+        for (int i = pass; i < n; i += 2) spear(c, 6 + i * 6, i % 2 ? 5 : 1, H - 4, (i % 3 - 1) * 2 + (pass ? 1 : 0), pass == 0 ? 1 : 0);
     int ax = 6 + n * 6 + 1; // an axe leaning on the rail
     c.vline(ax, H - 38, H - 4, WOOD[3]); c.vline(ax + 1, H - 38, H - 4, WOOD[2]);
     c.rect(ax + 2, H - 38, ax + 7, H - 32, IRON[3]); c.rect(ax + 2, H - 33, ax + 5, H - 30, IRON[2]); c.vline(ax + 8, H - 37, H - 33, IRON[4]);
@@ -386,25 +388,200 @@ void hearth(Cv& c, int H)
     }
 }
 
-void shield(Cv& c, int var)
-{ // 18 px round shield: iron rim, painted field, a boss in the middle, a nick or two
+// One shield pixel at (dx, dy) from its centre, `R` cells to the rim; alpha 0 outside. Painted boards with seams, a leather-bound
+// edge, an iron rim that catches the light on its upper left, and a domed boss with a spike that throws a small shadow on the
+// field. Used flat on a wall and, tilted, by the leaning shield.
+Color shieldFace(float dx, float dy, float rad, int var, int px, int py)
+{
     static const Ramp* P[3][2] = {{&CRIM, &LINEN}, {&NAVY, &OCHRE}, {&FOREST, &LINEN}};
     const Ramp &a = *P[var % 3][0], &b = *P[var % 3][1];
     int design = (var / 3) % 4;
-    for (int y = 0; y < 18; y++)
-        for (int x = 0; x < 18; x++)
+    float d2 = dx * dx + dy * dy, f = std::sqrt(d2) / rad;
+    if (f > 1.0f) return Color{0, 0, 0, 0};
+    float lit = (-dx - dy) / (2 * rad); // -0.5 .. 0.5, lit from the upper left
+    int t = 2 + (lit > 0.16f) - (lit < -0.16f);
+    if (f > 0.87f) return tone(IRON, f > 0.95f ? 1 + (lit > 0) : 3 - (lit < -0.1f)); // the rim: a bright upper edge, a dark lower one
+    if (f > 0.8f) return tone(WOOD, lit > 0 ? 1 : 0); // leather binding
+    if (f < 0.2f) return tone(IRON, f < 0.07f ? 4 : (lit > -0.05f ? 3 : 2)); // the boss and its spike
+    if (f < 0.3f) return tone(IRON, lit > 0 ? 3 : 1);                         // the boss's slope
+    bool first = design == 0 ? dx < 0 : (design == 1 ? (dx >= 0) == (dy >= 0) : (design == 2 ? std::fabs(dx) < rad * 0.13f || std::fabs(dy) < rad * 0.13f : ((int)std::floor((dx + rad * 3) / (rad * 0.45f))) % 2 == 0));
+    Color col = tone(first ? a : b, t);
+    float seam = std::fmod(dx + rad * 4, rad * 0.5f);
+    if (seam < 0.75f && f < 0.78f) col = tone(first ? a : b, t - 1); // the joins between boards
+    else if (rad > 5 && R(px, py / 4, 91) > 0.9f) col = tone(first ? a : b, t - 1); // grain
+    if (dx + dy > 0 && f < 0.42f && f >= 0.3f) col = tone(first ? a : b, t - 1); // the boss's shadow on the field
+    return col;
+}
+
+// A shield seen at an angle: turned about the vertical (yaw: the face narrows and its thickness shows on one side), tipped back (pitch),
+// and rolled in the picture. The back disc is drawn first, offset, as the iron-bound edge; then the face on top.
+void tiltedShield(Cv& c, int var, float cx, float cy, float rad, float yaw, float pitch, float roll, float thick)
+{
+    float cy_ = std::max(0.35f, std::cos(yaw)), cp = std::max(0.35f, std::cos(pitch)), cr = std::cos(roll), sr = std::sin(roll);
+    float ex = -std::sin(yaw) * thick, ey = std::sin(pitch) * thick; // where the back edge peeks out
+    for (int pass = 0; pass < 2; pass++)
+        for (int y = 0; y < c.h; y++)
+            for (int x = 0; x < c.w; x++)
+            {
+                float qx = x + 0.5f - cx - (pass == 0 ? ex : 0), qy = y + 0.5f - cy - (pass == 0 ? ey : 0);
+                float u = (qx * cr + qy * sr) / cy_, v = (-qx * sr + qy * cr) / cp;
+                if (pass == 0)
+                {
+                    if (u * u + v * v <= rad * rad) c.px(x, y, tone(IRON, (qx + qy) * 0.5f > 0 ? 0 : 1)); // the thickness: dark iron-bound edge
+                    continue;
+                }
+                Color col = shieldFace(u, v, rad, var, x, y);
+                if (col.a) c.px(x, y, col);
+            }
+}
+
+void shield(Cv& c, int var)
+{ // a round shield hung on the wall by its strap, turned a little to one side or the other so it has a thickness and a slant
+    float side = (var * 37 % 7) < 3 ? -1.0f : 1.0f, yaw = side * (0.45f + 0.04f * (var % 5)), roll = ((var * 13) % 5 - 2) * 0.1f;
+    tiltedShield(c, var, 11.0f, 11.0f, 8.8f, yaw, 0.12f, roll, 2.6f);
+}
+
+void leanShield(Cv& c, int var)
+{ // a shield stood on the floor and leant back against the wall: strongly turned and tipped, its thickness showing, a shadow on the floor
+    for (int x = 2; x < c.w - 2; x++)
+        for (int y = c.h - 4; y < c.h; y++)
+            if (std::pow((x - 14.0f) / 12.0f, 2) + std::pow((y - (c.h - 1.0f)) / 3.0f, 2) < 1) c.px(x, y, Color{10, 8, 12, 120});
+    tiltedShield(c, var, 14.0f, c.h - 12.5f, 10.0f, 0.95f, 0.5f, -0.5f, 3.4f);
+}
+
+// A rack of longbows, dark with age, in three-quarter view: a backboard of planks, two thick posts with rails that show their top faces,
+// bows hung in two rows at different slants (the back row darker and behind), a quiver of fletched arrows hung at the end.
+void bowRack(Cv& c, int var)
+{
+    int W = c.w, H = c.h;
+    auto box = [&](int x0, int y0, int x1, int y1, int t) { // a timber with a lit top face, a front, a shaded end
+        c.rect(x0, y0 + 2, x1, y1, tone(WOOD, t));
+        c.hline(x0, x1, y0 + 2, tone(WOOD, t + 1));
+        for (int x = x0 + 1; x <= x1 + 2; x++) { c.px(x, y0, tone(WOOD, t + 1)); c.px(x, y0 + 1, tone(WOOD, t + 1)); }
+        c.vline(x1, y0 + 2, y1, tone(WOOD, t - 1)); c.vline(x1 + 1, y0, y1 - 1, tone(WOOD, t - 2));
+        for (int x = x0; x < x1; x++) if (R(x, y0 / 3, 71 + var) > 0.85f) c.px(x, y0 + 3, tone(WOOD, t - 1));
+    };
+    for (int y = 8; y < H - 4; y++) // the backboard: upright planks, dark, with seams and nail heads
+        for (int x = 4; x < W - 5; x++)
         {
-            float dx = x - 8.5f, dy = y - 8.5f, d2 = dx * dx + dy * dy;
-            if (d2 > 81) continue;
-            float lit = (-dx - dy) / 17.0f; // lit from the upper left
-            int t = 2 + (lit > 0.18f) - (lit < -0.18f);
-            bool first = design == 0 ? dx < 0 : (design == 1 ? (dx >= 0) == (dy >= 0) : (design == 2 ? std::fabs(dx) < 2.2f || std::fabs(dy) < 2.2f : ((int)(dx + 20) / 4) % 2 == 0));
-            Color col = tone(first ? a : b, t);
-            if (d2 > 64) col = tone(IRON, d2 > 74 ? 1 + (lit > 0) : 3 - (lit < 0)); // the rim
-            else if (d2 <= 7) col = tone(IRON, d2 <= 2 ? 4 : 3 - (lit < 0));         // the boss
-            c.px(x, y, col);
+            int t = ((x - 4) % 7 == 0) ? 0 : (R(x, y / 6, 72) > 0.85f ? 1 : 0);
+            c.px(x, y, tone(WOOD, t));
+            if ((x - 4) % 7 == 2 && (y == 12 || y == H - 9)) c.px(x, y, tone(IRON, 2));
         }
-    for (int k = 0; k < 2; k++) c.px(4 + (int)(R(var, k, 87) * 9), 4 + (int)(R(k, var, 88) * 9), tone(WOOD, 1));
+    auto bow = [&](float bx, float top, float bot, float bulge, float slant, int dim, bool strung) {
+        float half = (bot - top) / 2, my = (top + bot) / 2;
+        for (int k = 0; k <= (int)(half * 4); k++)
+        {
+            float t = -1 + k / (half * 2.0f), x = bx + bulge * (1 - t * t) + slant * t, y = my + t * half;
+            int xi = (int)std::lround(x), yi = (int)std::lround(y);
+            bool grip = std::fabs(t) < 0.16f;
+            c.px(xi, yi, grip ? tone(NIGHT, 3) : tone(OCHRE, 3 - 2 * dim)); c.px(xi + 1, yi, grip ? tone(NIGHT, 2) : tone(OCHRE, 1 - dim));
+        }
+        if (strung) c.line(bx + slant * -1, top, bx + slant, bot, tone(LINEN, 2 - dim), 1);
+        c.px((int)std::lround(bx - slant), (int)top, tone(BRASS, 2 - dim)); c.px((int)std::lround(bx + slant), (int)bot, tone(BRASS, 2 - dim)); // horn nocks
+    };
+    box(0, H - 30, W - 8, H - 24, 2); box(0, H - 14, W - 8, H - 8, 2); // two rails across the front
+    int n = std::max(3, (W - 14) / 7);
+    for (int i = 0; i < 2; i++) bow(10.0f + i * 8, 10, H - 9, 2.2f, 1.5f * (i ? 1 : -1), 1, false);                   // back row: dim, unstrung, slanting the other way
+    for (int i = 0; i < n; i++) bow(8.0f + i * 7, 6 + i % 2 * 2, H - 7, 3.2f + (i % 2), (i % 3 - 1) * 1.6f, 0, i % 2 == 0); // front row
+    for (int sx : {0, W - 12}) { c.rect(sx, 4, sx + 4, H - 1, tone(WOOD, 2)); c.vline(sx, 4, H - 1, tone(WOOD, 3)); c.vline(sx + 4, 4, H - 1, tone(WOOD, 1)); c.vline(sx + 5, 5, H - 2, tone(WOOD, 0)); c.hline(sx, sx + 5, 4, tone(WOOD, 3)); }
+    int qx = W - 7; // the quiver, hung on the end post: a leather tube lit on its left, arrows fanned out of the top
+    for (int y = 16; y < 40; y++) for (int dx = 0; dx < 6; dx++) c.px(qx + dx, y, tone(CLAY, dx < 2 ? 2 : (dx < 4 ? 1 : 0)));
+    for (int y : {20, 30}) c.hline(qx, qx + 5, y, tone(WOOD, 0));
+    for (int a = 0; a < 5; a++)
+    {
+        int ax = qx + 1 + a, top = 6 + (a * 3 + var) % 5;
+        for (int y = top; y < 18; y++) c.px(ax, y, tone(WOOD, y % 4 ? 3 : 2));
+        for (int y = top; y < top + 4; y++) { c.px(ax - 1, y, tone(a % 2 ? LINEN : CRIM, 3)); c.px(ax + 1, y, tone(a % 2 ? LINEN : CRIM, 2)); }
+    }
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) if (c.on(x, y)) { Color& p = c.d[(size_t)y * W + x]; p.r = (unsigned char)(p.r * 0.8f); p.g = (unsigned char)(p.g * 0.8f); p.b = (unsigned char)(p.b * 0.84f); } // aged and dark
+}
+
+// An archery butt seen from the side, dark with age: a coiled-straw drum turned away from us so its thickness shows, rings on its face,
+// arrows standing out of it at the shooter's end, on a timber tripod, with a wall of hay bales behind as the backstop.
+void archeryTarget(Cv& c, int var)
+{
+    const float cx = 20.0f, cy = 21.0f, rad = 15.0f, yaw = -1.0f, thick = 7.0f;
+    // the backstop: two hay bales, bound with twine, behind and below
+    for (int row = 0; row < 2; row++)
+        for (int y = c.h - 9 - row * 9; y < c.h - row * 9; y++)
+            for (int x = 24 - row * 3; x < 52 - row * 3 && x < c.w; x++)
+            {
+                int t = 2 + (y == c.h - 9 - row * 9) - (y == c.h - 1 - row * 9) - ((x == 24 - row * 3 || (x + row) % 9 == 0) ? 1 : 0);
+                Color col = tone(STRAW, R(x, y, 51) > 0.8f ? t - 1 : (R(x / 2, y, 52) > 0.7f ? t + 1 : t));
+                if ((x + y / 2) % 7 == 0 && y % 4 != 0) col = tone(STRAW, 0); // straws lying across
+                if (y == c.h - 5 - row * 9 || y == c.h - 4 - row * 9) col = tone(WOOD, x % 3 ? 1 : 0); // the twine
+                c.px(x, y, col);
+            }
+    for (int leg : {-1, 1}) // the tripod: two legs to the front, one brace behind
+        for (int y = (int)cy + 8; y < c.h; y++)
+        {
+            float t = (y - cy - 8) / (c.h - cy - 8);
+            int x = (int)std::lround(cx + 3 + leg * (4 + 9 * t));
+            c.px(x, y, tone(WOOD, 2)); c.px(x + 1, y, tone(WOOD, 0));
+        }
+    for (int y = (int)cy + 8; y < c.h - 2; y++) { int x = (int)std::lround(cx + 12 + (y - cy) * 0.35f); c.px(x, y, tone(WOOD, 1)); c.px(x + 1, y, tone(WOOD, 0)); }
+    float cyw = std::cos(yaw), cp = 1.0f;
+    float ex = -std::sin(yaw) * thick;
+    for (int pass = 0; pass < 2; pass++)
+        for (int y = 0; y < c.h; y++)
+            for (int x = 0; x < c.w; x++)
+            {
+                float qx = x + 0.5f - cx - (pass == 0 ? ex : 0), qy = y + 0.5f - cy;
+                float u = qx / cyw, v = qy / cp, f = std::sqrt(u * u + v * v) / rad;
+                if (f > 1) continue;
+                if (pass == 0) { c.px(x, y, tone(STRAW, (y % 3 == 0) ? 0 : ((qx + qy) * 0.5f > 0 ? 0 : 1))); continue; } // coils of straw round the drum
+                float lit = (-u - v) / (2 * rad);
+                int t = 2 + (lit > 0.2f) - (lit < -0.2f);
+                Color col;
+                if (f > 0.9f) col = tone(STRAW, 0);                                    // the rim binding
+                else if (f > 0.74f) col = tone(NIGHT, std::max(1, t));                 // black outer ring
+                else if (f > 0.56f) col = tone(LINEN, t - 1);                          // white
+                else if (f > 0.36f) col = tone(CRIM, t - 1);                           // red
+                else if (f > 0.16f) col = tone(LINEN, t - 1);                          // white
+                else col = tone(OCHRE, t);                                             // the gold
+                if (R(x, y, 53) > 0.88f) col = tone(STRAW, 0);                         // chewed by arrows
+                c.px(x, y, col);
+            }
+    auto face = [&](float f, float a, float& sx, float& sy) { float u = std::cos(a) * f * rad, v = std::sin(a) * f * rad; sx = cx + u * cyw; sy = cy + v; };
+    int n = 4 + var % 3;
+    for (int i = 0; i < n; i++)
+    { // arrows: driven into the face, shafts standing out toward the shooter on the left with feathers at the end
+        float sx, sy; face(0.1f + 0.78f * R(i, var, 61), R(var, i, 62) * 6.28f, sx, sy);
+        float len = 9 + R(i, 2, 63) * 5, sl = (R(i, 3, 64) - 0.5f) * 0.5f;
+        for (int k = 0; k < (int)len; k++)
+        {
+            int x = (int)std::lround(sx - k), y = (int)std::lround(sy + k * sl);
+            c.px(x, y, tone(WOOD, k % 5 == 0 ? 2 : 3)); c.px(x, y + 1, tone(WOOD, 1));
+            if (k >= (int)len - 4 && k < (int)len - 1) { c.px(x, y - 1, tone(i % 2 ? LINEN : CRIM, 3)); c.px(x, y + 2, tone(i % 2 ? LINEN : CRIM, 2)); } // the fletching
+        }
+    }
+    float sx, sy; face(0.9f, 2.4f, sx, sy); // one has missed and stands in the bale behind
+    for (int k = 0; k < 11; k++) { c.px((int)sx + 10 - k, c.h - 14 + k / 6, tone(WOOD, k % 4 ? 2 : 3)); }
+    for (int y = 0; y < c.h; y++) for (int x = 0; x < c.w; x++) if (c.on(x, y)) { Color& p = c.d[(size_t)y * c.w + x]; p.r = (unsigned char)(p.r * 0.78f); p.g = (unsigned char)(p.g * 0.78f); p.b = (unsigned char)(p.b * 0.82f); } // aged and dark
+}
+
+// A spear driven point-first into the ground: only the butt end of the shaft stands up (10 cells wide, `H` tall, foot at the bottom).
+// The cloth on it is live (rig.cpp:drawDecor), tied at the lashing under the butt cap.
+void spearPost(Cv& c, int var, int H)
+{
+    int sx = 4;
+    for (int y = 2; y < H - 3; y++) // the shaft, rounded: lit left, shaded right, a knot now and then
+    {
+        c.px(sx, y, tone(WOOD, R(1, y / 6, 93 + var) > 0.8f ? 2 : 3)); c.px(sx + 1, y, tone(WOOD, 1));
+        if (y > 8 && y < H - 8 && R(2, y / 9, 95 + var) > 0.93f) c.px(sx, y, tone(WOOD, 4)); // a worn pale patch where hands have held it
+    }
+    for (int dx = 0; dx < 2; dx++) { c.px(sx + dx, 0, tone(IRON, dx ? 2 : 4)); c.px(sx + dx, 1, tone(IRON, dx ? 1 : 3)); } // the iron butt cap
+    c.px(sx - 1, 1, tone(IRON, 2)); c.px(sx + 2, 1, tone(IRON, 0));
+    for (int y = 4; y < 8; y++) for (int dx = -1; dx < 3; dx++) c.px(sx + dx, y, tone(LINEN, (y + dx) % 2 ? 1 : 2)); // the lashing the cloth ties to
+    for (int y = H - 6; y < H; y++) // the mound it's driven into: earth, a stone or two, tufts
+        for (int x = 0; x < 10; x++)
+        {
+            float k = 1 - std::fabs(x - 4.5f) / 5.0f;
+            if ((H - y) <= k * 6 + 0.5f) c.px(x, y, (x < 4.5f ? tone(CLAY, 1) : tone(CLAY, 0)));
+        }
+    c.px(2, H - 3, tone(STONE, 3)); c.px(3, H - 3, tone(STONE, 2)); c.px(7, H - 2, tone(STONE, 2));
+    c.px(1, H - 3, tone(FOREST, 3)); c.px(8, H - 3, tone(FOREST, 2)); c.px(6, H - 5, tone(FOREST, 3));
 }
 
 void post(Cv& c, int /*var*/)
@@ -465,6 +642,16 @@ void yard(Cv& c, int var)
 // ------------------------------------------------------------------------------------------------ the castle's cloth, chains and blood
 
 // the hangings' designs, drawn into the field fx0..fx1 x fy0..fy1 of a tapestry
+// A raised, stitched stroke along a list of points: a dark shadow dropped down-right, the body in the ramp's mid tone, a lit edge on the upper left.
+struct Pt { float x, y, r; };
+void stitched(Cv& c, const std::vector<Pt>& pts, const Ramp& ramp, Color shadow, int body = 2)
+{
+    for (auto& p : pts) c.disc(p.x + 0.9f, p.y + 0.9f, p.r, shadow);
+    for (auto& p : pts) c.disc(p.x, p.y, p.r, tone(ramp, body));
+    for (auto& p : pts) if (p.r > 1.2f) c.disc(p.x - 0.45f, p.y - 0.45f, p.r * 0.62f, tone(ramp, body + 1));
+    for (auto& p : pts) if (p.r > 1.5f) c.px((int)std::floor(p.x - p.r * 0.45f), (int)std::floor(p.y - p.r * 0.45f), tone(ramp, 4));
+}
+
 void motif(Cv& c, int design, int fx0, int fy0, int fx1, int fy1, const Ramp& field)
 {
     float cx = (fx0 + fx1) * 0.5f, cy = (fy0 + fy1) * 0.5f, w = (float)(fx1 - fx0), h = (float)(fy1 - fy0);
@@ -484,18 +671,29 @@ void motif(Cv& c, int design, int fx0, int fy0, int fx1, int fy1, const Ramp& fi
         c.disc(cx, cy - h * 0.34f, 3, tone(FOREST, 3));
         break;
     case 1: // a raven with spread wings before a pale disc
-        c.disc(cx, cy, std::min(w, h) * 0.36f, pale);
+        c.ball(cx, cy, std::min(w, h) * 0.38f, std::min(w, h) * 0.38f, LINEN, 3); // a full moon, shaded, with craters and a bright rim
+        for (int k = 0; k < 7; k++) { float ang = k * 2.4f, rr = std::min(w, h) * 0.38f * (0.2f + 0.5f * R(k, design, 41)); c.disc(cx + std::cos(ang) * rr, cy + std::sin(ang) * rr, 1.2f + (k % 2), tone(LINEN, 1)); }
         for (int s : {-1, 1}) { c.line(cx, cy, cx + s * w * 0.34f, cy - h * 0.12f, NIGHT[1], 3); c.line(cx, cy + 1, cx + s * w * 0.3f, cy + h * 0.06f, NIGHT[2], 2); }
         c.ell(cx, cy + 1, 2.4f, 3.6f, NIGHT[1]); c.disc(cx, cy - 3, 1.8f, NIGHT[1]); c.px((int)cx + 1, (int)cy - 5, gold); c.px((int)cx + 2, (int)cy - 4, gold);
         break;
-    case 2: // a stag's head, antlers spread
-        c.ell(cx, cy + h * 0.12f, w * 0.14f, h * 0.2f, tone(CLAY, 2)); c.px((int)cx - 2, (int)cy + 1, NIGHT[0]); c.px((int)cx + 2, (int)cy + 1, NIGHT[0]);
-        for (int s : {-1, 1})
+    case 2: // a stag's head, antlers spread: raised cream thread with tines
+    {
+        std::vector<Pt> an;
+        for (int sd : {-1, 1})
         {
-            c.line(cx + s * 2, cy - h * 0.06f, cx + s * w * 0.3f, cy - h * 0.3f, LINEN[3], 1);
-            for (int t = 0; t < 3; t++) c.line(cx + s * (w * (0.1f + t * 0.07f)), cy - h * (0.14f + t * 0.06f), cx + s * (w * (0.12f + t * 0.07f)), cy - h * (0.28f + t * 0.05f), LINEN[3], 1);
+            for (int i = 0; i <= 14; i++) { float t = i / 14.0f; an.push_back({cx + sd * (2.0f + t * w * 0.32f), cy - h * 0.04f - t * h * 0.28f - std::sin(t * 3.0f) * 1.2f, 1.5f - 0.5f * t}); }
+            for (int tn = 0; tn < 4; tn++)
+            {
+                float t0 = 0.25f + tn * 0.2f, bx = cx + sd * (2.0f + t0 * w * 0.32f), by = cy - h * 0.04f - t0 * h * 0.28f;
+                for (int i = 0; i <= 4; i++) an.push_back({bx + sd * i * 0.5f, by - i * 1.5f, 1.0f - 0.12f * i});
+            }
         }
+        stitched(c, an, LINEN, tone(field, 0), 2);
+        c.ell(cx + 0.8f, cy + h * 0.14f + 0.8f, w * 0.15f, h * 0.21f, tone(field, 0));
+        c.ball(cx, cy + h * 0.12f, w * 0.15f, h * 0.21f, CLAY, 2); // the head, shaded
+        c.px((int)cx - 2, (int)cy + 1, NIGHT[0]); c.px((int)cx + 2, (int)cy + 1, NIGHT[0]); c.px((int)cx, (int)(cy + h * 0.3f), NIGHT[1]);
         break;
+    }
     case 3: // a serpent knotted through itself
         for (int i = 0; i < 60; i++)
         {
@@ -514,11 +712,27 @@ void motif(Cv& c, int design, int fx0, int fy0, int fx1, int fy1, const Ramp& fi
         c.vline((int)cx, (int)(cy - h * 0.3f), (int)(cy + h * 0.2f), tone(WOOD, 3));
         for (int y = (int)(cy - h * 0.26f); y < (int)(cy + h * 0.1f); y++) for (int x = (int)(cx - w * 0.28f); x <= (int)(cx + w * 0.28f); x++) c.px(x, y, ((x - (int)cx + 40) / 4) % 2 ? tone(CRIM, 3) : pale);
         for (int x = (int)(cx - w * 0.4f); x < (int)(cx + w * 0.4f); x += 3) c.px(x, (int)(cy + h * 0.3f) + (x / 3) % 2, tone(NAVY, 4));
+        for (int k = -2; k <= 2; k++) { float sx = cx + k * w * 0.12f, sy = cy + h * 0.17f; c.disc(sx, sy, 1.5f, tone(k % 2 ? CRIM : OCHRE, 3)); c.px((int)sx, (int)sy, IRON[3]); } // shields along the gunwale
+        c.disc(cx - w * 0.43f, cy + h * 0.05f, 1.6f, tone(WOOD, 3)); c.line(cx - w * 0.43f, cy + h * 0.05f, cx - w * 0.47f, cy - h * 0.05f, tone(WOOD, 4), 1); // a dragon's head on the prow
+        for (int y = (int)(cy - h * 0.26f); y < (int)(cy + h * 0.1f); y += 3) for (int x = (int)(cx - w * 0.28f); x <= (int)(cx + w * 0.28f); x++) c.px(x, y, tone(NAVY, 0)); // the sail's reef lines
         break;
-    case 6: // a triskele on black
+    case 6: // a triskele on black: three spiral arms curling from a boss, a beaded ring, all in raised cream thread
     {
-        static const char* TRI[7] = {"..##...", ".#..#..", "....#..", "##.#.##", "#..#..#", ".#...#.", "..###.."};
-        for (int j = 0; j < 7; j++) for (int i = 0; i < 7; i++) if (TRI[j][i] == '#') c.rect((int)cx - 7 + i * 2, (int)cy - 7 + j * 2, (int)cx - 6 + i * 2, (int)cy - 6 + j * 2, pale);
+        float R = std::min(w * 0.5f, h * 0.3f);
+        Color sh = tone(field, 0);
+        std::vector<Pt> arms, ring, beads;
+        for (int k = 0; k < 3; k++)
+            for (int i = 0; i <= 26; i++)
+            {
+                float t = i / 26.0f, a = k * 2.0944f - 0.9f + t * 2.3f, rho = R * (0.14f + 0.8f * std::pow(t, 0.9f));
+                arms.push_back({cx + std::cos(a) * rho, cy + std::sin(a) * rho, 0.75f - 0.25f * t});
+                if (i == 26) arms.push_back({cx + std::cos(a + 0.45f) * rho, cy + std::sin(a + 0.45f) * rho, 0.75f}); // the curl's end
+            }
+        for (int i = 0; i < 72; i++) { float a = i * 0.0873f; { if (i % 6 < 4) ring.push_back({cx + std::cos(a) * R * 1.12f, cy + std::sin(a) * R * 1.12f, 0.55f}); } }
+        stitched(c, ring, LINEN, sh, 1);
+        stitched(c, beads, LINEN, sh, 2);
+        stitched(c, arms, LINEN, sh, 2);
+        c.disc(cx + 0.7f, cy + 0.7f, R * 0.2f, sh); c.ball(cx, cy, R * 0.2f, R * 0.2f, LINEN, 3); c.px((int)cx - 1, (int)cy - 1, LINEN[4]); // the boss
         break;
     }
     default: // crossed swords behind a shield
@@ -714,6 +928,52 @@ void crane(Cv& c)
 void spike(Cv& c)
 { // a carved finial along a roof ridge: 4 x 6
     for (int y = 0; y < 6; y++) { c.px(1, y, WOOD[3]); c.px(2, y, WOOD[1]); if (y > 3) { c.px(0, y, WOOD[2]); c.px(3, y, WOOD[0]); } }
+}
+
+// A cobweb in a ceiling corner (the corner is the top centre; the web fans right, flip mirrors it): uneven spokes, then rings
+// that sag between them, in fine translucent silk with a few dew beads.
+void cobweb(Cv& c, int var, int rad)
+{
+    const int n = 6 + var % 2;
+    const float cx = c.w * 0.5f;
+    std::vector<float> ang(n + 1), len(n + 1);
+    for (int i = 0; i <= n; i++)
+    {
+        ang[i] = i * 1.5708f / n + (i > 0 && i < n ? (R(var, i, 1) - 0.5f) * 0.14f : 0);
+        len[i] = rad * (0.78f + 0.22f * R(var, i, 2));
+    }
+    auto silk = [&](float x, float y, int a) { int ix = (int)std::floor(x), iy = (int)std::floor(y); if (c.in(ix, iy) && c.at(ix, iy).a < a) c.px(ix, iy, Color{214, 214, 226, (unsigned char)a}); };
+    for (int i = 0; i <= n; i++)
+        for (float r = 0; r < len[i]; r += 0.5f) silk(cx + std::cos(ang[i]) * r, std::sin(ang[i]) * r, r < len[i] * 0.3f ? 200 : 150);
+    for (int k = 1; k <= 6; k++)
+    {
+        float rk = rad * 0.8f * k / 6.0f * (0.92f + 0.16f * R(var, k, 3));
+        for (int i = 0; i < n; i++)
+        {
+            if (rk > std::min(len[i], len[i + 1])) continue;
+            for (float u = 0; u <= 1; u += 0.04f)
+            {
+                float a = ang[i] + (ang[i + 1] - ang[i]) * u, r = rk * (1 - 0.14f * std::sin(u * 3.14159f)); // sags between the spokes
+                silk(cx + std::cos(a) * r, std::sin(a) * r, 100);
+            }
+        }
+    }
+    for (int k = 0; k < 3; k++) { int i = (int)(R(var, k, 4) * n), r = (int)(rad * (0.2f + 0.5f * R(var, k, 5))); c.px((int)(cx + std::cos(ang[i]) * r), (int)(std::sin(ang[i]) * r) + 1, Color{240, 244, 255, 230}); }
+}
+
+// A small hole broken through the wall, chipped round its edge, with a wet dark streak running down from it (the water itself is live: entities.cpp).
+void leak(Cv& c, int var)
+{
+    int cx = c.w / 2;
+    for (int y = 3; y < c.h; y++) // the streak
+    {
+        float f = 1 - (y - 3) / (float)(c.h - 3);
+        int wdt = 1 + (int)(f * 2.5f) + (R(y, var, 61) > 0.8f ? 1 : 0);
+        for (int x = cx - wdt; x <= cx + wdt; x++) c.px(x, y, Color{10, 14, 24, (unsigned char)(150 * f)});
+    }
+    c.ell((float)cx, 2.5f, 3.6f, 3.0f, Color{74, 70, 82, 255});     // the broken edge
+    c.ell((float)cx, 2.5f, 2.4f, 2.0f, Color{8, 8, 12, 255});       // the hole
+    c.px(cx - 1, 1, Color{150, 190, 230, 255}); c.px(cx + 1, 3, Color{110, 150, 200, 255}); // a wet glint
 }
 
 void chain(Cv& c, int var, int H)
@@ -950,13 +1210,17 @@ Image stallImageFine(int kind, int layer)
 }
 
 // where a decor sprite hangs from: 0 its bottom centre stands at (x, y), 1 its top centre hangs from it, 2 its centre is on it
+// A tone (0 dark .. 4 light) of a cloth colour, for the live pennants (rig.cpp:drawDecor).
+Color clothTone(int var, int t) { return tone(CLOTHS[((var % 6) + 6) % 6], t); }
+
 int decorAnchor(int kind, int var)
 {
     switch (kind)
     {
-    case DK_TAPESTRY: case DK_DRAPE: case DK_CHAIN: case DK_TOOL: return 1;
+    case DK_TAPESTRY: case DK_DRAPE: case DK_CHAIN: case DK_TOOL: case DK_COBWEB: case DK_LEAK: return 1;
     case DK_ANTLERS: return 2;
     case DK_PICTURE: case DK_SHIELD: return 2;
+    case DK_LEANSHIELD: case DK_SPEARPOST: case DK_TARGET: case DK_BOWRACK: return 0;
     case DK_BLOOD: return var % 6 == 4 ? 0 : 2;
     default: return 0;
     }
@@ -977,13 +1241,19 @@ Image decorImageFine(int kind, int var, int size)
     case DK_ARROWS: { Cv c(22, 34); arrows(c, var); return c.image(); }
     case DK_BUNK: { Cv c(42, size * 2); bunk(c, var); return c.image(); }
     case DK_HEARTH: { Cv c(54, std::max(size, 24) * 2); hearth(c, c.h); return c.image(); }
-    case DK_SHIELD: { Cv c(18, 18); shield(c, var); return c.image(); }
+    case DK_SHIELD: { Cv c(22, 22); shield(c, var); return c.image(); }
+    case DK_BOWRACK: { Cv c(46, 56); bowRack(c, var); return c.image(); }
+    case DK_TARGET: { Cv c(54, 56); archeryTarget(c, var); return c.image(); }
+    case DK_LEANSHIELD: { Cv c(30, 32); leanShield(c, var); return c.image(); }
+    case DK_SPEARPOST: { Cv c(10, std::max(size, 20) * 2); spearPost(c, var, c.h); return c.image(); }
     case DK_POST: { Cv c(6, size * 2); post(c, var); return c.image(); }
     case DK_LADDER: { Cv c(14, size * 2); ladder(c, var); return c.image(); }
     case DK_YARD: { Cv c(22, 22); yard(c, var); return c.image(); }
     case DK_TAPESTRY: { Cv c(34 + ((var >> 5) & 1) * 8, size * 2 + 6); tapestry(c, var, c.h); return c.image(); }
     case DK_DRAPE: { Cv c(40, size * 2); drape(c, var, c.h); return c.image(); }
     case DK_CHAIN: { Cv c(12, size * 2 + 4); chain(c, var, c.h); return c.image(); }
+    case DK_COBWEB: { Cv c(size * 4 + 2, size * 2 + 2); cobweb(c, var, size * 2); return c.image(); }
+    case DK_LEAK: { Cv c(14, 30); leak(c, var); return c.image(); }
     case DK_ANTLERS: { Cv c(40, 28); antlers(c); return c.image(); }
     case DK_DRAGONPILLAR: { Cv c(18, size * 2); dragonPillar(c, var, c.h); return c.image(); }
     case DK_IDOL: { Cv c(22, std::max(size, 30) * 2); idol(c, c.h); return c.image(); }
@@ -1000,7 +1270,7 @@ void exportDecorSheet(const char* path)
 {
     struct Row { int kind, size, variants; };
     const Row rows[] = {{DK_DRESSER, 0, 3}, {DK_TABLE, 20, 2}, {DK_PICTURE, 0, 5}, {DK_TOOL, 0, 5}, {DK_SHELF, 14, 3}, {DK_RACK, 22, 2}, {DK_ARROWS, 0, 1}, {DK_BUNK, 22, 2}, {DK_HEARTH, 40, 1},
-                        {DK_SHIELD, 0, 12}, {DK_POST, 30, 1}, {DK_LADDER, 30, 1}, {DK_YARD, 0, 3}, {DK_TAPESTRY, 40, 16}, {DK_DRAPE, 44, 5}, {DK_CHAIN, 40, 4}, {DK_BLOOD, 14, 6}};
+                        {DK_SHIELD, 0, 12}, {DK_LEANSHIELD, 0, 12}, {DK_SPEARPOST, 30, 3}, {DK_TARGET, 0, 3}, {DK_BOWRACK, 0, 2}, {DK_RACK, 22, 2}, {DK_POST, 30, 1}, {DK_LADDER, 30, 1}, {DK_YARD, 0, 3}, {DK_TAPESTRY, 40, 39}, {DK_DRAPE, 44, 5}, {DK_CHAIN, 40, 4}, {DK_BLOOD, 14, 6}};
     const int S = 3, ROWW = 1500;
     std::vector<Image> ims;
     std::vector<Vector2> pos;
@@ -1022,4 +1292,30 @@ void exportDecorSheet(const char* path)
     }
     ExportImage(sheet, path);
     UnloadImage(sheet);
+}
+
+// ---------------------------------------------------------------- the longship (art baked by tools/ship.py into sprites_ship.h)
+#include "sprites_ship.h"
+static Image shipImage(const char* const* rows, int w, int h)
+{
+    Image im = GenImageColor(w, h, BLANK);
+    Color* px = (Color*)im.data;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+        {
+            const char* p = std::strchr(SHIP_ALPHABET, rows[y][x]);
+            if (rows[y][x] != '.' && p) px[y * w + x] = SHIP_PAL[p - SHIP_ALPHABET];
+        }
+    return im;
+}
+
+Image longshipImage(int part) // 0 hull, 1 mast, 2 wreck hull, 3 wreck mast
+{
+    switch (part)
+    {
+    case 0: return shipImage(SHIP_HULL, SHIP_HULL_W, SHIP_HULL_H);
+    case 1: return shipImage(SHIP_MAST, SHIP_MAST_W, SHIP_MAST_H);
+    case 2: return shipImage(SHIP_WRECK_HULL, SHIP_WRECK_HULL_W, SHIP_WRECK_HULL_H);
+    default: return shipImage(SHIP_WRECK_MAST, SHIP_WRECK_MAST_W, SHIP_WRECK_MAST_H);
+    }
 }

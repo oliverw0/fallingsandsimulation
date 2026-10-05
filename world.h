@@ -48,6 +48,7 @@ struct World
     std::vector<Debris> debris;
     std::vector<Disturbance> disturbed;
     int gen = 0; // bumped whenever the world is rebuilt
+    float pushX = -1e9f, pushY = 0; // where something stands (cells) that the grass bends away from
     float storm = 0, flash = 0; // the sky: 0 clear .. 1 a black storm; lightning, fading
 
     bool in(int x, int y) const { return x >= 0 && y >= 0 && x < w && y < h; }
@@ -98,6 +99,8 @@ void parallelFor(int n, const std::function<void(int)>& fn);
 int workerCount(); // threads parallelFor spreads over, the caller included
 Color cellColor(const Cell& c, int x, int y);
 void renderWorld(Color* px, int camX, int camY, int vw, int vh);
+void parallaxPrep(int camX, int camY, int vw, int vh, int frame);   // parallax.cpp: the layered backdrop seen through the sky
+int parallaxAt(int i, int j, Color& out, float& glow);
 // in world units: these act on every cell of the units they cover
 void setCell(int x, int y, CellMaterial m);
 void setCellC(int x, int y, CellMaterial m); // just the one cell (x, y in cells)

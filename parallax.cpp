@@ -1,0 +1,234 @@
+// Parallax backdrop: five silhouette layers behind the land, drawn wherever the sky shows. The further back, the paler, the chunkier
+// (blocks of 2^q cells) and the slower it scrolls. Mountains, then castles on hills, a hamlet, a pine forest, a near ridge with
+// farmsteads. A few houses burn: flames flicker (shimmer) over the roofs and glow warms everything behind them.
+#include "world.h"
+#include "util.h"
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+namespace {
+
+struct LP
+{
+    float f, lift, ridgeBase, ridgeAmp, ridgeFreq; // scroll speed, cells above the horizon, hill shape
+    int q;                                         // block size 2^q cells
+    int castleSlot; float castleP, castleScale;
+    int houseSlot; float houseP, burnP, houseScale;
+    int treeSlot; float treeP, treeMin, treeMax;
+    Color body, roof;
+};
+
+const LP LAY[5] = {
+    // f     lift base amp  freq     q  castle: slot P scale   house: slot P burn scale  tree: slot P min max   body            roof
+    {0.04f, 24, 14, 150, 0.0050f, 0,    0, 0, 1,            0, 0, 0, 1,               0, 0, 0, 0,        {58, 68, 108, 255}, {58, 68, 108, 255}},
+    {0.10f, 32, 8, 90, 0.0070f, 0,     380, 0.6f, 1.7f,    0, 0, 0, 1,               0, 0, 0, 0,        {46, 54, 90, 255}, {40, 46, 80, 255}},
+    {0.22f, 18, 6, 60, 0.0100f, 0,     0, 0, 1,            90, 0.55f, 0.22f, 1.1f,   26, 0.3f, 12, 22,  {34, 40, 70, 255}, {42, 40, 62, 255}},
+    {0.40f, 8, 4, 50, 0.0120f, 0,      0, 0, 1,            260, 0.4f, 0.25f, 1.3f,   6, 0.85f, 14, 28,  {22, 28, 50, 255}, {30, 32, 50, 255}},
+    {0.65f, 0, 3, 36, 0.0150f, 0,      0, 0, 1,            300, 0.35f, 0.25f, 2.0f,  16, 0.5f, 26, 46,  {13, 17, 32, 255}, {20, 21, 34, 255}},
+};
+constexpr int NL = 5;
+enum Kind : uint8_t { K_GROUND, K_TREE, K_HOUSE, K_CASTLE };
+
+struct Col { short rise, ground, wall, flame; uint8_t kind, fid; bool burn; };
+struct LayerState { std::vector<Col> col; std::vector<float> glow; std::vector<short> glowY; int base, off; };
+
+LayerState st[NL];
+int sw = 0, sframe = 0;
+
+inline int quant(float v, int q) { return ((int)v >> q) << q; }
+
+float hill(const LP& L, int k, int p)
+{
+    float r = L.ridgeBase + std::max(0.0f, fbm(p * L.ridgeFreq, 1.0f + k * 7.3f, 700 + k, 3) - 0.28f) * L.ridgeAmp;
+    return (float)quant(r, L.q);
+}
+
+void buildLayer(int k, int vw, int vh, int camX, int camY)
+{
+    const LP& L = LAY[k];
+    LayerState& S = st[k];
+    int fq = 0;
+    S.off = (int)std::floor(L.f * camX);
+    S.base = (int)(vh * 0.44f) - (int)L.lift; // fixed on screen: the camera follows the player, so the land stays near the middle and the backdrop never bobs
+    S.col.assign(vw, Col{});
+    S.glow.assign(vw, 0.0f);
+    S.glowY.assign(vw, 0);
+    for (int i = 0; i < vw; i++)
+    {
+        int pq = ((i + S.off) >> fq) << fq;
+        short r = (short)hill(L, k, pq);
+        S.col[i] = Col{r, r, r, 0, K_GROUND, 0, false};
+    }
+    int p0 = S.off, p1 = S.off + vw;
+    auto put = [&](int p, short rise, short wall, Kind kind, uint8_t fid, short ground) {
+        int i = p - S.off;
+        if (i < 0 || i >= vw) return;
+        Col& c = S.col[i];
+        if (rise > c.rise) c = Col{rise, ground, wall, 0, kind, fid, false};
+    };
+    auto slots = [&](int slot, int pad, auto fn) {
+        for (int s = (p0 - pad) / slot - 1; s <= (p1 + pad) / slot + 1; s++) fn(s);
+    };
+    if (L.castleSlot) // drum towers and a curtain wall round a keep
+        slots(L.castleSlot, 120, [&](int s) {
+            if (hash2(s, 11, 800 + k) >= L.castleP) return;
+            int cx = s * L.castleSlot + L.castleSlot / 2 + (int)((hash2(s, 12, 800 + k) - 0.5f) * 120);
+            short hb = (short)hill(L, k, cx);
+            float cs = L.castleScale;
+            for (int p = cx - (int)(70 * cs); p <= cx + (int)(70 * cs); p++)
+            {
+                if (p < p0 || p >= p1) continue;
+                float u = (p - cx) / cs, au = std::fabs(u);
+                float h = 0;
+                if (au <= 62) h = 20 - (((int)(u + 200) / 4) % 2 == 0 ? 3 : 0);
+                if (au <= 15) h = 54 - (((int)(u + 200) / 3) % 2 == 0 ? 3 : 0);
+                if (au <= 1) h = 54 + 12;
+                for (float tc : {-62.0f, -34.0f, 34.0f, 62.0f})
+                {
+                    float d = std::fabs(u - tc);
+                    if (d <= 5.5f) h = std::max(h, 38.0f);
+                    if (d <= 6.5f) h = std::max(h, 38.0f + 16 * (1 - d / 6.5f));
+                }
+                if (h > 0) put(quant((float)p, 0), (short)(hb + (int)(h * cs)), 0, K_CASTLE, (uint8_t)(hash2(s, 13, k) * 255), hb);
+            }
+        });
+    if (L.houseSlot)
+        slots(L.houseSlot, 60, [&](int s) {
+            if (hash2(s, 21, 810 + k) >= L.houseP) return;
+            int cx = s * L.houseSlot + L.houseSlot / 2 + (int)((hash2(s, 22, 810 + k) - 0.5f) * L.houseSlot * 0.3f);
+            float hh = hash2(s, 23, 810 + k), hs2 = L.houseScale;
+            int hw = (int)((10 + 7 * hh) * hs2), wallH = (int)((9 + 8 * hash2(s, 24, 810 + k)) * hs2), roofH = (int)((7 + 8 * hash2(s, 25, 810 + k)) * hs2);
+            bool burn = hash2(s, 26, 810 + k) < L.burnP;
+            short hb = (short)hill(L, k, cx), wall = (short)(hb + wallH);
+            uint8_t fid = (uint8_t)(hh * 255);
+            for (int p = cx - hw - 2; p <= cx + hw + 2; p++)
+            {
+                if (p < p0 || p >= p1) continue;
+                float dx = (float)std::abs(p - cx);
+                int roof = std::max(0, (int)(roofH * (1 - dx / (hw + 3))));
+                if (burn) roof = roof * 3 / 5 - (hash2(p >> 1, s, 5) < 0.4f ? 2 : 0); // the roof has fallen in
+                short rise = (short)(wall + std::max(roof, 0));
+                if (dx > hw) rise = (short)(wall + std::max(roof, 0));
+                put(p, rise, wall, K_HOUSE, fid, hb);
+                if (burn)
+                {
+                    int i = p - S.off;
+                    float env = 1 - (dx / (hw + 3)) * (dx / (hw + 3));
+                    float fl = (7 + 12 * hh) * hs2 * env * (0.45f + 0.9f * vnoise(p * 0.28f, sframe * 0.1f, 830 + s));
+                    if (S.col[i].kind == K_HOUSE && S.col[i].fid == fid) { S.col[i].burn = true; S.col[i].flame = (short)std::max(0.0f, fl); }
+                }
+            }
+            if (burn) // a warm glow over the neighbourhood
+            {
+                float gs = 0.5f * (0.8f + 0.4f * vnoise(sframe * 0.12f, (float)s, 840));
+                for (int p = cx - 90; p <= cx + 90; p++)
+                {
+                    int i = p - S.off;
+                    if (i < 0 || i >= vw) continue;
+                    float d = 1 - std::abs(p - cx) / 90.0f;
+                    S.glow[i] += gs * d * d;
+                    S.glowY[i] = (short)(wall + 6);
+                }
+            }
+        });
+    if (L.treeSlot) // pines: stepped tiers, tapering to a point
+        slots(L.treeSlot, 40, [&](int s) {
+            if (hash2(s, 31, 820 + k) >= L.treeP) return;
+            int cx = s * L.treeSlot + L.treeSlot / 2 + (int)((hash2(s, 32, 820 + k) - 0.5f) * L.treeSlot * 0.9f);
+            float h = L.treeMin + (L.treeMax - L.treeMin) * hash2(s, 33, 820 + k);
+            float hw = 3 + h * 0.2f;
+            short hb = (short)hill(L, k, cx);
+            for (int p = cx - (int)hw; p <= cx + (int)hw; p++)
+            {
+                if (p < p0 || p >= p1) continue;
+                float dx = std::fabs((float)(p - cx)), stepped = std::floor(dx / 2.5f) * 2.5f;
+                put(p, (short)(hb + (int)(h * (1 - stepped / hw))), 0, K_TREE, 0, hb);
+            }
+        });
+    const int B = 1 << fq; // one pixel = a block of B x B cells: copy each block's first column, snap heights to the block grid
+    for (int i = 0; i < vw; i++)
+    {
+        int src = i - ((i + S.off) & (B - 1));
+        Col c = S.col[src < 0 ? i : src];
+        c.rise = (short)((c.rise >> fq) << fq); c.ground = (short)((c.ground >> fq) << fq); c.wall = (short)((c.wall >> fq) << fq);
+        c.flame = (short)((c.flame >> fq) << fq);
+        S.col[i] = c;
+        if (src >= 0) { S.glow[i] = S.glow[src]; S.glowY[i] = S.glowY[src]; }
+    }
+}
+
+Color mulc(Color c, float k) { return Color{(unsigned char)std::min(255.0f, c.r * k), (unsigned char)std::min(255.0f, c.g * k), (unsigned char)std::min(255.0f, c.b * k), 255}; }
+
+} // namespace
+
+void parallaxPrep(int camX, int camY, int vw, int vh, int frame)
+{
+    sw = vw;
+    sframe = frame;
+    for (int k = 0; k < NL; k++) buildLayer(k, vw, vh, camX, camY);
+}
+
+// Colour of the backdrop at view cell (i, j): returns 1 and `out` if a layer covers it. `glow` is how far the burning houses'
+// light tints the sky or layer there (0 for flames themselves).
+int parallaxAt(int i, int j, Color& out, float& glow)
+{
+    glow = 0;
+    for (int k = NL - 1; k >= 0; k--)
+    {
+        const LayerState& S = st[k];
+        const LP& L = LAY[k];
+        const Col& c = S.col[i];
+        const int Q = 0;
+        int hgt = ((S.base - j) >> Q) << Q;
+        if (S.glow[i] > 0.01f) glow += S.glow[i] * std::max(0.0f, 1 - std::abs(hgt - S.glowY[i]) / 70.0f);
+        int pq = ((i + S.off) >> Q) << Q, bx = pq >> Q;
+        if (hgt <= c.rise)
+        {
+            Color col = L.body;
+            float lit = 1;
+            if (c.kind == K_HOUSE)
+            {
+                if (hgt > c.wall) col = L.roof;
+                else if (hgt > c.ground)
+                {
+                    int by = (hgt - c.ground) >> Q;
+                    bool win = (bx % 7 == 3 || bx % 7 == 4) && (by % 6 == 3 || by % 6 == 4);
+                    if (win && hash2(bx / 7, c.fid, 9) < 0.45f) col = Color{255, 188, 100, 255}; // a candle in the window
+                    else lit = 1.15f;
+                }
+            }
+            else if (c.kind == K_CASTLE)
+            {
+                int d = (hgt - c.ground) >> Q;
+                bool win = (bx % 8 == 3 || bx % 8 == 4) && (d % 12 == 6 || d % 12 == 7) && d > 8;
+                if (win) col = hash2(bx / 8, d / 12, c.fid) < 0.4f ? Color{255, 190, 104, 255} : mulc(L.body, 0.55f);
+                else lit = ((bx + 1000) % 8) < 2 ? 1.12f : 1.0f;
+            }
+            else if (hgt == c.rise && k > 0) lit = 1.25f; // a thread of moonlight on the edge
+            if (k == 0 && hgt < c.rise * 0.6f) lit *= 0.92f;
+            out = lit == 1 ? col : mulc(col, lit);
+            glow = std::min(glow, 0.7f);
+            return 1;
+        }
+        if (c.flame > 0 && hgt <= c.rise + c.flame)
+        {
+            int fh = hgt - c.rise;
+            float t = fh / (float)c.flame;
+            if (hash2(bx, fh >> Q, sframe / 2) < 1.15f - t * 0.9f) // ragged, shimmering tongues
+            {
+                out = t < 0.25f ? Color{255, 238, 150, 255} : (t < 0.55f ? Color{255, 172, 52, 255} : (t < 0.8f ? Color{232, 92, 30, 255} : Color{140, 46, 30, 255}));
+                glow = 0;
+                return 1;
+            }
+        }
+        else if (c.burn && hgt > c.rise && hgt < c.rise + 36 && hash2(bx, (hgt + sframe / 2) >> Q, 99) > 0.99f) // embers
+        {
+            out = Color{255, 160, 60, 255};
+            glow = 0;
+            return 1;
+        }
+    }
+    glow = std::min(glow, 0.7f);
+    return 0;
+}

@@ -876,23 +876,91 @@ void drawOnd(float cx, float cy, float scale)
     DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {cx - w / 2, cy - w / 2, w, w}, {0, 0}, 0, WHITE);
 }
 
+// A long pennant on a spear, live: a strip of cloth tied at the lashing, streaming downwind in a wave that grows toward the free end,
+// sagging a little, with a swallowtail cut in it. One rectangle per column (hem light, body, underside dark) on the half-unit grid.
+static void drawPennant(float x0, float y0, int dir, int var, float t)
+{
+    const float u = 0.5f;
+    int N = 30 + (var % 4) * 6;
+    float ph = var * 1.7f, gust = 0.75f + 0.25f * std::sin(t * 0.017f + x0 * 0.01f + ph), px = 0;
+    for (int i = 0; i < N; i++)
+    {
+        float k = (float)i / N, a = t * 0.13f * (0.8f + 0.4f * gust) - i * 0.42f + ph;
+        float wave = std::sin(a) * (0.5f + 2.8f * k) * gust, slope = std::cos(a) * (0.5f + 2.8f * k);
+        float yc = y0 + (wave + k * k * 3.0f * (1.2f - gust * 0.8f)) * u;
+        float half = 3.6f * (1 - 0.5f * k) * u;
+        float x = x0 + dir * px;
+        px += u * (1.0f - 0.06f * std::fabs(slope)); // the folds shorten it a little
+        int tn = 2 + (slope * -dir > 0.5f ? 1 : 0) - (slope * -dir < -0.5f ? 1 : 0);
+        float xs = std::floor(x / u) * u, top = std::floor((yc - half) / u) * u, bot = std::floor((yc + half) / u) * u + u;
+        float cut = k > 0.76f ? (k - 0.76f) / 0.24f * (bot - top) * 0.42f : 0; // the swallowtail
+        auto col = [&](int tone) { Color c = clothTone(var, tone); return Color{(unsigned char)(c.r * 0.74f), (unsigned char)(c.g * 0.74f), (unsigned char)(c.b * 0.78f), 255}; }; // a step darker: it stands back in the field, behind the fighting
+        if (cut < 0.01f) DrawRectangleRec({xs - (dir < 0 ? u : 0), top, u, bot - top}, col(tn));
+        else
+        {
+            float mid = (top + bot) / 2, g = std::floor(cut / u) * u * 0.5f;
+            DrawRectangleRec({xs - (dir < 0 ? u : 0), top, u, std::max(u, mid - g - top)}, col(tn));
+            DrawRectangleRec({xs - (dir < 0 ? u : 0), mid + g, u, std::max(u, bot - mid - g)}, col(tn));
+        }
+        DrawRectangleRec({xs - (dir < 0 ? u : 0), top, u, u}, col(std::min(4, tn + 1)));              // the hem catches the light along the top
+        if (cut < 0.01f || i % 2) DrawRectangleRec({xs - (dir < 0 ? u : 0), bot - u, u, u}, col(std::max(0, tn - 2))); // and the underside is in shadow
+    }
+}
+
 void drawDecor(const Interact& it, float x, float y)
 {
-    static std::map<int, Texture2D> cache;
-    int var = it.style & 63, key = (it.w << 14) | (it.data * 64 + var);
+    struct Art { Texture2D t, sh; };
+    static std::map<int, Art> cache;
+    int var = it.style & 63, key = (it.w << 15) | (it.data * 128 + (it.style & 127));
     auto c = cache.find(key);
     if (c == cache.end())
     {
         Image im = it.data < DK_DRESSER ? decorImage(it.data, var) : decorImageFine(it.data, var, it.w);
-        c = cache.emplace(key, LoadTextureFromImage(im)).first;
+        if (it.data >= DK_DRESSER && it.data != DK_BLOOD && it.data != DK_TAPESTRY && it.data != DK_DRAPE && it.data != DK_CHAIN && it.data != DK_LEANSHIELD && it.data != DK_COBWEB && it.data != DK_LEAK)
+        { // a shading pass over every piece: light catching its top and left edges, its lower and right edges falling into shade
+            Image b = ImageCopy(im);
+            Color* src = (Color*)b.data; Color* dst = (Color*)im.data;
+            auto solid = [&](int xx, int yy) { return xx >= 0 && yy >= 0 && xx < b.width && yy < b.height && src[yy * b.width + xx].a > 128; };
+            for (int yy = 0; yy < b.height; yy++)
+                for (int xx = 0; xx < b.width; xx++)
+                {
+                    if (!solid(xx, yy)) continue;
+                    int d = 0;
+                    if (!solid(xx, yy - 1)) d += 14; else if (!solid(xx - 1, yy)) d += 8;
+                    if (!solid(xx, yy + 1)) d -= 18; else if (!solid(xx + 1, yy)) d -= 12;
+                    Color& c = dst[yy * b.width + xx];
+                    c.r = (unsigned char)std::max(0, std::min(255, c.r + d)); c.g = (unsigned char)std::max(0, std::min(255, c.g + d)); c.b = (unsigned char)std::max(0, std::min(255, c.b + d));
+                }
+            UnloadImage(b);
+        }
+        if (it.style & 64) ImageFlipHorizontal(&im);
+        // the shadow it throws on the wall behind: its outline, dropped two cells down and to the right (the light is upper left), more for things stood out from the wall
+        int an = it.data < DK_DRESSER ? 0 : decorAnchor(it.data, var), dx = an == 0 ? 3 : 2, dy = an == 0 ? 1 : 2;
+        bool none = it.data < DK_DRESSER || it.data == DK_BLOOD || it.data == DK_SPIKE || it.data == DK_YARD || it.data == DK_LEANSHIELD || it.data == DK_COBWEB || it.data == DK_LEAK;
+        Texture2D sh = {};
+        if (!none)
+        {
+            Image s = GenImageColor(im.width + dx, im.height + dy, BLANK);
+            Color* src = (Color*)im.data; Color* dst = (Color*)s.data;
+            for (int yy = 0; yy < im.height; yy++)
+                for (int xx = 0; xx < im.width; xx++)
+                    if (src[yy * im.width + xx].a > 0) dst[(yy + dy) * s.width + xx + dx] = Color{0, 0, 0, 255};
+            sh = LoadTextureFromImage(s);
+            UnloadImage(s);
+        }
+        c = cache.emplace(key, Art{LoadTextureFromImage(im), sh}).first;
         UnloadImage(im);
     }
-    const Texture2D& t = c->second;
+    const Texture2D& t = c->second.t;
     float w = t.width * 0.5f, h = t.height * 0.5f;
-    bool flip = it.style & 64;
     int an = it.data < DK_DRESSER ? 0 : decorAnchor(it.data, var);
     float top = an == 0 ? y - h + 0.5f : (an == 1 ? y : y - h / 2); // a standing one has its foot just in the ground
-    DrawTexturePro(t, {0, 0, (float)(flip ? -t.width : t.width), (float)t.height}, {x - w / 2, top, w, h}, {0, 0}, 0, WHITE);
+    float left = std::floor((x - w / 2) * 2 + 0.5f) / 2; // on the cell grid
+    top = std::floor(top * 2 + 0.5f) / 2;
+    if (c->second.sh.id) DrawTexturePro(c->second.sh, {0, 0, (float)c->second.sh.width, (float)c->second.sh.height}, {left, top, c->second.sh.width * 0.5f, c->second.sh.height * 0.5f}, {0, 0}, 0, Color{255, 255, 255, an == 0 ? (unsigned char)58 : (unsigned char)78});
+    DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {left, top, w, h}, {0, 0}, 0, it.data == DK_SPEARPOST ? Color{176, 176, 188, 255} : WHITE);
+    if (it.data == DK_SPEARPOST && (var & 32)) // the cloth is tied to the lashing just under the butt
+        drawPennant((it.style & 64) ? left + w - 5.5f * 0.5f : left + 6.0f * 0.5f, top + 6.5f * 0.5f, (it.style & 64) ? -1 : 1, var, (float)G.frame);
 }
 
 // The wyrm-head dart trap: its slab sunk 3 units into the wall, the head jutting out along `dir`, its jaws

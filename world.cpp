@@ -916,20 +916,23 @@ static Color wallStyle(Color b, int x, int y)
 {
     float k = 1;
     float tint = 0; // a stone or plank's own warm/cool lean
+    float bl = 0;   // old blood soaked into a stone
     switch (b.a)
     {
-    case WALL_TILE: // big dark stone tiles in running bond: sunk grout, a lit top-left edge, a shaded foot, the odd crack
+    case WALL_TILE: // the same blocks as the Masonry terrain (levelgen.cpp:fineGrain), in the same palette, a little darker; some stones blood-soaked
     {
-        const int TW = 48, TH = 28;
-        int row = y / TH, v = y % TH, xo = x + (row & 1) * (TW / 2), col = xo / TW, u = xo % TW;
-        float th = hash2(col, row, 77);
-        k = (0.7f + 0.5f * th) * (1 - 0.2f * v / TH);
-        if (v >= TH - 2 || u >= TW - 2) k = 0.18f;
-        else if (v < 2 || u < 2) k *= 1.4f;
-        else if (v >= TH - 4 || u >= TW - 4) k *= 0.8f;
-        else if (th > 0.88f && v > 3 && u == 10 + v * 3 / 4 + (int)(hash2(col, row, 79) * 12)) k *= 0.45f;
-        k *= 0.9f + 0.2f * hash2(x, y, 78);
-        tint = th - 0.5f;
+        int ph = y + (int)(hash2(x / 30, 1, 41) * 5), row = ph / 11, v = ph % 11;
+        int xo = x + (int)(hash2(row, 2, 42) * 40) + (int)(3.0f * std::sin(x * 0.09f + row * 1.7f)), col = xo / 22, u = xo % 22;
+        float th = hash2(col, row, 9);
+        int bw = 20 - (int)(hash2(col, row, 43) * 4), bh = 10 - (int)(hash2(col, row, 44) * 3);
+        int du = std::min(u, bw - 1 - u), dv = std::min(v, bh - 1 - v);
+        bool mortar = u >= bw || v >= bh || du + dv < (th > 0.9f ? 5 : 2);
+        bool crack = th > 0.8f && v > 2 && u == 4 + (v * 3 / 2 + (int)(hash2(col, row, 45) * 14)) % std::max(1, bw - 8);
+        int sh = mortar ? (int)(hash2(x, y, 46) * 26) : crack ? 4 + (int)(hash2(x, y, 47) * 16)
+                 : (int)(70 + th * 120) + (int)((hash2(x, y, 48) - 0.5f) * 32) + (v == 1 ? 25 : 0) - (v >= bh - 2 ? 18 : 0);
+        b = lut[(int)M::Masonry][std::max(0, std::min(255, sh))];
+        k = 0.72f;
+        if (!mortar && !crack && hash2(col, row, 95) > 0.955f) bl = 0.55f * (1 - (float)v / bh) * (0.6f + 0.4f * hash2(x, y, 96)); // blood runs down from the top of the stone
         break;
     }
     case WALL_PLANK_V: // upright boards: seams, long grain, a knot now and then, nail heads
@@ -987,14 +990,50 @@ static Color wallStyle(Color b, int x, int y)
     }
     }
     auto ch = [&](int v, float lean) { return (unsigned char)std::max(0, std::min(255, (int)(v * k * (1 + tint * lean)))); };
-    return Color{ch(b.r, 0.12f), ch(b.g, 0.04f), ch(b.b, -0.1f), 255};
+    Color o = Color{ch(b.r, 0.12f), ch(b.g, 0.04f), ch(b.b, -0.1f), 255};
+    return bl > 0 ? lerpColor(o, Color{(unsigned char)(120 * k), (unsigned char)(22 * k), (unsigned char)(24 * k), 255}, bl) : o;
 }
 
 // Every pixel is independent and only reads the world, so the screen is drawn in bands, one per core.
+// Grass blades: renderRows notes every grass cell with open air above (one list per row, so threads never share), and
+// afterwards a few cells of swaying blade are drawn up from each. Pure texture: they are only pixels in the frame,
+// nothing in the grid, so they never touch movement. They lean in the wind and bend away from whoever walks through.
+static std::vector<std::vector<int>> g_grass;
+
+static void drawGrass(Color* px, int camX, int camY, int vw, int vh)
+{
+    const Color dk = {40, 98, 34, 255}, md = {72, 142, 50, 255}, tip = {138, 196, 80, 255};
+    float f = (float)world.frame;
+    for (int j = 0; j < vh; j++)
+        for (int i : g_grass[j])
+        {
+            int x = camX + i, y = camY + j;
+            float r = hash2(x, 3, 99);
+            if (r < 0.4f) continue;
+            int hgt = 2 + (int)(hash2(x, 1, 99) * 4.0f), side = hash2(x, 2, 99) < 0.5f ? -1 : 1;
+            float lean = std::sin(f * 0.045f + x * 0.05f) * 1.3f + std::sin(f * 0.11f + x * 0.31f) * 0.5f + side * 0.5f;
+            float dxp = x - world.pushX, dyp = y - world.pushY;
+            if (std::fabs(dxp) < 16 && std::fabs(dyp) < 30) lean += (dxp < 0 ? -1.0f : 1.0f) * (1 - std::fabs(dxp) / 16) * 3.0f; // the walker parts them
+            for (int k = 0; k < hgt; k++)
+            {
+                float t = (k + 1.0f) / hgt;
+                int ox = (int)std::lround(lean * t * t), xx = i + ox, yy = j - 1 - k;
+                if (xx < 0 || xx >= vw || yy < 0 || world.get(camX + xx, camY + yy).material != M::Empty) break;
+                Color c = k == hgt - 1 ? tip : (k == 0 ? dk : md);
+                Color& d = px[(size_t)yy * vw + xx];
+                d = Color{(unsigned char)((d.r + c.r * 3) / 4), (unsigned char)((d.g + c.g * 3) / 4), (unsigned char)((d.b + c.b * 3) / 4), 255};
+            }
+        }
+}
+
 void renderWorld(Color* px, int camX, int camY, int vw, int vh)
 {
     int nt = workerCount();
+    g_grass.resize(vh);
+    for (auto& r : g_grass) r.clear();
+    parallaxPrep(camX, camY, vw, vh, world.frame);
     parallelFor(nt, [&](int t) { renderRows(px, camX, camY, vw, vh, vh * t / nt, vh * (t + 1) / nt); });
+    drawGrass(px, camX, camY, vw, vh);
 }
 
 // Light through a rippling surface, as a web of bright lines on the water: three drifting sine fields whose near-zero sums
@@ -1020,6 +1059,31 @@ static float causticAmt(int x, int y, int f)
     return clampf((line - 0.3f) * 1.7f, 0.0f, 1.0f);
 }
 
+// The back wall and sky are painted one colour per unit; at draw time a quarter-cell Scale2x (neighbours that agree
+// pull a corner their way) turns the two-cell stair steps of hills, trees and painted walls into one-cell diagonals,
+// and a trace of per-cell grain breaks up the flat blocks. Costs nothing in memory.
+static inline bool bgNear(Color a, Color b) { return std::abs(a.r - b.r) + std::abs(a.g - b.g) + std::abs(a.b - b.b) < 40; }
+static void fineBg(Chunk* ch, int kb, int x, int y, Color& b, uint8_t& sky)
+{
+    if (world.bgShift != 1) return;
+    const int s = 2, BW = CS >> 1;
+    bool qi = x & 1, qj = y & 1;
+    int ux = (x & (CS - 1)) >> 1, uy = (y & (CS - 1)) >> 1;
+    auto at = [&](int dx, int dy, Color& c, uint8_t& k) { // one unit over: straight from this chunk, else through the world
+        int nx = ux + dx, ny = uy + dy;
+        if (nx >= 0 && nx < BW && ny >= 0 && ny < BW) { c = ch->bg[kb + dy * BW + dx]; k = ch->sky[kb + dy * BW + dx]; }
+        else if (world.in(x + dx * s, y + dy * s)) { c = world.bgOf(x + dx * s, y + dy * s); k = world.skyOf(x + dx * s, y + dy * s); }
+        else { c = b; k = sky; }
+    };
+    auto same = [](Color a, uint8_t ka, Color c, uint8_t kc) { return ka == kc && bgNear(a, c); };
+    Color cH, cV, cH2, cV2; uint8_t kH, kV, kH2, kV2;
+    at(qi ? 1 : -1, 0, cH, kH); at(0, qj ? 1 : -1, cV, kV);
+    if (same(cH, kH, b, sky) && same(cV, kV, b, sky)) return; // an interior cell: nothing to smooth (nearly all of them)
+    if (!same(cH, kH, cV, kV)) return;
+    at(qi ? -1 : 1, 0, cH2, kH2); at(0, qj ? -1 : 1, cV2, kV2);
+    if (!same(cH, kH, cV2, kV2) && !same(cV, kV, cH2, kH2)) { b = cV; sky = kV; }
+}
+
 static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, int j1)
 {
     // the moon hangs almost still while the land scrolls past beneath it
@@ -1036,6 +1100,7 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
             wd[i]++;
         }
     for (int i = 0; i < vw; i++) if (wd[i] > 0) { since[i] = 0; wdl[i] = wd[i]; }
+    std::vector<signed char> hs(vw, 127); // the surface swell: cells carved off the top of an open-air column so far (127 = past the surface zone)
     for (int j = j0; j < j1; j++)
     {
         int y = camY + j;
@@ -1053,16 +1118,34 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
             {
                 int x = camX + i, k = ly * CS + (x & (CS - 1)), kb = world.bidx(x, y);
                 Color b = ch ? ch->bg[kb] : world.fillBg;
+                uint8_t skyk = ch ? ch->sky[kb] : 0;
                 Cell c = ch ? ch->cells[k] : world.fill;
                 if (!ch && c.material != M::Empty) c.shade = (uint8_t)(hash2(x / 2, y / 2, 5) * 160);
+                bool crest = false;
+                if (c.material == M::Water) // the surface is never settled: rolling swells lift and drop it a few cells, the crest wobbling as it goes
+                {
+                    if (wd[i] == 0 && hs[i] == 127 && y > 0 && world.get(x, y - 1).material == M::Empty) hs[i] = 0;
+                    if (hs[i] < 127)
+                    {
+                        float s = std::sin(x * 0.31f - world.frame * 0.085f) * 0.5f + std::sin(x * 0.12f + world.frame * 0.047f) * 0.35f + std::sin(x * 0.77f + world.frame * 0.16f) * 0.15f;
+                        if (hs[i] < (int)((s + 1) * 1.5f)) { hs[i]++; c.material = M::Empty; } // this cell of water is under the trough: open air
+                        else { hs[i] = 127; crest = true; }
+                    }
+                }
+                else hs[i] = 127;
                 Color col;
                 if (c.material == M::Empty)
                 {
+                    if (ch && c.material == M::Empty) fineBg(ch, kb, x, y, b, skyk);
                     col = b.a == 255 ? b : wallStyle(b, x, y);
-                    if (ch && ch->sky[kb])
+                    if (!skyk && b.a == 255) col = brighten(col, (int)(hash2(x, y, 31) * 7) - 3);
+                    if (ch && skyk)
                     {
-                        float dx = i - mx, d2 = dx * dx + dy2;
-                        if (d2 < mr2) // pale disc with darker maria, lit from the right
+                        float dx = i - mx, d2 = dx * dx + dy2, gw = 0;
+                        Color pc;
+                        bool par = parallaxAt(i, j, pc, gw) != 0;
+                        if (par) col = pc;
+                        else if (d2 < mr2) // pale disc with darker maria, lit from the right
                         {
                             float maria = fbm((dx / world.scale + 40) * 0.22f, (dy / world.scale + 40) * 0.22f, 404, 3);
                             Color moon = lerpColor(Color{236, 234, 216, 255}, Color{168, 170, 172, 255}, clampf((maria - 0.45f) * 3, 0, 1));
@@ -1073,8 +1156,9 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                             float h = 1 - std::sqrt(d2) / (mr * 5);
                             col = lerpColor(col, Color{120, 132, 170, 255}, h * h * 0.45f);
                         }
-                        else if (hash2(x, y, 77) > 1 - 0.0035f / (world.scale * world.scale) && hash2(x, y, world.frame / 20) > 0.25f) // twinkling stars
+                        else if (hash2(i, j, 77) > 1 - 0.0035f / (world.scale * world.scale) && hash2(i, j, world.frame / 20) > 0.25f) // twinkling stars, fixed on the screen
                             col = Color{210, 214, 236, 255};
+                        if (gw > 0.01f) col = lerpColor(col, Color{255, 120, 40, 255}, gw * 0.55f); // firelight from the burning houses
                         if (world.storm > 0.01f) // storm clouds roll in over moon and stars, lit by the lightning
                         {
                             if (i - clAt >= 4)
@@ -1099,17 +1183,28 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                     if (kd == Kind::Solid || kd == Kind::Powder) // rim light on exposed edges
                     {
                         M up = ch && ly > 0 ? ch->cells[k - CS].material : (y > 0 ? world.get(x, y - 1).material : M::Bedrock);
-                        if (up == M::Empty) col = brighten(col, 22);
+                        if (up == M::Empty) { col = brighten(col, 22); if (c.material == M::Grass) g_grass[j].push_back(i); }
                         else
                         {
                             M dn = ch && ly < CS - 1 ? ch->cells[k + CS].material : (y < world.h - 1 ? world.get(x, y + 1).material : M::Bedrock);
                             if (dn == M::Empty) col = brighten(col, -18);
+                            else // side edges: lit on the left, shaded on the right, a cell wide (the upper left light the sprites use)
+                            {
+                                int lx = x & (CS - 1);
+                                M lf = ch && lx > 0 ? ch->cells[k - 1].material : (x > 0 ? world.get(x - 1, y).material : M::Bedrock);
+                                if (lf == M::Empty) col = brighten(col, 14);
+                                else
+                                {
+                                    M rt = ch && lx < CS - 1 ? ch->cells[k + 1].material : (x < world.w - 1 ? world.get(x + 1, y).material : M::Bedrock);
+                                    if (rt == M::Empty) col = brighten(col, -12);
+                                }
+                            }
                         }
                     }
                     if (c.material == M::Water) // a bright, nearly opaque skin where the water meets the air
                     {
                         M up = ch && ly > 0 ? ch->cells[k - CS].material : (y > 0 ? world.get(x, y - 1).material : M::Bedrock);
-                        if (up == M::Empty) { col = brighten(col, 46); col.a = 215; }
+                        if (up == M::Empty || crest) { col = brighten(col, 46); col.a = 215; }
                     }
                     if (c.material == M::Water && col.a == 138) col.a = (unsigned char)(138 + std::min(100, wd[i] * 3 / 5)); // the deeper, the less you see through it
                     if (col.a < 255) // composite translucent liquids/gases over the back wall
@@ -1146,7 +1241,7 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                     if (c.material == M::Water) // the deep: the colour settles toward a dark, calm blue
                     {
                         float dk = std::min(0.6f, wd[i] / 520.0f);
-                        col = Color{(unsigned char)(col.r + (6 - col.r) * dk), (unsigned char)(col.g + (22 - col.g) * dk), (unsigned char)(col.b + (46 - col.b) * dk), 255};
+                        col = Color{(unsigned char)(col.r + (18 - col.r) * dk), (unsigned char)(col.g + (20 - col.g) * dk), (unsigned char)(col.b + (52 - col.b) * dk), 255};
                     }
                     else if ((kd == Kind::Solid || kd == Kind::Powder) && since[i] >= 1 && since[i] <= 10 && wdl[i] > 3)
                     { // caustics: light netted across the floor and walls the water covers - soft, pale, fading with depth and with distance below the surface
