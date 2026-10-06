@@ -853,6 +853,13 @@ void drawHUD()
         c.a = (unsigned char)(255 * std::min(1.0f, t.life / 20.0f));
         textC(t.s, x, y, 17 * u, c, 1);
     }
+    Vector2 tag;
+    if (G.state == GS_PLAY && indiTag(tag)) // Indi's name tag
+    {
+        float x = (tag.x - G.rcx) * G.scale, y = (tag.y - G.rcy) * G.scale, fs = 15 * u, w = uiTextWidth("Indi", fs, 1) + 12 * u;
+        DrawRectangleRounded({x - w / 2, y - 3 * u, w, fs + 6 * u}, 0.5f, 6, {20, 18, 24, 190});
+        textC("Indi", x, y, fs, {236, 222, 190, 255}, 1);
+    }
 
     if (G.nearInteract >= 0 && G.nearInteract < (int)G.inter.size() && G.state == GS_PLAY)
     {

@@ -618,6 +618,8 @@ void drawOnd(float cx, float cy, float scale); // an Önd orb, centred
 void drawDecor(const Interact& it, float x, float y); // IT_DECOR, feet at (x, y) on screen (units) // a rune bomb, centred on its body
 void drawDartTrap(float faceX, float mouthY, int dir, bool broken, int hit, int hp = 3); // the wall face it's set in, the height it fires at
 int folkLooks(int kind); // how many looks a villager kind (0 man, 1 woman, 2 child) has
+void drawIndi(int pose, float k, int dir, float x, float y); // the user's English setter, rig.cpp
+bool indiTag(Vector2& at); // where Indi's name tag goes (world units), when you are close to her
 void drawFolk(int kind, int look, float anim, bool walking, int dir, float x, float y, Color coat, int seed); // a villager, feet at (x, y)
 void drawSpriteTint(const Sprite& s, float x, float bottom, bool flip, Color tint); // native size, 'a' tinted
 

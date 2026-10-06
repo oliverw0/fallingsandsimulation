@@ -867,7 +867,7 @@ struct Pool
     int n = 0, gen = 0, busy = 0;
     Pool()
     {
-        int k = (int)std::max(1u, std::min(8u, std::thread::hardware_concurrency())) - 1;
+        int k = (int)std::max(1u, std::min(16u, std::thread::hardware_concurrency())) - 1;
         for (int i = 0; i < k; i++) ts.emplace_back([this] { loop(); });
         for (auto& t : ts) t.detach(); // they live as long as the game
     }
@@ -881,6 +881,7 @@ struct Pool
             seen = gen;
             const std::function<void(int)>* f = job;
             int N = n;
+            if (!f) continue; // woke after that job had already finished: touching `next` now would steal the next job's first item
             busy++;
             l.unlock();
             for (int i; (i = next++) < N;) (*f)(i);
@@ -898,9 +899,10 @@ struct Pool
         for (int i; (i = next++) < N;) f(i);
         std::unique_lock<std::mutex> l(mx);
         done.wait(l, [&] { return busy == 0; });
+        job = nullptr; // f dies with the caller
     }
 };
-Pool& pool() { static Pool p; return p; }
+Pool& pool() { static Pool& p = *new Pool; return p; } // never destroyed: the detached workers outlive main
 }
 
 void parallelFor(int n, const std::function<void(int)>& fn)
@@ -1032,7 +1034,8 @@ void renderWorld(Color* px, int camX, int camY, int vw, int vh)
     g_grass.resize(vh);
     for (auto& r : g_grass) r.clear();
     parallaxPrep(camX, camY, vw, vh, world.frame);
-    parallelFor(nt, [&](int t) { renderRows(px, camX, camY, vw, vh, vh * t / nt, vh * (t + 1) / nt); });
+    int nb = nt * 6; // thin bands handed out as threads come free: sky rows are far cheaper than ground rows
+    parallelFor(nb, [&](int t) { renderRows(px, camX, camY, vw, vh, vh * t / nb, vh * (t + 1) / nb); });
     drawGrass(px, camX, camY, vw, vh);
 }
 
@@ -1144,6 +1147,7 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                         float dx = i - mx, d2 = dx * dx + dy2, gw = 0;
                         Color pc;
                         bool par = parallaxAt(i, j, pc, gw) != 0;
+                        if (!par) col = lerpColor(col, Color{70, 44, 112, 255}, std::pow(parallaxHaze(j), 2.0f)); // violet haze on the horizon
                         if (par) col = pc;
                         else if (d2 < mr2) // pale disc with darker maria, lit from the right
                         {

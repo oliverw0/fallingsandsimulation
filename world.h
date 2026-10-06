@@ -101,6 +101,7 @@ Color cellColor(const Cell& c, int x, int y);
 void renderWorld(Color* px, int camX, int camY, int vw, int vh);
 void parallaxPrep(int camX, int camY, int vw, int vh, int frame);   // parallax.cpp: the layered backdrop seen through the sky
 int parallaxAt(int i, int j, Color& out, float& glow);
+float parallaxHaze(int j);
 // in world units: these act on every cell of the units they cover
 void setCell(int x, int y, CellMaterial m);
 void setCellC(int x, int y, CellMaterial m); // just the one cell (x, y in cells)

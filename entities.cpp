@@ -2643,12 +2643,13 @@ static void killMob(Mob& m)
 // ================================================================ the folk of Hearthwick
 // A few villagers and hens potter about between the halls: they wander, stop, turn to look at you, and
 // have a word to say when you come close.
-struct Villager { float x = 0, y = 0, anim = 0; int kind = 0, dir = 1, walk = 0, wait = 0, talkCd = 0, look = 0; Color coat = WHITE; };
+struct Villager { float x = 0, y = 0, anim = 0; int kind = 0, dir = 1, walk = 0, wait = 0, talkCd = 0, look = 0, pose = 0; Color coat = WHITE; }; // kind 3 hen, 4 Indi the dog
 static std::vector<Villager> folk;
 static int folkGen = -1;
 static const char* FOLK_SAY[] = {"Skal!", "Fair winds to you.", "Mind the oil down there. It burns hot.", "Water puts a fire out. Remember that.",
                                  "The crypts took my brother.", "They say the Lich King was a man once.", "Gold for the smith, coin for the ale.",
                                  "Come back with your shield, or on it.", "The longship's waiting.", "Odin's eye on you."};
+static const char* DOG_SAY[] = {"Woof!", "*sniff sniff*", "*happy tail wags*", "*leans on your leg*"};
 static const char* CHILD_SAY[] = {"Are you going down there?!", "I found a coin! ...it was a button.", "Can I hold your sword?", "Bring me back a skull!"};
 
 static float groundUnder(float x, float y) // the first solid row at or below y-8 in column x (units)
@@ -2667,7 +2668,7 @@ static void updateVillagers()
         folkGen = world.gen;
         folk.clear();
         static const Color COATS[] = {{128, 44, 38, 255}, {52, 82, 132, 255}, {74, 104, 62, 255}, {150, 116, 64, 255}, {104, 72, 124, 255}, {156, 146, 124, 255}};
-        static const int KINDS[] = {0, 0, 1, 1, 1, 2, 2, 3, 3, 3, 3};
+        static const int KINDS[] = {0, 0, 1, 1, 1, 2, 2, 3, 3, 3, 3, 4};
         int seen[3] = {0, 0, 0}, start[3] = {irand(4), irand(4), irand(4)};
         for (int k : KINDS)
         {
@@ -2686,7 +2687,16 @@ static void updateVillagers()
     for (auto& v : folk)
     {
         if (v.talkCd > 0) v.talkCd--;
-        float speed = v.kind == 3 ? 0.3f : (v.kind == 2 ? 0.45f : 0.28f);
+        float speed = v.kind == 4 ? 0.5f : v.kind == 3 ? 0.3f : (v.kind == 2 ? 0.45f : 0.28f);
+        float d = std::fabs(pm.cx() - v.x);
+        bool near = std::fabs(pm.y + pm.h - v.y) < 20;
+        if (v.kind == 4 && near && d > 16 && d < 70 && v.pose != 2 && chance(120)) // Indi trots over to you
+        {
+            v.dir = pm.cx() < v.x ? -1 : 1;
+            v.walk = (int)((d - 10) / speed);
+            v.wait = 0;
+        }
+        if (v.kind == 4 && v.pose == 2 && near && d < 14) v.wait = std::min(v.wait, 20); // up she gets
         if (v.wait > 0)
         {
             if (--v.wait == 0) { v.dir = chance(2) ? 1 : -1; v.walk = irange(60, 260); }
@@ -2697,21 +2707,42 @@ static void updateVillagers()
             float nx = v.x + v.dir * speed;
             if (nx < x0 || nx > x1 || isSolid((int)nx, (int)v.y - 4)) v.dir = -v.dir; // the edge of the village, or a wall
             else { v.x = nx; v.anim += speed * 0.22f; }
-            if (--v.walk == 0) v.wait = irange(60, 320);
+            if (--v.walk == 0)
+            {
+                v.wait = irange(60, 320);
+                if (v.kind == 4) // stand and pant, nose about, or flop down for a long while
+                {
+                    v.pose = chance(3) ? 3 : chance(3) ? 2 : 0;
+                    if (v.pose == 2) v.wait = irange(500, 1400);
+                }
+            }
         }
+        if (v.kind == 4 && v.walk > 0) v.pose = 1;
+        if (v.kind == 4 && v.wait > 0 && v.pose == 1) v.pose = 0;
         v.y = groundUnder(v.x, v.y);
-        float d = std::fabs(pm.cx() - v.x);
-        if (v.kind != 3 && d < 26 && std::fabs(pm.y + pm.h - v.y) < 20)
+        if (v.kind != 3 && d < 26 && near)
         {
             if (v.walk == 0) v.dir = pm.cx() < v.x ? -1 : 1; // turn to look at you
             if (v.talkCd == 0 && d < 18)
             {
-                const char* line = v.kind == 2 ? CHILD_SAY[irand(4)] : FOLK_SAY[irand(10)];
-                addText(v.x, v.y - (v.kind == 2 ? 17 : 25), line, {236, 222, 190, 255});
+                const char* line = v.kind == 4 ? DOG_SAY[irand(4)] : v.kind == 2 ? CHILD_SAY[irand(4)] : FOLK_SAY[irand(10)];
+                addText(v.x, v.y - (v.kind == 4 ? 20 : v.kind == 2 ? 17 : 25), line, {236, 222, 190, 255});
                 v.talkCd = irange(900, 1500);
             }
         }
     }
+}
+
+bool indiTag(Vector2& at)
+{
+    const Mob& pm = G.p.m;
+    for (auto& v : folk)
+        if (v.kind == 4 && std::fabs(pm.cx() - v.x) < 40 && std::fabs(pm.y + pm.h - v.y) < 24)
+        {
+            at = {v.x + v.dir * 3.0f, v.y - (v.pose == 2 ? 13.0f : 18.0f)};
+            return true;
+        }
+    return false;
 }
 
 static void drawVillagers(int camX, int camY)
@@ -2720,6 +2751,12 @@ static void drawVillagers(int camX, int camY)
     {
         float x = v.x - camX, y = v.y - camY;
         if (x < -20 || x > G.vw + 20 || y < -30 || y > G.vh + 30) continue;
+        if (v.kind == 4)
+        {
+            float k = v.pose == 1 ? std::fmod(v.anim, 2.6f) / 2.6f : std::fmod(G.frame / (v.pose == 2 ? 140.0f : v.pose == 3 ? 40.0f : 48.0f), 1.0f);
+            drawIndi(v.pose, k, v.dir, x, y);
+            continue;
+        }
         if (v.kind < 3) { drawFolk(v.kind, v.look, v.anim, v.wait == 0 && v.walk > 0, v.dir, x, y, v.coat, (int)(&v - &folk[0])); continue; }
         bool b = ((int)v.anim) & 1;
         drawSpriteTint(b ? SPR_HEN_B : SPR_HEN_A, x, y, v.dir < 0, v.coat);
@@ -2780,6 +2817,7 @@ static void updatePickups()
     for (auto& pu : G.pickups)
     {
         if (!pu.alive) continue;
+        if (pu.b.cx() < G.camX - 250 || pu.b.cx() > G.camX + G.vw + 250 || pu.b.cy() < G.camY - 200 || pu.b.cy() > G.camY + G.vh + 200) continue; // frozen off-screen like mobs and cells
         pu.age++;
         float pdx = P.m.cx() - pu.b.cx(), pdy = P.m.cy() - pu.b.cy(), pd = std::sqrt(pdx * pdx + pdy * pdy) + 0.01f;
         if (pu.kind == PU_COIN && pu.age > 25 && pd < 48 && P.m.alive) // coins are drawn to you

@@ -617,7 +617,7 @@ static void buildBackground(const StageDef& d, bool skies)
             {
                 int ls = localSurf[x];
                 float k = clampf((float)y / (ls + 10), 0, 1);
-                Color sky = lerpColor(Color{1, 1, 4, 255}, Color{70, 44, 112, 255}, std::pow(k, 9.0f)); // night, a violet haze paling to the horizon; hills, castles and forest are parallax layers (parallax.cpp)
+                Color sky = lerpColor(Color{1, 1, 4, 255}, Color{10, 10, 24, 255}, std::pow(k, 9.0f)); // night; the violet horizon haze, hills, castles and forest are parallax layers (parallax.cpp)
                 bool open = true;
                 if (y > surf[x] - 2) { sky = lerpColor(sky, c, (y - surf[x] + 2) / 8.0f); open = false; }
                 world.skyAt(x, y) = open;

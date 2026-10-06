@@ -35,6 +35,7 @@ struct LayerState { std::vector<Col> col; std::vector<float> glow; std::vector<s
 
 LayerState st[NL];
 int sw = 0, sframe = 0;
+std::vector<int> clearAbove; // per column: rows above this show no layer, flame, ember or glow (most of the sky)
 
 inline int quant(float v, int q) { return ((int)v >> q) << q; }
 
@@ -166,7 +167,15 @@ void parallaxPrep(int camX, int camY, int vw, int vh, int frame)
 {
     sw = vw;
     sframe = frame;
-    for (int k = 0; k < NL; k++) buildLayer(k, vw, vh, camX, camY);
+    parallelFor(NL, [&](int k) { buildLayer(k, vw, vh, camX, camY); });
+    clearAbove.assign(vw, 1 << 30);
+    for (int k = 0; k < NL; k++)
+        for (int i = 0; i < vw; i++)
+        {
+            const Col& c = st[k].col[i];
+            int reach = c.rise + std::max<int>(c.flame, c.burn ? 36 : 0);
+            clearAbove[i] = std::min(clearAbove[i], st[k].glow[i] > 0.01f ? -(1 << 30) : st[k].base - reach);
+        }
 }
 
 // Colour of the backdrop at view cell (i, j): returns 1 and `out` if a layer covers it. `glow` is how far the burning houses'
@@ -174,6 +183,7 @@ void parallaxPrep(int camX, int camY, int vw, int vh, int frame)
 int parallaxAt(int i, int j, Color& out, float& glow)
 {
     glow = 0;
+    if (j < clearAbove[i]) return 0;
     for (int k = NL - 1; k >= 0; k--)
     {
         const LayerState& S = st[k];
@@ -207,6 +217,7 @@ int parallaxAt(int i, int j, Color& out, float& glow)
             }
             else if (hgt == c.rise && k > 0) lit = 1.25f; // a thread of moonlight on the edge
             if (k == 0 && hgt < c.rise * 0.6f) lit *= 0.92f;
+            if (k == 0) col = lerpColor(col, Color{96, 60, 132, 255}, clampf(1 - hgt / 140.0f, 0, 1)); // the far range sinks into violet
             out = lit == 1 ? col : mulc(col, lit);
             glow = std::min(glow, 0.7f);
             return 1;
@@ -232,3 +243,6 @@ int parallaxAt(int i, int j, Color& out, float& glow)
     glow = std::min(glow, 0.7f);
     return 0;
 }
+
+// How violet the open sky is at view row j: the horizon haze, strongest just above the far range's foot.
+float parallaxHaze(int j) { return clampf(1 - (st[0].base - j) / 160.0f, 0, 1); }

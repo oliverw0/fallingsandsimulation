@@ -186,11 +186,18 @@ static void buildLight(int cx, int cy)
     {
         ltop.assign(lw, 0);
         lwet.assign(lw, 1 << 30);
+        // Sounding each column from the top of the world is most of the work, and the air far above the view never changes
+        // (the sim only runs round the camera): remember how far down each column is known clear, re-checked every few seconds.
+        static std::vector<int> clr, clrWet;
+        static int clrGen = -1;
+        if (clrGen != world.gen || (int)clr.size() != world.wU() || world.frame % 300 == 0) { clr.assign(world.wU(), 0); clrWet.assign(world.wU(), 1 << 30); clrGen = world.gen; }
+        int far = std::max(0, loy - 150);
         int nt = workerCount();
         parallelFor(nt, [&](int t) { // each column on its own
             for (int i = lw * t / nt; i < lw * (t + 1) / nt; i++)
             {
-                int x = lox + i * LS + LS / 2, y = 0;
+                int x = lox + i * LS + LS / 2, xc = std::clamp(x, 0, (int)clr.size() - 1), y = std::min(clr[xc], far);
+                if (clrWet[xc] < y) lwet[i] = clrWet[xc];
                 while (y < world.hU() && !opaque(x, y))
                 {
                     if (lwet[i] > y && props(world.get(x * world.scale, y * world.scale).material).kind == Kind::Liquid) lwet[i] = y;
@@ -198,6 +205,7 @@ static void buildLight(int cx, int cy)
                     y++;
                 }
                 ltop[i] = y;
+                if (x == xc) { clr[xc] = std::min(y, far); clrWet[xc] = lwet[i] < clr[xc] ? lwet[i] : 1 << 30; }
             }
         });
         for (int j = 0; j < lh; j++)
@@ -265,9 +273,10 @@ static void buildLight(int cx, int cy)
         if (m.burn > 0) pointLight(m.cx(), m.cy() - 4, 48, {255, 140, 50, 255}, 0.8f);
     if (G.p.m.alive && G.p.m.burn > 0) pointLight(G.p.m.cx(), G.p.m.cy() - 4, 70, {255, 140, 50, 255}, 0.95f);
     castLights();
-
     const float moon[3] = {0.66f, 0.72f, 0.92f};
-    for (size_t q = 0; q < n; q++)
+    int nt = workerCount();
+    parallelFor(nt, [&](int t) {
+    for (size_t q = n * t / nt; q < n * (t + 1) / nt; q++)
     {
         int wx = lox + (int)(q % lw) * LS, wy = loy + (int)(q / lw) * LS;
         if (world.inU(wx, wy) && world.skyOf(wx * world.scale, wy * world.scale)) { lpix[q] = WHITE; continue; } // the night sky keeps its own colours
@@ -277,6 +286,7 @@ static void buildLight(int cx, int cy)
         float b = amb[2] + s * moon[2] + lb[q] + std::min(0.4f, eb[q] * e);
         lpix[q] = {(unsigned char)(std::min(1.0f, r) * 255), (unsigned char)(std::min(1.0f, g) * 255), (unsigned char)(std::min(1.0f, b) * 255), 255};
     }
+    });
     UpdateTexture(lightTex, lpix.data());
 }
 
@@ -426,6 +436,18 @@ int main(int argc, char** argv)
             BeginDrawing(); ClearBackground(BLACK); renderScene(); EndDrawing();
             Image img = LoadImageFromScreen();
             ExportImage(img, (std::string(argv[2]) + "/vil" + std::to_string(k) + ".png").c_str());
+            UnloadImage(img);
+        }
+        Vector2 tag;
+        for (int k = 0; k < 3; k++) // Indi and her name tag: indi0..2.png, the player walked along the street until she's close
+        {
+            for (float x = 60; !indiTag(tag) && x < world.wU() - 330; x += 12) { G.p.m.x = x; G.p.m.y -= 20; for (int f = 0; f < 20; f++) updateGame(); }
+            for (int f = 0; f < 240; f++) updateGame();
+            G.camX = G.p.m.cx() - G.vw / 2.0f; G.camY = G.p.m.cy() - G.vh / 2.0f;
+            syncRenderCamera();
+            for (int r = 0; r < 2; r++) { BeginDrawing(); ClearBackground(BLACK); renderScene(); drawHUD(); EndDrawing(); }
+            Image img = LoadImageFromScreen();
+            ExportImage(img, (std::string(argv[2]) + "/indi" + std::to_string(k) + ".png").c_str());
             UnloadImage(img);
         }
         for (int pass = 0; pass < 2; pass++)
@@ -734,6 +756,38 @@ int main(int argc, char** argv)
             UnloadImage(img);
             printf("terr%d x=%d surf=%d\n", (int)i, (int)x, yy);
         }
+        return 0;
+    }
+
+    if (argc > 1 && std::string(argv[1]) == "--bench") // dev: mean ms per profiler section while the player is carried along the road, [w h] window (default 1366 768)
+    {
+        int bw = argc > 3 ? atoi(argv[2]) : 1366, bh = argc > 3 ? atoi(argv[3]) : 768;
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(bw, bh, "bench");
+        setupView();
+        rngState() = 12345;
+        newGameKit(false);
+        startRun();
+        G.state = GS_PLAY;
+        if (argc > 4) G.p.m.x = (float)atof(argv[4]); // start somewhere else along the road (say, out at sea)
+        const int N = 600;
+        double sum[PF_COUNT] = {}, tot = 0;
+        for (int f = 0; f < N; f++)
+        {
+            G.p.m.x += 1.5f; // walk the road: new ground, mobs and sim every few frames
+            int yy = 0; while (yy < world.hU() - 1 && world.get((int)G.p.m.cx() * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++;
+            G.p.m.y = (float)yy - G.p.m.h - 1;
+            double t0 = GetTime();
+            updateGame();
+            BeginDrawing(); ClearBackground(BLACK); renderScene(); drawHUD(); EndDrawing();
+            tot += GetTime() - t0;
+            for (int s = 0; s < PF_COUNT; s++) sum[s] += PROF[s];
+        }
+        printf("%dx%d view %dx%d units, %d frames, from x %d (sea ends at %d)\n", bw, bh, G.vw, G.vh, N, (int)G.p.m.x - (int)(N * 1.5f), G.seaEnd);
+        for (int s = 0; s < PF_COUNT; s++) printf("  %-8s %6.2f ms\n", PROF_NAMES[s], sum[s] / N);
+        printf("  frame    %6.2f ms (CPU, includes GPU submit)\n", tot * 1000 / N);
+        if (getenv("BENCH_SHOT")) { Image img = LoadImageFromTexture(rt.texture); ImageFlipVertical(&img); ExportImage(img, getenv("BENCH_SHOT")); }
+        CloseWindow();
         return 0;
     }
 
