@@ -246,3 +246,102 @@ int parallaxAt(int i, int j, Color& out, float& glow)
 
 // How violet the open sky is at view row j: the horizon haze, strongest just above the far range's foot.
 float parallaxHaze(int j) { return clampf(1 - (st[0].base - j) / 160.0f, 0, 1); }
+
+// ---------------------------------------------------------------- the cavern backdrop
+// Where a cave's back wall is flagged sky = 2 the view shows the dark of a far, bigger cavern: four layers of rock, each a ceiling of hanging
+// stalactites and a floor of stalagmites repeating every few hundred cells, the far ones paler and slower and lost in mist, the near ones
+// dark and close. Heights are worked out once per column per frame (cavePrep), so a pixel costs a comparison per layer.
+namespace {
+constexpr int CL = 4;
+struct CaveLayer { float fx, fy; int T; Color rock; float fog; float scale; };
+const CaveLayer CAVE[CL] = {
+    {0.10f, 0.06f, 240, {118, 108, 148, 255}, 0.62f, 0.8f},
+    {0.20f, 0.12f, 210, {88, 80, 118, 255}, 0.42f, 0.95f},
+    {0.34f, 0.20f, 180, {62, 56, 86, 255}, 0.24f, 1.1f},
+    {0.52f, 0.32f, 156, {40, 36, 58, 255}, 0.06f, 1.3f},
+};
+std::vector<float> cvCeil[CL], cvFloor[CL];
+int cvPer[CL], cvN0[CL], cvOffX[CL], cvOffY[CL], cvW = 0;
+
+inline float tri(float x) { float f = x - std::floor(x); return std::fabs(f * 2 - 1); }
+
+float capHeight(float x, int n, int k, bool floorSide)
+{
+    int so = floorSide ? 31 : 0;
+    float base = 8 + 20 * vnoise(x * 0.015f + k * 5.3f, n * 3.1f + so, 620 + k);
+    float best = 0;
+    for (int scale = 0; scale < 3; scale++) // big fangs, middling ones and small teeth: each its own random length, and the odd gap
+    {
+        float p = scale == 0 ? 23.0f : (scale == 1 ? 11.0f : 5.5f), amp = scale == 0 ? 46.0f : (scale == 1 ? 24.0f : 9.0f);
+        float xx = x / p + hash2(n, k, 1 + so + scale) * 9.0f;
+        int cell = (int)std::floor(xx);
+        float a = hash2(cell, n * 7 + k, 40 + so + scale * 3);
+        if (a < 0.28f) continue;                                   // no spike in this cell
+        float w = 0.55f + 0.45f * hash2(cell, k, 60 + so + scale); // fat or slender
+        float f = xx - cell + (hash2(cell, n, 70 + scale) - 0.5f) * 0.3f; // not quite centred
+        float t = std::fabs(f - 0.5f) * 2 / w;                     // 0 at the tip's axis
+        if (t >= 1) continue;
+        best = std::max(best, std::pow(1 - t, 1.5f + 0.5f * hash2(cell, 3, 80 + so)) * amp * (0.35f + 0.65f * a));
+    }
+    return (base + best) * CAVE[k].scale;
+}
+} // namespace
+
+void cavePrep(int camX, int camY, int vw, int vh)
+{
+    cvW = vw;
+    for (int k = 0; k < CL; k++)
+    {
+        const CaveLayer& L = CAVE[k];
+        cvOffX[k] = (int)std::floor(camX * L.fx);
+        cvOffY[k] = (int)std::floor(camY * L.fy);
+        cvN0[k] = (int)std::floor((float)cvOffY[k] / L.T);
+        int per = (vh + L.T - 1) / L.T + 2;
+        cvPer[k] = per;
+        cvCeil[k].assign((size_t)vw * per, 0.0f);
+        cvFloor[k].assign((size_t)vw * per, 0.0f);
+        for (int i = 0; i < vw; i++)
+            for (int m = 0; m < per; m++)
+            {
+                cvCeil[k][(size_t)i * per + m] = capHeight((float)(i + cvOffX[k]), cvN0[k] + m, k, false);
+                cvFloor[k][(size_t)i * per + m] = capHeight((float)(i + cvOffX[k]), cvN0[k] + m, k, true);
+            }
+    }
+}
+
+Color caveAt(int i, int j, Color base)
+{
+    if (i < 0 || i >= cvW) return base;
+    Color mist = {54, 50, 76, 255};
+    mist = lerpColor(mist, Color{76, 70, 104, 255}, clampf(0.5f + 0.5f * std::sin(j * 0.02f), 0, 1) * 0.5f);
+    for (int k = CL - 1; k >= 0; k--) // the near layer first: whatever it covers hides the rest
+    {
+        const CaveLayer& L = CAVE[k];
+        int py = j + cvOffY[k], n = (int)std::floor((float)py / L.T), m = n - cvN0[k], yy = py - n * L.T;
+        if (m < 0 || m >= cvPer[k]) continue;
+        float ch = cvCeil[k][(size_t)i * cvPer[k] + m], fh = cvFloor[k][(size_t)i * cvPer[k] + m];
+        float dC = ch - yy, dF = yy - (L.T - fh); // how far inside the ceiling / floor rock this pixel is (negative: in the open)
+        float depth = std::max(dC, dF);
+        if (depth < 0) continue;
+        int px = i + cvOffX[k];
+        // a neighbouring column's depth, to find the flanks: the left face of a spike catches the light, the right falls into shadow
+        auto depthAt = [&](int ii) -> float {
+            if (ii < 0 || ii >= cvW) return depth;
+            float c2 = cvCeil[k][(size_t)ii * cvPer[k] + m], f2 = cvFloor[k][(size_t)ii * cvPer[k] + m];
+            return std::max(c2 - yy, yy - (L.T - f2));
+        };
+        float dl = depthAt(i - 1), dr = depthAt(i + 1);
+        bool leftEdge = dl < 0, rightEdge = dr < 0;
+        float body = 0.82f + 0.36f * vnoise(px * 0.16f, py * 0.07f, 651 + k);                // mottled stone, streaked down the spike
+        float strata = 0.9f + 0.2f * std::sin(py * 0.55f + vnoise(px * 0.05f, py * 0.05f, 652 + k) * 6.0f); // faint layers
+        float grit = 0.92f + 0.16f * hash2(px, py, 650 + k);
+        float form = depth < 3.0f ? 0.72f + 0.1f * depth : 1.0f;                              // darker toward the open edge of the silhouette
+        float k2 = body * strata * grit * form;
+        if (leftEdge) k2 *= 1.55f; else if (rightEdge) k2 *= 0.62f;                            // the lit and shaded flanks
+        else if (dl < 3.0f) k2 *= 1.25f; else if (dr < 3.0f) k2 *= 0.8f;
+        if (depth < 1.6f && !leftEdge && !rightEdge) k2 *= 1.3f;                              // the tip
+        Color c = mulc(L.rock, k2);
+        return lerpColor(c, mist, L.fog);
+    }
+    return mist;
+}

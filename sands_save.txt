@@ -1,5 +1,5 @@
-bank 27
-runs 18
+bank 47
+runs 19
 deepest 7
 owned 12
 equip 12

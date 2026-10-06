@@ -156,6 +156,41 @@ static void castLights()
     plist.clear();
 }
 
+// The night's light, region by region: the moon's colour and strength and the ambient glow that everything else sits in. They ease from one set to
+// the next as you travel, so crossing from the plains into Dunmoor or down into the crypts turns the whole world's colour rather than switching it.
+struct LightGrade { float moon[3], K, amb[3]; };
+static LightGrade lightTarget()
+{
+    LightGrade g = {{0.74f, 0.84f, 1.0f}, 0.62f, {0.085f, 0.095f, 0.14f}};          // the Greenmarch: a cool silver-blue moon
+    if (G.inVillage) g = {{0.78f, 0.86f, 1.0f}, 0.66f, {0.09f, 0.10f, 0.15f}};
+    else
+    {
+        int rg = regionId();
+        if (rg == 2) g = {{0.55f, 0.80f, 1.0f}, 0.56f, {0.055f, 0.10f, 0.16f}};     // the sea: teal-blue
+        else if (rg == 1) g = {{0.82f, 0.88f, 1.0f}, 0.70f, {0.10f, 0.11f, 0.15f}}; // the dunes: pale silver
+        else if (rg == 3) g = {{0.96f, 0.90f, 0.80f}, 0.64f, {0.12f, 0.10f, 0.09f}}; // the Scorched Reach: bone-pale, a little warm
+        else if (G.sanctuary || true)
+            switch (G.stage)
+            {
+            case 1: g = {{0.74f, 0.78f, 1.0f}, 0.58f, {0.13f, 0.088f, 0.105f}}; break;   // Dunmoor: a faint red in the shadows
+            case 2: g = {{0.55f, 0.70f, 0.66f}, 0.42f, {0.078f, 0.10f, 0.088f}}; break;  // the crypts: murky green-grey
+            case 3: g = {{0.72f, 0.66f, 0.55f}, 0.38f, {0.11f, 0.092f, 0.07f}}; break;   // the mines: brown murk
+            case 4: g = {{0.62f, 0.82f, 1.0f}, 0.48f, {0.075f, 0.105f, 0.165f}}; break;  // the frost: icy blue
+            case 5: g = {{0.95f, 0.62f, 0.50f}, 0.38f, {0.15f, 0.085f, 0.065f}}; break;  // the forge: ember red
+            case 6: g = {{0.66f, 0.56f, 0.88f}, 0.40f, {0.105f, 0.075f, 0.135f}}; break; // the citadel: bruised violet
+            default: break;
+            }
+    }
+    if (world.storm > 0.02f) // the storm over Dunmoor drains the colour out: a grey, hidden moon
+    {
+        float t = std::min(1.0f, world.storm * 1.3f);
+        const LightGrade grey = {{0.62f, 0.66f, 0.72f}, 0.44f, {0.085f, 0.09f, 0.10f}};
+        for (int k = 0; k < 3; k++) { g.moon[k] += (grey.moon[k] - g.moon[k]) * t; g.amb[k] += (grey.amb[k] - g.amb[k]) * t; }
+        g.K += (grey.K - g.K) * t;
+    }
+    return g;
+}
+
 static void buildLight(int cx, int cy)
 {
     int nw = G.vw / LS + 2, nh = G.vh / LS + 2;
@@ -177,8 +212,16 @@ static void buildLight(int cx, int cy)
     size_t n = (size_t)lw * lh;
 
     bool outdoors = !G.sandbox; // moonlight reaches wherever there's open sky above, in any biome
-    float amb[3] = {0.11f, 0.11f, 0.14f};
+    static LightGrade lg_ = lightTarget();
+    {
+        LightGrade t = lightTarget();
+        for (int k = 0; k < 3; k++) { lg_.moon[k] += (t.moon[k] - lg_.moon[k]) * 0.03f; lg_.amb[k] += (t.amb[k] - lg_.amb[k]) * 0.03f; }
+        lg_.K += (t.K - lg_.K) * 0.03f;
+    }
+    float amb[3] = {lg_.amb[0], lg_.amb[1], lg_.amb[2]};
     if (G.sandbox) amb[0] = amb[1] = amb[2] = 0.85f;
+    // where the moon is, in world units (renderWorld draws it at 74% across and 15% down, drifting slowly against the camera)
+    const float moonWX = cx + G.vw * 0.74f - cx * 0.03f, moonWY = cy + G.vh * 0.15f - cy * 0.015f;
 
     // moonlight: open sky down to the first opaque cell in each column, then a short fall-off into the ground
     std::fill(lsky.begin(), lsky.end(), 0.0f);
@@ -257,7 +300,8 @@ static void buildLight(int cx, int cy)
     for (auto& it : G.inter)
     {
         float fl = 0.88f + 0.12f * hash2((int)it.x, G.frame / 4, 9);
-        if (it.type == IT_TORCH) pointLight(it.x, it.y - 15, 90, warm, fl);
+        if (it.type == IT_TORCH) pointLight(it.x, it.y - (it.style >= 1 ? 3 : 15), it.style == 2 ? 64 : 90, warm, fl * (it.style == 2 ? 0.85f : 1.0f)); // style 1: a wall sconce, y is its flame
+        else if (it.type == IT_DECOR && it.data == DK_CHANDELIER) pointLight(it.x, it.y + it.w + 5, 104, warm, fl);
         else if (it.type == IT_LANTERN && !it.used) { Vector2 lp = lanternPos(it); pointLight(lp.x, lp.y + 4, 72, warm, fl); }
         else if (it.type == IT_SHRINE && !it.used) pointLight(it.x, it.y - 34, 56, {200, 190, 255, 255}, 0.7f);
         else if (it.type == IT_STONE && !it.used) pointLight(it.x, it.y - 16, 44, G.stoneLoot[it.data].glow, 0.7f);
@@ -273,17 +317,26 @@ static void buildLight(int cx, int cy)
         if (m.burn > 0) pointLight(m.cx(), m.cy() - 4, 48, {255, 140, 50, 255}, 0.8f);
     if (G.p.m.alive && G.p.m.burn > 0) pointLight(G.p.m.cx(), G.p.m.cy() - 4, 70, {255, 140, 50, 255}, 0.95f);
     castLights();
-    const float moon[3] = {0.66f, 0.72f, 0.92f};
+    const float moon[3] = {lg_.moon[0] * lg_.K, lg_.moon[1] * lg_.K, lg_.moon[2] * lg_.K};
     int nt = workerCount();
     parallelFor(nt, [&](int t) {
     for (size_t q = n * t / nt; q < n * (t + 1) / nt; q++)
     {
         int wx = lox + (int)(q % lw) * LS, wy = loy + (int)(q / lw) * LS;
-        if (world.inU(wx, wy) && world.skyOf(wx * world.scale, wy * world.scale)) { lpix[q] = WHITE; continue; } // the night sky keeps its own colours
+        if (world.inU(wx, wy) && world.skyOf(wx * world.scale, wy * world.scale) == 1) { lpix[q] = WHITE; continue; } // the night sky keeps its own colours
         float e = 2.2f, s = lsky[q] * (1 - 0.6f * world.storm) + lsky[q] * world.flash * 1.4f;
+        if (lsky[q] > 0.01f && wy > moonWY + 6) // shafts of moonlight fanning out from the moon, falling only where the sky is open
+        {
+            float dx = wx - moonWX, dy = wy - moonWY, dist = std::sqrt(dx * dx + dy * dy), ang = std::atan2(dx, dy);
+            float v = std::sin(ang * 9.0f + G.frame * 0.0035f + 2.0f * vnoise(ang * 6.0f, G.frame * 0.002f, 71)) * 0.5f + 0.5f;
+            float beam = std::pow(v, 5.0f) * (0.55f + 0.45f * vnoise(ang * 22.0f, G.frame * 0.006f, 72));
+            float fall = std::pow(std::max(0.0f, 1 - dist / 420.0f), 1.3f);
+            s += lsky[q] * beam * fall * 0.34f * (1 - 0.85f * world.storm);
+        }
         float r = amb[0] + s * moon[0] + lr[q] + std::min(1.0f, er[q] * e);
         float g = amb[1] + s * moon[1] + lg[q] + std::min(0.7f, eg[q] * e);
         float b = amb[2] + s * moon[2] + lb[q] + std::min(0.4f, eb[q] * e);
+        if (world.inU(wx, wy)) { int s2 = world.skyOf(wx * world.scale, wy * world.scale); if (s2 >= 2) { float bl = (s2 - 2) / 7.0f; r = std::max(r, 0.34f * bl); g = std::max(g, 0.32f * bl); b = std::max(b, 0.46f * bl); } } // a cave's far depths keep a cold glow of their own, as far as they show
         lpix[q] = {(unsigned char)(std::min(1.0f, r) * 255), (unsigned char)(std::min(1.0f, g) * 255), (unsigned char)(std::min(1.0f, b) * 255), 255};
     }
     });
@@ -332,6 +385,12 @@ static void renderScene()
                    {sx, sy, (float)G.vw * G.scale, (float)G.vh * G.scale}, {0, 0}, 0, WHITE);
     rlDrawRenderBatchActive();
     rlEnableColorBlend();
+    if (!G.sandbox) // a gentle vignette: the night closes in a little at the edges
+    {
+        static Texture2D vig = {};
+        if (!vig.id) { Image im = GenImageGradientRadial(256, 144, 0.55f, {0, 0, 0, 0}, {3, 5, 14, 150}); vig = LoadTextureFromImage(im); UnloadImage(im); SetTextureFilter(vig, TEXTURE_FILTER_BILINEAR); }
+        DrawTexturePro(vig, {0, 0, 256, 144}, {sx, sy, (float)G.vw * G.scale, (float)G.vh * G.scale}, {0, 0}, 0, WHITE);
+    }
     if (G.sailT > 100) DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), {0, 0, 0, (unsigned char)std::min(255, (G.sailT - 100) * 4)});
 }
 
@@ -709,9 +768,9 @@ int main(int argc, char** argv)
         P.m.x = 150;
         { int yy = (int)P.m.y - 80; while (world.get(150 * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++; P.m.y = (float)yy - P.m.h; }
         float fy = P.m.y + P.m.h;
-        int types[] = {E_GOBLIN, E_BOMBER, E_REDCAP, E_RAIDER, E_RISEN, E_BAT, E_SLIME, E_SCORPION, E_SERPENT, E_WOLF};
+        int types[] = {E_GOBLIN, E_BOMBER, E_REDCAP, E_RAIDER, E_RISEN, E_BAT, E_SCORPION, E_SERPENT, E_WOLF, E_GUARD, E_KNIGHT, E_CULTIST, E_ARCHER};
         const int CW = 200, CH = 110;
-        Image sheet = GenImageColor(CW * 5, CH * 2, {24, 18, 36, 255});
+        Image sheet = GenImageColor(CW * 5, CH * 3, {24, 18, 36, 255});
         int n = 0;
         for (int t : types)
         {
@@ -781,13 +840,40 @@ int main(int argc, char** argv)
         startRun();
         G.state = GS_PLAY;
         if (argc > 4) G.p.m.x = (float)atof(argv[4]); // start somewhere else along the road (say, out at sea)
+        if (getenv("BENCH_ADVANCE")) for (int k = atoi(getenv("BENCH_ADVANCE")); k > 0; k--) { Haven h = G.havens.front(); advanceWorld(h); } // grow the biomes ahead (the crypts are the third)
+        for (auto& h : G.havens) printf("haven stage %d x0 %d floor %d\n", h.stage, h.x0, h.floor);
+        if (getenv("BENCH_HAVEN")) { int k = atoi(getenv("BENCH_HAVEN")); if (k < (int)G.havens.size()) G.p.m.x = (float)(G.havens[k].x0 - 460); }
+        if (getenv("BENCH_MAP")) // dev: a map of a region of the world (units "x0,y0,x1,y1"), one pixel per 4 units, to $BENCH_MAP
+        {
+            int x0, y0, x1, y1;
+            sscanf(getenv("BENCH_MAPBOX"), "%d,%d,%d,%d", &x0, &y0, &x1, &y1);
+            int st = 3, mw = (x1 - x0) / st, mh = (y1 - y0) / st;
+            Image im = GenImageColor(mw, mh, BLACK);
+            for (int j = 0; j < mh; j++)
+                for (int i = 0; i < mw; i++)
+                {
+                    int cx = (x0 + i * st) * world.scale, cy = (y0 + j * st) * world.scale;
+                    Cell c = world.get(cx, cy);
+                    Color col = world.bgOf(cx, cy);
+                    col = Color{(unsigned char)(col.r / 2), (unsigned char)(col.g / 2), (unsigned char)(col.b / 2), 255};
+                    if (c.material != CellMaterial::Empty) col = c.material == CellMaterial::Masonry ? Color{190, 186, 196, 255} : c.material == CellMaterial::Platform ? Color{200, 140, 60, 255} : c.material == CellMaterial::Bone ? Color{240, 235, 210, 255} : c.material == CellMaterial::Bedrock ? Color{20, 20, 24, 255} : Color{120, 90, 60, 255};
+                    if (world.skyOf(cx, cy)) col = Color{(unsigned char)(col.r + 40), (unsigned char)(col.g), (unsigned char)(col.b + 70), 255};
+                    ImageDrawPixel(&im, i, j, col);
+                }
+            ExportImage(im, getenv("BENCH_MAP"));
+            UnloadImage(im);
+        }
         const int N = 600;
         double sum[PF_COUNT] = {}, tot = 0;
         for (int f = 0; f < N; f++)
         {
+            if (getenv("BENCH_STAND")) { if (f == 0) { G.p.m.x = (float)atof(getenv("BENCH_STAND")); G.p.m.y = (float)atof(getenv("BENCH_STANDY")); } G.devGod = true; }
+            else
+            {
             G.p.m.x += 1.5f; // walk the road: new ground, mobs and sim every few frames
             int yy = 0; while (yy < world.hU() - 1 && world.get((int)G.p.m.cx() * world.scale, yy * world.scale).material == CellMaterial::Empty) yy++;
             G.p.m.y = (float)yy - G.p.m.h - 1;
+            }
             double t0 = GetTime();
             updateGame();
             BeginDrawing(); ClearBackground(BLACK); renderScene(); drawHUD(); EndDrawing();
@@ -831,6 +917,67 @@ int main(int argc, char** argv)
             ExportImage(img, (std::string(argv[2]) + "/lineup" + std::to_string(page) + ".png").c_str());
             UnloadImage(img);
             G.mobs.clear();
+        }
+        { // hearth0..N.png: the village's fireplaces and hearth pits, 5x
+            int n = 0;
+            for (auto& l : G.lamps)
+            {
+                if (!l.flame || l.r < 84 || l.r > 100 || n >= 4) continue;
+                G.camX = l.x - G.vw / 2.0f; G.camY = l.y - G.vh / 2.0f;
+                syncRenderCamera();
+                for (int w_ = 0; w_ < 90; w_++) { G.frame++; BeginDrawing(); renderScene(); EndDrawing(); }
+                Image img = LoadImageFromTexture(rt.texture);
+                ImageFlipVertical(&img);
+                ImageCrop(&img, {(l.x - 44 - G.rcx) * 2, (l.y - 50 - G.rcy) * 2, 176, 130});
+                ImageResizeNN(&img, img.width * 5, img.height * 5);
+                ExportImage(img, (std::string(argv[2]) + "/hearth" + std::to_string(n++) + ".png").c_str());
+                UnloadImage(img);
+            }
+        }
+        { // skel.png: the crypt's dead side by side, a Magus winding up (ice rune) and another letting go a bolt (lightning), 4x
+            float fx = G.p.m.cx() + 24, fy = G.p.m.y + G.p.m.h, x = fx;
+            auto put = [&](int t, int cd, int at, int sp, int fired) {
+                Mob e = makeEnemy(t, x, fy - 30);
+                e.y = fy - e.h; e.facing = 1; e.anim = 0; e.aggro = true; e.los = true; e.cd = cd; e.attackT = at; e.spell = sp; e.spellFired = fired;
+                G.mobs.push_back(e);
+                x += e.w + 20;
+            };
+            put(E_SKELETON, 0, 0, -1, -1); put(E_DRAUGR, 0, 0, -1, -1); put(E_SKELSPEAR, 0, 0, -1, -1); put(E_SKELSHIELD, 0, 0, -1, -1); put(E_ARCHER, 0, 0, -1, -1);
+            put(E_BONEMAGE, 5, 0, SP_FIREBALL, -1); put(E_BONEMAGE, 5, 0, SP_MISSILE, -1); put(E_BONEMAGE, 5, 0, SP_ICE, -1); put(E_BONEMAGE, 5, 0, SP_LIGHTNING, -1); put(E_BONEMAGE, 5, 0, SP_ACID, -1); put(E_BONEMAGE, 0, 14, SP_ICE, SP_FIREBALL);
+            G.camX = G.p.m.cx() - 20; G.camY = fy - G.vh * 0.6f;
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ImageCrop(&img, {(G.p.m.cx() - 12 - G.rcx) * 2, (fy - 72 - G.rcy) * 2, std::min((x - G.p.m.cx() + 16) * 2, (float)img.width), 180});
+            ImageResizeNN(&img, img.width * 3, img.height * 3);
+            ExportImage(img, (std::string(argv[2]) + "/skel.png").c_str());
+            UnloadImage(img);
+            G.mobs.clear();
+        }
+        { // burn.png: the player and a few foes alight, 4x
+            float fx = G.p.m.cx() + 24, fy = G.p.m.y + G.p.m.h, x = fx;
+            G.p.m.burn = 100000;
+            int ts[] = {E_GOBLIN, E_GUARD, E_KNIGHT, E_CULTIST, E_ARCHER, E_WOLF, E_RISEN};
+            for (int t : ts)
+            {
+                Mob e = makeEnemy(t, x, fy - 30);
+                e.y = fy - e.h; e.facing = 1; e.anim = 0; e.burn = 100000;
+                G.mobs.push_back(e);
+                x += e.w + 18;
+            }
+            G.camX = G.p.m.cx() - 20; G.camY = fy - G.vh * 0.6f;
+            for (int k = 0; k < 40; k++) { G.frame++; updateGame(); }
+            syncRenderCamera();
+            BeginDrawing(); renderScene(); EndDrawing();
+            Image img = LoadImageFromTexture(rt.texture);
+            ImageFlipVertical(&img);
+            ImageCrop(&img, {(G.p.m.cx() - 12 - G.rcx) * 2, (fy - 70 - G.rcy) * 2, std::min((x - G.p.m.cx() + 16) * 2, (float)img.width), 160});
+            ImageResizeNN(&img, img.width * 4, img.height * 4);
+            ExportImage(img, (std::string(argv[2]) + "/burn.png").c_str());
+            UnloadImage(img);
+            G.mobs.clear();
+            G.p.m.burn = 0;
         }
         { // combat.png: each weapon wound up, landing and following through; icons.png; pickups.png
             Player& P = G.p;
@@ -934,7 +1081,8 @@ int main(int argc, char** argv)
                     G.camX = views[k].x; G.camY = views[k].y;
                     syncRenderCamera();
                     G.rcx = (int)G.camX; G.rcy = (int)G.camY;
-                    BeginDrawing(); renderScene(); EndDrawing();
+                    for (int w_ = 0; w_ < 160; w_++) { G.frame++; BeginDrawing(); renderScene(); EndDrawing(); }
+                    printf("castle view %d: drawEntities %.2f ms, renderWorld %.2f, light %.2f\n", k, PROF[PF_DRAW], PROF[PF_WORLD], PROF[PF_LIGHT]);
                     Image ci = LoadImageFromTexture(rt.texture);
                     ImageFlipVertical(&ci);
                     ExportImage(ci, (std::string(argv[2]) + "/castle" + std::to_string(k) + ".png").c_str());

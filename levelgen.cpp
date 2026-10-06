@@ -18,7 +18,7 @@ const StageDef STAGES[] = {
     {"The Greenmarch", "Rolling plains above, hungry caves below", {30, 36, 30, 255}, {52, 58, 44, 255},
      M::Dirt, M::Stone, M::Dirt, M::Grass,
      {O(CopperOre, 5), O(IronOre, 3), O(Coal, 3), O(GoldOre, 1)},
-     {{E_WOLF, 4}, {E_GOBLIN, 3}, {E_REDCAP, 2}, {E_SLIME, 2}, {E_BAT, 2}, {E_BOMBER, 1}},
+     {{E_WOLF, 4}, {E_GOBLIN, 3}, {E_REDCAP, 2}, {E_BAT, 2}, {E_BOMBER, 1}},
      M::Water, M::Oil, 12, 34,
      4, 1, 0, 3, 0, 0, 2, 0, -1, true, {M_COPPER, M_IRON, M_COPPER}, SK_PLAINS, 0},
     {"Castle Dunmoor", "Its lords are long dead. Its guards are not.", {12, 10, 16, 255}, {26, 20, 30, 255},
@@ -30,7 +30,7 @@ const StageDef STAGES[] = {
     {"Forsaken Crypts", "The dead do not rest here", {28, 24, 30, 255}, {46, 38, 46, 255},
      M::Stone, M::Dirt, M::Basalt, M::Empty,
      {O(IronOre, 4), O(Coal, 3), O(GoldOre, 2), O(Venomite, 2), O(CopperOre, 2)},
-     {{E_SKELETON, 4}, {E_ARCHER, 3}, {E_DRAUGR, 3}, {E_BANSHEE, 2}, {E_CULTIST, 2}, {E_BAT, 1}},
+     {{E_SKELETON, 3}, {E_SKELSPEAR, 2}, {E_SKELSHIELD, 2}, {E_ARCHER, 2}, {E_BONEMAGE, 1}, {E_BANSHEE, 2}},
      M::Water, M::Blood, 8, 40,
      2, 1, 4, 6, 6, 0, 2, 2, -1, false, {M_IRON, M_STEEL, M_VENOMITE}, SK_CRYPT, -1},
     {"Deepdelve Mines", "Abandoned by the dwarves", {30, 28, 26, 255}, {50, 44, 38, 255},
@@ -54,7 +54,7 @@ const StageDef STAGES[] = {
     {"The Lich's Citadel", "End of all roads", {12, 10, 16, 255}, {26, 20, 30, 255},
      M::Obsidian, M::Basalt, M::Stone, M::Empty,
      {O(Adamantite, 4), O(Firestone, 1), O(Frostite, 1), O(Stormite, 1), O(Venomite, 1), O(GoldOre, 2)},
-     {{E_SKELETON, 2}, {E_ARCHER, 2}, {E_CULTIST, 2}, {E_KNIGHT, 2}, {E_BANSHEE, 2}, {E_WRAITH, 1}},
+     {{E_SKELETON, 2}, {E_SKELSHIELD, 2}, {E_BONEMAGE, 2}, {E_CULTIST, 2}, {E_KNIGHT, 2}, {E_BANSHEE, 1}},
      M::Acid, M::Lava, 10, 50,
      2, 3, 4, 6, 6, 4, 1, 2, E_LICH, false, {M_DAMASCUS, M_ADAMANTIUM, M_STORMITE}, SK_CRYPT, -1},
 };
@@ -397,6 +397,22 @@ static void addSconce(int x, int y, int dir)
     G.lamps.push_back({(float)x, (float)y - 2, 78, LAMP_WARM, true});
 }
 
+// A torch bolted to the back wall (IT_TORCH style 1; y is the flame's base), for the castle's halls - nothing stands on the floor to be walked into.
+static void wallTorch(int x, int y)
+{
+    Interact t{IT_TORCH, (float)x, (float)y};
+    t.style = 1;
+    G.inter.push_back(t);
+}
+
+// A castle chandelier hung from the roof at ceiling row y0, `drop` units down to its candles (only where the hall is tall enough to clear a head).
+static void hangChandelier(int x, int y0, int h, int drop)
+{
+    drop = std::min(drop, h - 42);
+    if (drop < 4) return;
+    addDecor(DK_CHANDELIER, (float)x, (float)y0, irand(64), drop);
+}
+
 static void placeMineSupport(int x, int fy)
 {
     int cy = fy - 2;
@@ -454,6 +470,9 @@ static void placeHanging(int x, int cy, int kind)
 
 // ---------------------------------------------------------------- back wall
 
+static std::vector<uint8_t> structAir; // the crypts: what is built (corridors, halls, stairs, side rooms), as against the cave noise
+static std::vector<uint8_t> structNear; // ...and everything within a few cells of it
+static bool markStruct = false;
 static int castleGround = 0; // the castle grounds' level: the lower halls become crypts
 
 static void buildBackground(const StageDef& d, bool skies)
@@ -1236,7 +1255,12 @@ static void decorateRoom(const Room& r, bool grand)
     if (crypt)
         for (int k = irange(1, 2), sx = r.x0 + irange(10, 40); k > 0 && sx < r.x1 - 30; k--, sx += irange(40, 70)) sarcophagus(sx, r.y1 + 1);
     else if (!grand && w > 120 && chance(3)) feastTable(r.x0 + w / 2 - 20, r.x0 + w / 2 + 20, r.y1 + 1);
-    for (int tx = r.x0 + 12; tx < r.x1 - 8; tx += irange(50, 80)) G.inter.push_back({IT_TORCH, (float)tx, (float)(r.y1 + 1)});
+    if (crypt) for (int tx = r.x0 + 12; tx < r.x1 - 8; tx += irange(50, 80)) G.inter.push_back({IT_TORCH, (float)tx, (float)(r.y1 + 1)});
+    else
+    { // the castle's halls: torches in iron sconces on the back wall at head height, and candle chandeliers hung from the roof
+        for (int tx = r.x0 + 14; tx < r.x1 - 10; tx += irange(64, 100)) wallTorch(tx, r.y1 - 27);
+        for (int cx = r.x0 + 26 + irand(24); cx < r.x1 - 20 && h >= 50; cx += irange(60, 110)) if (grand || chance(2)) hangChandelier(cx, r.y0, h, irange(8, 22));
+    }
     if (w > 60) // where the floor meets the back wall: the fallen slumped against it (painted flat), their blood, racked weapons
     {
         int fy = r.y1 + 1;
@@ -1369,12 +1393,16 @@ static LevelEnds castleLayout(const StageDef& d, int g)
         idolPillar(mid + 34, lobby.y1 - 70, lobby.y1);
         antlerSkull(mid, lobby.y0 + 30);
         hearthCrane(mid, lobby.y1 + 1);
-        for (int cx = lobby.x0 + 50; cx < lobby.x1 - 40; cx += irange(70, 110)) addDecor(DK_CHAIN, (float)cx, (float)(lobby.y0 + 4), irand(64), irange(26, 50)); // chains from the roof beam
+        for (int cx = lobby.x0 + 50; cx < lobby.x1 - 40; cx += irange(70, 110)) // chains and chandeliers from the roof beam
+        {
+            if (chance(3)) addDecor(DK_CHAIN, (float)cx, (float)(lobby.y0 + 4), irand(64), irange(26, 50));
+            else hangChandelier(cx, lobby.y0 + 4, lobby.y1 - lobby.y0 - 4, irange(22, 46));
+        }
         for (int k = 0; k < 5; k++) addDecor(DK_BLOOD, (float)irange(lobby.x0 + 10, lobby.x0 + 90), (float)irange(lobby.y0 + 60, lobby.y1 - 10), irand(6) + 6 * irand(10), irange(14, 22), chance(2)); // a fight at the doors
         addDecor(DK_BLOOD, (float)(lobby.x0 + irange(14, 60)), (float)(lobby.y1 + 1), 4 + 6 * irand(10), irange(14, 22));
         feastTable(lobby.x0 + 50, lobby.x0 + 120, lobby.y1 + 1);
         feastTable(lobby.x1 - 120, lobby.x1 - 50, lobby.y1 + 1);
-        for (int tx = lobby.x0 + 12; tx < lobby.x1 - 8; tx += 60) G.inter.push_back({IT_TORCH, (float)tx, (float)(lobby.y1 + 1)});
+        for (int tx = lobby.x0 + 12; tx < lobby.x1 - 8; tx += 80) wallTorch(tx, lobby.y1 - 28);
     }
     rooms.push_back(lobby);
     G.inter.push_back({IT_TORCH, (float)keepX0 - 10, (float)g});
@@ -1441,7 +1469,7 @@ static LevelEnds castleLayout(const StageDef& d, int g)
         Room vest{ground.back().x1 + 16, g - 100, ground.back().x1 + 76, g - 1}; // undecorated: just torches and the stairs
         clearRect(vest.x0, vest.y0, vest.x1, vest.y1);
         corridor(ground.back().x1 - 2, g - 1, vest.x0 + 2, g - 1);
-        G.inter.push_back({IT_TORCH, (float)vest.x0 + 10, (float)g});
+        wallTorch(vest.x0 + 10, g - 28);
         for (size_t i = 1; i < ground.size(); i++) rooms.push_back(ground[i]);
         rooms.push_back(vest);
     }
@@ -1496,7 +1524,7 @@ static LevelEnds castleLayout(const StageDef& d, int g)
                     if (world.in(x, y) && world.at(x, y).material != M::Bedrock) world.at(x, y) = Cell{};
                 place(x, f + 1, M::Masonry);
                 world.at(x, f + 1).shade = (uint8_t)(k % 3 == 0 ? 220 : 150); // the lip of each tread catches the light
-                if (k % 36 == 18) G.inter.push_back({IT_TORCH, (float)x, (float)(f + 1)});
+                if (k % 36 == 18) wallTorch(x, f - 26); // (a sconce on the stair-well wall, not a torch to trip on)
             }
         }
         else if (vertical)
@@ -2039,6 +2067,75 @@ static void placeTribalHut(int x0, int x1, int floor)
     G.lamps.push_back({(float)hall.mid, (float)(floor - 6), 120, LAMP_WARM, true});
 }
 
+// A weathered standing stone, painted into the back wall a cell at a time: an uneven slab leaning a little, its edges chipped and its top
+// broken, strata running through it, lit from the upper left, cracked, pitted, lichened and mossed toward the foot, rubble banked round its
+// base. Runes are carved down its face (a dark groove with a lit lip); `accent` shows only faintly in the grooves, so a waystone is something
+// you notice rather than a sign.
+static void paintStandingStone(int sx, int base, int hgt, int halfW, Color accent, float glow, int sd)
+{
+    static const char* GLYPH[6][7] = {{"..#..", "..#..", ".##..", "..###", "..#..", "..#..", "..#.."}, {"#...#", ".#.#.", "..#..", "..#..", ".#.#.", "#...#", "..#.."},
+                                      {"..#..", ".###.", "#.#.#", "..#..", "..#..", ".#.#.", "#...#"}, {"##...", "#.#..", "#..#.", "#.#..", "##...", "#....", "#...."},
+                                      {"..#..", "..##.", "..#.#", "..##.", "..#..", "..#..", "..#.."}, {"#.#.#", "#.#.#", ".###.", "..#..", "..#..", "..#..", "..#.."}};
+    float lean = (hash2(sd, 3, 5) - 0.5f) * 5.0f;
+    std::vector<char> carve((size_t)(halfW * 2 + 9) * (hgt + 2), 0);
+    auto cv = [&](int x, int y) -> char& { return carve[(size_t)(y) * (halfW * 2 + 9) + (x - (sx - halfW - 4))]; };
+    for (int g = 0; g < 3; g++) // three runes, one above another, down the middle of the face
+    {
+        int gy = base - (int)(hgt * 0.30f) - g * 9, gx = sx + (int)std::lround(lean * (hgt * 0.4f + g * 9) / hgt) - 2;
+        int gl = (int)(hash2(sd, g, 11) * 6);
+        for (int j = 0; j < 7; j++)
+            for (int i = 0; i < 5; i++)
+                if (GLYPH[gl][j][i] == '#' && gy - 6 + j >= base - hgt + 3) cv(gx + i, gy - 6 + j - (base - hgt)) = 1;
+    }
+    std::vector<int> crackX(3), crackY0(3);
+    for (int k = 0; k < 3; k++) { crackX[k] = sx + irange(-halfW / 2, halfW / 2); crackY0[k] = base - hgt + irange(0, 6); }
+    for (int y = base - hgt; y < base; y++)
+    {
+        float v = (float)(base - y) / hgt;
+        float cx = sx + lean * v;
+        float hwL = halfW * (1 - 0.2f * v - 0.08f * v * v) + (hash2(y / 2, sd, 13) - 0.5f) * 1.8f;
+        float hwR = halfW * (1 - 0.14f * v - 0.1f * v * v) + (hash2(y / 2, sd, 14) - 0.5f) * 1.8f;
+        if (v > 0.84f) { float t = (v - 0.84f) / 0.16f, k = std::sqrt(std::max(0.0f, 1 - t * t)); hwL *= 0.35f + 0.65f * k; hwR *= 0.15f + 0.85f * k * (1 - 0.45f * t); } // a broken, sloping crown
+        if (v > 0.9f) hwR *= 0.7f;
+        for (int x = (int)std::floor(cx - hwL); x <= (int)std::ceil(cx + hwR); x++)
+        {
+            float u = (x - cx) / (x < cx ? hwL : hwR); // -1 .. 1 across the face
+            if (std::fabs(u) > 1.0f) continue;
+            float band = 0.88f + 0.22f * hash2((int)((y + 3 * hash2(sd, y / 5, 21)) / 4), sd, 17); // strata
+            float lit = 1.12f - 0.4f * (u * 0.5f + 0.5f);                                         // lit from the left
+            float edge = std::fabs(u) > 0.86f ? (u < 0 ? 1.08f : 0.72f) : 1.0f;
+            float pit = hash2(x, y, sd + 31) > 0.92f ? 0.78f : (hash2(x, y, sd + 32) > 0.94f ? 1.1f : 1.0f);
+            float k = band * lit * edge * pit;
+            Color c = shadeC({126, 122, 116, 255}, std::min(1.25f, std::max(0.35f, k)));
+            c.r = (unsigned char)std::min(255.0f, c.r * (1.0f + 0.05f * (band - 0.9f))); c.b = (unsigned char)(c.b * 0.96f); // the warm and cool seams
+            for (int q = 0; q < 3; q++) // cracks: a wandering line from the top, a notch where it meets the edge
+            {
+                int cxk = crackX[q] + (int)std::lround(std::sin((y - crackY0[q]) * 0.7f + q * 2) * 1.6f) + (y - crackY0[q]) / 6 * (q - 1);
+                if (y >= crackY0[q] && y < crackY0[q] + (int)(hgt * (0.35f + 0.18f * q)) && x == cxk) c = shadeC(c, 0.45f);
+            }
+            float moss = hash2(x / 2, y / 2, sd + 41) - 0.6f * v;                    // moss: patches at the foot, little higher up
+            if (moss > 0.62f && v < 0.38f && hash2(x, y, sd + 42) > 0.25f) c = shadeC({78, 94, 60, 255}, 0.6f + 0.5f * lit * hash2(x, y, sd + 43));
+            else if (hash2(x, y / 2, sd + 44) > 0.99f) c = {150, 142, 100, 255};                                                                                   // a fleck of lichen
+            int rel = y - (base - hgt);
+            if (x >= sx - halfW - 4 && x < sx + halfW + 5 && cv(x, rel)) c = {(unsigned char)(c.r * 0.28f + accent.r * glow), (unsigned char)(c.g * 0.28f + accent.g * glow), (unsigned char)(c.b * 0.28f + accent.b * glow), 255}; // carved
+            else if (x > sx - halfW - 4 && x <= sx + halfW + 4 && y > base - hgt && cv(x - 1, rel - 1)) c = shadeC(c, 1.18f);                                                                              // its lit lip
+            bgPut(x, y, c);
+        }
+    }
+    for (int side : {-1, 1}) // rubble banked at the foot, and a few loose stones
+        for (int k = 0; k < 3; k++)
+        {
+            int rx = sx + side * (halfW - 1 + k * 3 + irand(2)), rw = irange(2, 4 - k / 2), rh = irange(2, 4 - k);
+            for (int y = base - rh; y < base; y++)
+                for (int x = rx - rw; x <= rx + rw; x++)
+                {
+                    float uu = (x - rx) / (float)(rw + 0.5f), vv = (base - y) / (float)rh;
+                    if (uu * uu + vv * vv * 0.8f > 1) continue;
+                    bgPut(x, y, shadeC({118, 114, 108, 255}, 0.65f + 0.4f * (1 - (uu * 0.5f + 0.5f)) * hash2(x, y, sd + 51) + 0.2f));
+                }
+        }
+}
+
 // No walls and no gates: the way simply runs on into the next biome, whose rock and back wall bleed into
 // this one's (see compose). At the seam stands a runestone, glowing in the stage's colour, an anvil, and a
 // horn of mead that heals you whole. Walking past it builds the biome after next. Only a guardian's
@@ -2065,16 +2162,9 @@ static void placeHaven(int s, int floor)
     }
     for (int y = d.surface ? 5 : floor - HAVEN_DOOR; y < floor; y++) // the edge's bedrock gives way, to meet the next biome
         for (int x = W - 6; x < W && !wingR; x++) world.at(x, y) = Cell{};
-    int sx = x0 + 110; // the runestone, its carving lit from within
-    for (int y = floor - 26; y < floor; y++)
-        for (int x = sx - 6; x <= sx + 6; x++)
-        {
-            float u = (x - sx) / 6.5f, v = (floor - y) / 26.0f;
-            if (u * u + (v > 0.75f ? (v - 0.75f) * (v - 0.75f) * 14 : 0) > 1) continue;
-            bool rune = std::fabs((x - sx) - std::sin((floor - y) * 0.5f) * 3) < 0.8f || ((floor - y) % 7 == 3 && std::abs(x - sx) < 3);
-            bgPut(x, y, rune ? t.accent : shadeC({120, 118, 112, 255}, 0.7f + 0.3f * hash2(x, y / 2, seed + 3)));
-        }
-    G.lamps.push_back({(float)sx, (float)floor - 14, 64, t.accent});
+    int sx = x0 + 110; // the runestone: a weathered standing stone with the stage's colour only faint in its carving
+    paintStandingStone(sx, floor, 30, 7, t.accent, 0.32f, s);
+    G.lamps.push_back({(float)sx, (float)floor - 14, 40, shadeC(t.accent, 0.75f)});
     G.inter.push_back({IT_ANVIL, (float)x0 + 64, (float)floor});
     G.inter.push_back({IT_TORCH, (float)x0 + 26, (float)floor});
     G.inter.push_back({IT_TORCH, (float)x1 - 30, (float)floor});
@@ -2109,12 +2199,22 @@ static bool plainRock(M m) { return m == M::Stone || m == M::Dirt || m == M::Bas
 // What grows on, drips from and splits the rock of each biome: moss and pale cave mushrooms in the plains
 // and mines, frost and solid icicles below, ash in the forge, bone dust in the crypts; stalactites over
 // big caverns, and cracks running into the walls everywhere.
+// A spike's cell given the light of a form: bright on its left flank, dark on the right, a seam of strata across it, grit, a pale edge.
+static void spikeShade(int x, int y, int dx, int halfW, int k)
+{
+    float u = halfW > 0 ? (float)dx / halfW : 0.0f; // -1 .. 1 across it
+    float lit = 150 - 70 * u + (std::fabs(u) > 0.8f ? (u < 0 ? 30 : -35) : 0);
+    float strata = (k % 4 == 0) ? -26.0f : ((k + dx) % 7 == 0 ? 14.0f : 0.0f);
+    float grit = (hash2(x, y, seed + 90) - 0.5f) * 44;
+    world.at(x, y).shade = (uint8_t)std::max(20.0f, std::min(235.0f, lit + strata + grit));
+}
+
 static void dressCaves(const StageDef& d)
 {
     bool green = d.kind == SK_PLAINS || d.kind == SK_MINES, frost = d.hang == 1, forge = d.hang == 2, crypt = d.kind == SK_CRYPT;
     M spike = frost ? M::Ice : (forge ? M::Obsidian : d.base);
     if (spike == M::Brick || spike == M::Masonry) spike = M::Stone;
-    int lastSpike = -99;
+    int lastSpike = -99, lastMite = -99;
     for (int x = 6; x < W - 6; x++)
         for (int y = 6; y < H - 6; y++)
         {
@@ -2138,19 +2238,40 @@ static void dressCaves(const StageDef& d)
                 }
                 if (frost && chance(3) && flatFloor(x, y)) place(x, y - 1, M::Snow);
                 if (forge && chance(8)) place(x, y - 1, M::Gravel);
-                if (crypt && chance(40)) place(x, y - 1, M::Bone);
+                if (crypt && !structNear[(size_t)y * W + x] && x - lastMite > 3 && chance(7)) // a stalagmite rising from a natural cave's floor
+                {
+                    int up = 0;
+                    while (up < 16 && world.at(x, y - 1 - up).material == M::Empty) up++;
+                    if (up >= 12)
+                    {
+                        int len = irange(4, 12);
+                        for (int k = 0; k < len; k++)
+                            for (int dx = -(len - k) / 3; dx <= (len - k) / 3; dx++)
+                                if (world.at(x + dx, y - 1 - k).material == M::Empty)
+                                {
+                                    place(x + dx, y - 1 - k, spike);
+                                    spikeShade(x + dx, y - 1 - k, dx, (len - k) / 3, k);
+                                }
+                        lastMite = x;
+                    }
+                }
                 if (!frost && chance(25)) place(x, y - 1, M::Gravel); // loose pebbles
             }
             if (openDown) // a ceiling
             {
                 int clear = 0;
                 while (clear < 40 && world.at(x, y + 1 + clear).material == M::Empty) clear++;
-                if (clear >= 40 && x - lastSpike > 6 && chance(18)) // a stalactite over open space
+                bool nat = crypt && !structNear[(size_t)y * W + x]; // a natural cave in the crypts: far more of them, and longer
+                if (nat ? (clear >= 14 && x - lastSpike > 3 && chance(4)) : (clear >= 40 && x - lastSpike > 6 && chance(18))) // a stalactite over open space
                 {
-                    int len = irange(4, 9);
+                    int len = nat ? irange(6, 17) : irange(4, 9);
                     for (int k = 0; k < len; k++)
                         for (int dx = -(len - k) / 3; dx <= (len - k) / 3; dx++)
-                            if (world.at(x + dx, y + 1 + k).material == M::Empty) place(x + dx, y + 1 + k, spike);
+                            if (world.at(x + dx, y + 1 + k).material == M::Empty)
+                            {
+                                place(x + dx, y + 1 + k, spike);
+                                spikeShade(x + dx, y + 1 + k, dx, (len - k) / 3, k);
+                            }
                     lastSpike = x;
                 }
                 else if (green && chance(5)) // moss dripping from the roof
@@ -2251,7 +2372,7 @@ static void shadeBackWall(bool surface)
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
         {
-            if (world.skyOf(x, y) || world.at(x, y).material != M::Empty || (surface && y < surf[x] + 6)) continue;
+            if (world.skyOf(x, y) == 1 || world.at(x, y).material != M::Empty || (surface && y < surf[x] + 6)) continue;
             Color c = world.bgOf(x, y);
             float strata = std::sin(y * 0.11f + fbm(x * 0.008f, y * 0.01f, seed + 70, 2) * 9);
             float crack = fbm(x * 0.01f, y * 0.01f, seed + 72, 2) > 0.6f ? std::fabs(fbm(x * 0.03f, y * 0.03f, seed + 71, 3) - 0.5f) : 1.0f; // only in patches
@@ -2494,6 +2615,7 @@ static bool deepLayout = false; // the biome being built is one of these
 static const int DEEP_LEVELS = 5; // odd: the levels alternate direction and the last must end at the haven, bottom right
 static int deepFloor[DEEP_LEVELS];               // each level's nominal floor row
 static std::vector<int> levelFloor[DEEP_LEVELS]; // each level's actual floor per column (-1 where it doesn't run)
+static std::vector<int> levelHgt[DEEP_LEVELS];   // ...and the height of the room over it
 struct Shaft { int x, top, bottom; };            // mines: plank-capped, with a rope down
 static std::vector<Shaft> shafts;
 struct SideRoom { int x0, x1, floor; };
@@ -2508,7 +2630,7 @@ static std::vector<PitCap> pitCaps;
 static void airRect(int x0, int y0, int x1, int y1) // inclusive, kept off the bedrock rim
 {
     for (int y = std::max(5, y0); y <= std::min(H - 6, y1); y++)
-        for (int x = std::max(5, x0); x <= std::min(W - 6, x1); x++) air[(size_t)y * W + x] = 1;
+        for (int x = std::max(5, x0); x <= std::min(W - 6, x1); x++) { air[(size_t)y * W + x] = 1; if (markStruct) structAir[(size_t)y * W + x] = 1; }
 }
 
 static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
@@ -2528,12 +2650,29 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
         return 1 - std::fabs(2 * fbm((x + wx) * 0.006f, (y + wy) * 0.008f, seed + 210, 3) - 1);
     });
     NoiseGrid cavern(W, H, 4, [&](float x, float y) { return fbm(x * 0.0055f, y * 0.009f, seed, 4); });
-    float tt = crypt ? 0.984f : (mines ? 0.945f : 0.923f), ct = crypt ? 0.75f : (mines ? 0.63f : 0.60f); // (tube width ~ 1 - tt)
+    float tt = crypt ? 0.978f : (mines ? 0.945f : 0.923f), ct = crypt ? 0.70f : (mines ? 0.63f : 0.60f); // (tube width ~ 1 - tt)
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
             air[(size_t)y * W + x] = (tube.at(x, y) > tt || cavern.at(x, y) > ct) &&
                                      !(x < wingL && y < 320) && !(x >= W - wingR && y >= H - 290); // under the last biome's floor / over the next's roof: its own rock
 
+    if (crypt) // the natural caves are ragged: chunks of rock bite into the passages and the walls grow outcrops (the built parts are cut in cleanly after)
+        for (int pass = 0; pass < 3; pass++)
+        {
+            std::vector<uint8_t> a2(air);
+            for (int y = 2; y < H - 2; y++)
+                for (int x = 2; x < W - 2; x++)
+                {
+                    size_t i = (size_t)y * W + x;
+                    int nb = air[i - 1] + air[i + 1] + air[i - W] + air[i + W];
+                    float r = 0.5f * hash2(x / 3, y / 3, seed + 300 + pass) + 0.5f * hash2(x, y, seed + 310 + pass);
+                    if (!air[i] && nb > 0 && r > 0.6f) a2[i] = 1;
+                    else if (air[i] && nb < 4 && r > 0.66f) a2[i] = 0;
+                }
+            air.swap(a2);
+        }
+    structAir.assign((size_t)W * H, 0);
+    markStruct = crypt;
     const int xL = 120, xR = W - 300, N = DEEP_LEVELS; // room at both ends for a side room; the haven takes the last level's right end
     for (int i = 0; i < N; i++)
     {
@@ -2557,7 +2696,7 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
                 int len = hall ? irange(70, 110) : irange(90, 150);
                 int b = dir > 0 ? std::min(a + len, xe) : std::max(a - len, xe);
                 int cur = free && std::abs(xe - b) >= zoneEnd ? std::max(-45, std::min(45, prev + irange(-32, 32))) : 0;
-                int step = cur - prev, h = hall ? (crypt ? 62 : 52) : (crypt ? 36 : 38);
+                int step = cur - prev, h = hall ? (crypt ? 88 : 52) : (crypt ? 56 : 38); // (the crypts' vaults stand tall)
                 for (int x = a; x != b + dir; x += dir) // a ramp up or down at 45 degrees over the start of the room, then flat
                 {
                     int k = std::min(std::abs(x - a), std::abs(step));
@@ -2601,6 +2740,7 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
             }
             path.push_back({(float)x, cy});
         }
+        levelHgt[i] = hgt;
         if (crypt) corridors.push_back({std::min(xs, xe), std::max(xs, xe), fy, i});
         for (int x = 0; x < W; x++) // a guaranteed floor under the level, bridging any cavern it crosses
         {
@@ -2611,7 +2751,8 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
         }
         for (int px = xs + dir * irange(190, 260); structured && (dir > 0 ? px < xe : px > xe) && std::abs(xe - px) > zoneEnd + 60 && std::abs(px - xs) > 150; px += dir * irange(200, 300))
         {
-            if (hgt[px] > 40 || off[px - 26] != off[px + 26] || hgt[px - 26] > 40 || hgt[px + 26] > 40 || off[px] != off[px - 26]) continue; // flat passage only
+            const int lim = crypt ? 60 : 40;
+            if (hgt[px] > lim || off[px - 26] != off[px + 26] || hgt[px - 26] > lim || hgt[px + 26] > lim || off[px] != off[px - 26]) continue; // flat passage only
             int f = levelFloor[i][px]; // a plank floor over a low chamber (22 high, so you can jump back up through it)
             if (f < 0) continue;
             airRect(px - 24, f + 2, px + 24, f + 23);
@@ -2672,6 +2813,210 @@ static void deepLevels(const StageDef& d, int& arenaX, int& arenaFloor)
         arenaFloor = pathFloor[arenaX];
         airRect(arenaX - 150, arenaFloor - 136, arenaX + 150, arenaFloor - 1);
     }
+    markStruct = false;
+}
+
+// A candle bracket on the wall (IT_TORCH style 2): three candles in an iron dish.
+static void candleBracket(int x, int y)
+{
+    Interact t{IT_TORCH, (float)x, (float)y};
+    t.style = 2;
+    G.inter.push_back(t);
+}
+
+// Aged bone, ivory shading to a brown shadow (lit from the upper left).
+static Color boneTone(int t)
+{
+    static const Color R5[5] = {{58, 54, 52, 255}, {104, 98, 90, 255}, {146, 140, 126, 255}, {182, 176, 158, 255}, {212, 206, 188, 255}};
+    return R5[std::max(0, std::min(4, t))];
+}
+
+// A skull let into the wall, 7 x 8 cells: a domed cranium, deep eye sockets, a nose hole, teeth and a jaw, shaded round.
+static void paintSkull(int cx, int cy)
+{
+    static const char* S[8] = {"..###..", ".#####.", "#######", "#oo#oo#", "#oo#oo#", ".##n##.", ".#t#t#.", "..###.."};
+    for (int j = 0; j < 8; j++)
+        for (int i = 0; i < 7; i++)
+        {
+            char c = S[j][i];
+            if (c == '.') continue;
+            int x = cx - 3 + i, y = cy - 4 + j, t = 3 - (i > 3) - (i > 4) + (i < 2) + (j == 0) - (j >= 6);
+            if (c == 'o') world.bgAt(x, y) = {16, 12, 12, 255};
+            else if (c == 'n') world.bgAt(x, y) = {34, 26, 22, 255};
+            else if (c == 't') world.bgAt(x, y) = boneTone(j == 6 && i % 2 ? 3 : 1);
+            else world.bgAt(x, y) = boneTone(t);
+        }
+}
+
+// Bones lying where the wall meets the floor, painted into the back wall so they sit behind everything: heaps that bank up toward a pillar or
+// a corner, with thigh bones, ribs and a skull or two lying in them, and loose bones strewn along the foot of the wall.
+static void paintBonePile(int cx, int fy, int w, int hmax)
+{
+    for (int dx = -w / 2; dx <= w / 2; dx++)
+    {
+        float k = 1.0f - std::fabs((float)dx) / (w / 2 + 1);
+        int hh = (int)std::lround(std::pow(k, 0.8f) * hmax * (0.65f + 0.5f * hash2(cx + dx, 5, seed + 120)));
+        for (int j = 1; j <= hh; j++)
+        {
+            int x = cx + dx, y = fy - j;
+            if (!world.in(x, y) || world.at(x, y).material != M::Empty) continue;
+            float r = hash2(x, y, seed + 121);
+            int t = 2 + (r > 0.6f) - (r < 0.25f) + (j == hh) - (j < 2);
+            if (r < 0.14f) world.bgAt(x, y) = {24, 20, 20, 255};          // dark gaps between them
+            else world.bgAt(x, y) = boneTone(t);
+        }
+    }
+    for (int k = 0; k < 2 + w / 10; k++) // thigh bones and ribs lying across the heap
+    {
+        int bx = cx - w / 2 + (int)(hash2(cx, k, seed + 122) * (w - 8)), by = fy - 2 - (int)(hash2(cx, k + 7, seed + 123) * hmax * 0.6f), len = 7 + (int)(hash2(cx, k + 3, seed + 124) * 5);
+        for (int i = 0; i < len; i++)
+        {
+            int x = bx + i, y = by + (k % 2 ? i / 4 : -i / 5);
+            if (world.in(x, y) && world.at(x, y).material == M::Empty) { world.bgAt(x, y) = boneTone(3 + (i % 5 == 0)); if (world.at(x, y + 1).material == M::Empty) world.bgAt(x, y + 1) = boneTone(1); }
+        }
+        if (world.at(bx, by).material == M::Empty) world.bgAt(bx, by - 1) = boneTone(4);
+        if (world.at(bx + len - 1, by).material == M::Empty) world.bgAt(bx + len - 1, by - 1) = boneTone(4);
+    }
+    if (hash2(cx, 9, seed + 125) > 0.45f) paintSkull(cx + (int)(hash2(cx, 11, seed + 126) * 5) - 2, fy - hmax - 1 + (int)(hash2(cx, 12, seed + 127) * 3));
+}
+
+// A burial niche let into the wall: a dark recess, a lintel, and sometimes a skull looking out.
+static void paintNiche(int x, int ny, int w, int h, const StageDef& d)
+{
+    for (int y = ny; y < ny + h; y++)
+        for (int xx = x; xx < x + w; xx++)
+            if (world.in(xx, y) && world.at(xx, y).material == M::Empty) world.bgAt(xx, y) = shadeC(d.bgA, y < ny + 2 ? 0.36f : 0.5f - 0.05f * (xx - x < 2));
+    for (int xx = x - 1; xx <= x + w; xx++)
+        if (world.in(xx, ny - 1) && world.at(xx, ny - 1).material == M::Empty) world.bgAt(xx, ny - 1) = shadeC(d.bgB, 1.35f);       // the lintel
+    for (int xx = x - 1; xx <= x + w; xx++)
+        if (world.in(xx, ny + h) && world.at(xx, ny + h).material == M::Empty) world.bgAt(xx, ny + h) = shadeC(d.bgB, 1.1f);        // the sill
+}
+
+// The crypt's corridors as a vaulted arcade seen along its length: pillars every 30 units with capitals and plinths, round arches springing
+// between them over a deep dark recess, statues in some of the bays, wall torches and candle brackets on the pillars, burial niches in the rest.
+static void paintCryptArcade(const Corridor& c, const StageDef& d)
+{
+    const int B = 30;
+    Color stone = {112, 108, 116, 255}; // cool dressed stone, paler than the walls so the architecture reads
+    auto put = [&](int x, int y, Color col) { if (world.in(x, y) && world.at(x, y).material == M::Empty) world.bgAt(x, y) = col; };
+    int bayNo = 0;
+    auto archBay = [&](int k) { return hash2(k / 2, c.lvl, seed + 80) < 0.28f; }; // arches come in short runs, with plain tiled wall between
+    for (int px = c.x0 + 14; px + B < c.x1 - 8; px += B, bayNo++)
+    {
+        int fa = levelFloor[c.lvl][px], fb = levelFloor[c.lvl][px + B], fm = (fa + fb) / 2, hm = levelHgt[c.lvl][px + B / 2];
+        if (fa <= 0 || fb <= 0 || hm < 40 || std::abs(fa - fb) > 24) continue;
+        int cx = px + B / 2, sy = fm - (int)(hm * 0.58f), r = B / 2 - 3;
+        for (int y = fm - hm; y < fm && archBay(bayNo); y++) // the bay: an arched recess over the dado
+            for (int x = px + 3; x < px + B - 2; x++)
+            {
+                if (!world.in(x, y) || world.at(x, y).material != M::Empty) continue;
+                float dx = (float)(x - cx), dy = (float)(y - sy), dd = std::sqrt(dx * dx + dy * dy);
+                if (y > sy) continue; // below the spring line: the tiled wall, as painted
+                if (dd <= r - 4) // the recess: small dark bricks, deep and in shadow
+                {
+                    bool mortar = (y % 4 == 0) || ((x + (y / 4) % 2 * 3) % 7 == 0);
+                    put(x, y, shadeC({58, 54, 62, 255}, (mortar ? 0.55f : 0.8f + 0.25f * (dd / (r - 4))) * (0.9f + 0.2f * hash2(x, y, seed + 72))));
+                }
+                else if (dd <= r + 1) // the arch: dressed voussoirs with joints, a keystone at the crown
+                {
+                    float ang = std::atan2(dy, dx);
+                    bool joint = (int)std::floor(ang * r * 0.55f) % 4 == 0, key = std::fabs(ang + 1.5708f) < 0.14f;
+                    put(x, y, joint ? shadeC(stone, 0.45f) : shadeC(stone, (key ? 1.45f : 1.25f) * (0.88f + 0.16f * hash2(x, y, seed + 70))));
+                }
+                else if (dd <= r + 6) bgStyle(x, y, shadeC(d.bgB, 0.72f), WALL_TILE); // the spandrels, in shadow
+            }
+        // statues stand in the bays' recesses; the others get burial niches
+        int stCount = 0;
+        bool flat = fa == fb && world.at(cx, fm - 6).material == M::Empty;
+        if (flat && (hm >= 80 ? chance(2) : chance(3)))
+        {
+            int sz = std::max(26, std::min(42, (int)(hm * 0.55f)));
+            addDecor(DK_STATUE, (float)cx, (float)fm, irand(64), sz, chance(2));
+            stCount = 1;
+        }
+        else if (flat) // (no bones set into the wall: those are strewn along its foot, below)
+        {
+            int rows = hm >= 80 ? 3 : 1;
+            for (int k = 0; k < rows; k++) paintNiche(cx - 7, fm - 14 - k * 14, 14, 8, d);
+        }
+        if (flat && chance(7)) paintSkeleton(px + irange(6, B - 6), fm, chance(2) ? 1 : -1);          // someone who never left
+        if (fa == fb) // bones along the foot of the wall: a heap, now and then two, and the odd loose bone
+        {
+            if (chance(2)) paintBonePile(px + irange(5, B - 5), fm, irange(10, 18), irange(3, 6));
+            if (chance(4)) paintBonePile(px + irange(5, B - 5), fm, irange(7, 11), irange(2, 4));
+            for (int k = irange(0, 3); k > 0; k--) // a loose thigh bone or two on the floor line
+            {
+                int bx = px + irange(3, B - 12), len = irange(6, 10);
+                for (int i = 0; i < len; i++) if (world.at(bx + i, fm - 1).material == M::Empty) { world.bgAt(bx + i, fm - 1) = boneTone(3 + (i % 4 == 0)); if (world.at(bx + i, fm - 2).material == M::Empty && i % 5 == 0) world.bgAt(bx + i, fm - 2) = boneTone(2); }
+            }
+        }
+        if (hm >= 40 && chance(5)) addDecor(DK_COBWEB, (float)(chance(2) ? px + 3 : px + B - 3), (float)(fm - hm + 1), irand(64), irange(9, 16), chance(2));
+        if (hm >= 40 && chance(6)) addDecor(DK_CHAIN, (float)(px + irange(8, B - 8)), (float)(fm - hm), 1 + 4 * irand(10), irange(14, std::max(15, hm / 2))); // a hanging manacle
+        (void)stCount;
+    }
+    for (int px = c.x0 + 14, k = 0; px < c.x1 - 8; px += B, k++) // the pillars
+    {
+        int fl = levelFloor[c.lvl][px], hm = levelHgt[c.lvl][px];
+        if (fl <= 0 || hm < 40) continue;
+        if (!archBay(k) && !archBay(k - 1)) { if (k % 2 == 0) wallTorch(px, fl - std::min(36, hm / 2 + 4)); else candleBracket(px, fl - 22); continue; } // no arch either side: just the light on the plain wall
+        int sy = fl - (int)(hm * 0.58f);
+        static const float K[5] = {1.25f, 1.1f, 0.98f, 0.82f, 0.66f};
+        for (int y = fl - hm; y < fl; y++)
+            for (int dx = -2; dx <= 2; dx++)
+            {
+                float flute = ((y / 3) % 7 == 3) ? 0.9f : 1.0f;
+                put(px + dx, y, shadeC(stone, K[dx + 2] * flute * (0.93f + 0.1f * hash2(px + dx, y, seed + 71))));
+            }
+        for (int y = sy - 4; y <= sy + 2; y++) // the capital: a flared block over the shaft
+        {
+            int w = y < sy - 1 ? 4 : (y <= sy ? 3 : 2) + (y == sy - 4 ? 0 : 1);
+            for (int dx = -w; dx <= w; dx++) put(px + dx, y, shadeC(stone, (dx < -1 ? 1.28f : dx > 1 ? 0.7f : 1.02f) * (y == sy - 4 ? 1.15f : 1.0f)));
+        }
+        for (int y = fl - 6; y < fl; y++) // and the plinth
+        {
+            int w = y < fl - 3 ? 3 : 4;
+            for (int dx = -w; dx <= w; dx++) put(px + dx, y, shadeC(stone, (dx < -1 ? 1.25f : dx > 1 ? 0.68f : 0.98f) * (y == fl - 6 ? 1.2f : 1.0f)));
+        }
+        if (chance(3)) paintBonePile(px + irange(-8, 8), fl, irange(9, 14), irange(2, 4)); // drifted against the plinth
+        if (k % 2 == 0) wallTorch(px, fl - std::min(36, hm / 2 + 4)); // a torch on every second pillar, candles on the rest
+        else candleBracket(px, fl - 22);
+    }
+}
+
+// A burial hall: sarcophagi laid in a row (solid, climbable, breakable) between statues, candles at their heads; sometimes an altar with skulls
+// and bones instead, in the middle of the floor.
+static void burialHall(const DeepHall& h, const StageDef& d)
+{
+    int w = h.x1 - h.x0;
+    if (getenv("CRYPTDBG")) printf("burial hall x %d..%d floor %d (w %d)\n", h.x0, h.x1, h.floor, w);
+    if (w < 80) return;
+    int span = 24, n = w >= 104 ? 3 : 2, gap = (w - 90 - n * span) / std::max(1, n - 1);
+    bool altar = chance(3);
+    int x = h.x0 + 46;
+    if (altar)
+    {
+        int mid = (h.x0 + h.x1) / 2;
+        for (int y = h.floor - 8; y < h.floor; y++)
+            for (int xx = mid - 9; xx <= mid + 9; xx++)
+            {
+                M m = (y == h.floor - 8 || xx == mid - 9 || xx == mid + 9) ? M::Masonry : M::Masonry;
+                place(xx, y, m);
+                world.at(xx, y).shade = (uint8_t)(y < h.floor - 6 ? 220 : 120 + irand(50));
+            }
+        for (int k = 0; k < 3; k++) paintCircle(mid - 14 + k * 14, h.floor - 3, 2, M::Bone, true);
+        candleBracket(mid - 6, h.floor - 12); candleBracket(mid + 6, h.floor - 12);
+        for (int sd : {-1, 1}) addDecor(DK_STATUE, (float)(mid + sd * 26), (float)h.floor, irand(64), 38, sd > 0);
+        return;
+    }
+    for (int k = 0; k < n; k++, x += span + gap)
+    {
+        sarcophagus(x, h.floor);
+        candleBracket(x + 3, h.floor - 22);
+        if (k + 1 < n) addDecor(DK_STATUE, (float)(x + span + gap / 2), (float)h.floor, irand(64), 36, chance(2));
+    }
+    addDecor(DK_STATUE, (float)(h.x0 + 22), (float)h.floor, irand(64), 38, false);
+    addDecor(DK_STATUE, (float)(h.x1 - 22), (float)h.floor, irand(64), 38, true);
+    (void)d;
 }
 
 // After the rock is laid: planks and ropes over the shafts, the crypts' tiled walls, furnished side rooms.
@@ -2702,32 +3047,19 @@ static void deepFinish(const StageDef& d)
             for (int x = rx; x < rx + 18; x++) { place(x, h.floor - 24, M::Platform); place(x, h.floor - 23, M::Platform); }
         }
     }
-    for (auto& c : corridors) // dressed stone, with burial niches let into the wall
+    if (crypt) // dressed stone fills every built room right up to its ceiling and out to its ends, its tone drifting smoothly (no blocks of a different shade)
+        for (int y = 5; y < H - 5; y++)
+            for (int x = 5; x < W - 5; x++)
+            {
+                if (!structAir[(size_t)y * W + x] || world.at(x, y).material != M::Empty) continue;
+                float n = fbm(x * 0.022f, y * 0.034f, seed + 5, 2), n2 = fbm(x * 0.07f, y * 0.1f, seed + 6, 2);
+                bgStyle(x, y, shadeC(d.bgB, 0.82f * (0.92f + 0.5f * n) * (0.94f + 0.12f * n2)), WALL_TILE);
+            }
+    for (auto& c : corridors) // arches, pillars, statues and niches along each
     {
-        Color st = shadeC(d.bgB, 0.8f);
-        for (int x = c.x0; x <= c.x1; x++) // the floors step up and down, so follow each column's own
-        {
-            int fl = levelFloor[c.lvl][x] > 0 ? levelFloor[c.lvl][x] : c.floor;
-            for (int y = fl - 76; y < fl + 26; y++)
-            {
-                if (!world.in(x, y) || world.at(x, y).material != M::Empty) continue;
-                bgStyle(x, y, shadeC(st, 1.15f + 0.2f * hash2(x / 24, (c.floor - y) / 14, seed + 5)), WALL_TILE);
-            }
-        }
-        for (int x = c.x0 + 10; x + 14 < c.x1; x += 26)
-        {
-            int ny = (levelFloor[c.lvl][x] > 0 ? levelFloor[c.lvl][x] : c.floor) - 20;
-            if (levelFloor[c.lvl][x + 13] != levelFloor[c.lvl][x] || world.at(x, ny).material != M::Empty || world.at(x + 13, ny + 8).material != M::Empty) continue;
-            for (int y = ny; y < ny + 9; y++)
-                for (int xx = x; xx < x + 14; xx++) world.bgAt(xx, y) = shadeC(d.bgA, 0.35f);
-            if (chance(2)) // a skull looking out
-            {
-                for (int k = 0; k < 3; k++)
-                    for (int j = 0; j < 3; j++) world.bgAt(x + 6 + k, ny + 5 + j) = {200, 194, 172, 255};
-                world.bgAt(x + 6, ny + 6) = world.bgAt(x + 8, ny + 6) = shadeC(d.bgA, 0.3f);
-            }
-        }
+        paintCryptArcade(c, d);
     }
+    if (crypt) for (auto& h : deepHalls) burialHall(h, d);
     for (auto& r : sideRooms)
     {
         int mid = (r.x0 + r.x1) / 2;
@@ -2907,9 +3239,9 @@ static void buildStage(int s, int entryFloor)
     for (int x = 4; x < 120 && D; x++) // the sea, lapping the beach
         for (int y = 300; y < surf[x]; y++)
             if (world.at(x, y).material == M::Empty) place(x, y, M::Water);
-    if (d.kind == SK_CRYPT) // crypts and citadel: every cave is lined with masonry
+    if (d.kind == SK_CRYPT) // crypts and citadel: the built corridors, halls and stairs are lined with masonry (the natural caves stay raw rock)
     {
-        std::vector<uint8_t> near(air);
+        std::vector<uint8_t> near(structAir);
         for (int pass = 0; pass < 3; pass++)
         {
             std::vector<uint8_t> nx(near);
@@ -2928,7 +3260,56 @@ static void buildStage(int s, int entryFloor)
         for (int y = arenaFloor; y < arenaFloor + 5; y++)
             for (int x = arenaX - 155; x <= arenaX + 155; x++) place(x, y, M::Metal);
     buildBackground(d, d.surface); // decorations below paint over it
+    if (d.kind == SK_CRYPT) // the built parts' neighbourhood, for dressing the natural caves differently
+    {
+        structNear = structAir;
+        for (int pass = 0; pass < 6; pass++)
+        {
+            std::vector<uint8_t> nx(structNear);
+            for (int y = 1; y < H - 1; y++)
+                for (int x = 1; x < W - 1; x++)
+                    if (!structNear[(size_t)y * W + x] && (structNear[(size_t)y * W + x - 1] || structNear[(size_t)y * W + x + 1] || structNear[(size_t)(y - 1) * W + x] || structNear[(size_t)(y + 1) * W + x])) nx[(size_t)y * W + x] = 1;
+            structNear.swap(nx);
+        }
+    }
     if (deepLayout) deepFinish(d);
+    if (d.kind == SK_CRYPT) // inside a big natural cavern the back wall opens on the dark of a bigger one beyond: the parallax backdrop (sky flag 2..9 = how much of it shows)
+    {
+        // The rock hugs its edges: a cave's wall is plain stone for its first few cells, then the glimpses of cavern fade in toward the middle of
+        // the open space; narrow tunnels never get it, and nothing within 22 cells of the built crypt does (it fades in over the next 22), so that is never seen floating in a cave.
+        auto chamfer = [&](std::vector<uint8_t>& dist) { // city-block distance from the cells set to 0, capped at 60
+            for (int y = 1; y < H; y++)
+                for (int x = 1; x < W; x++)
+                {
+                    size_t i = (size_t)y * W + x;
+                    dist[i] = (uint8_t)std::min<int>(dist[i], std::min(dist[i - 1], dist[i - W]) + 1);
+                }
+            for (int y = H - 2; y >= 0; y--)
+                for (int x = W - 2; x >= 0; x--)
+                {
+                    size_t i = (size_t)y * W + x;
+                    dist[i] = (uint8_t)std::min<int>(dist[i], std::min(dist[i + 1], dist[i + W]) + 1);
+                }
+            for (auto& v : dist) v = std::min<uint8_t>(v, 60);
+        };
+        std::vector<uint8_t> dRock((size_t)W * H, 60), dStruct((size_t)W * H, 60);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+            {
+                if (world.at(x, y).material != M::Empty) dRock[(size_t)y * W + x] = 0;
+                if (structAir[(size_t)y * W + x]) dStruct[(size_t)y * W + x] = 0;
+            }
+        chamfer(dRock);
+        chamfer(dStruct);
+        for (int y = 5; y < H - 5; y++)
+            for (int x = 5; x < W - 5; x++)
+            {
+                size_t i = (size_t)y * W + x;
+                if (dStruct[i] < 22 || dRock[i] < 6 || world.at(x, y).material != M::Empty || world.bgOf(x, y).a != 255) continue;
+                float b = std::min(clampf((dRock[i] - 6) / 12.0f, 0, 1), clampf((dStruct[i] - 22) / 22.0f, 0, 1));   // away from the rock, and away from the crypt
+                world.skyAt(x, y) = (uint8_t)(2 + (int)std::lround(b * 7));
+            }
+    }
     if (plains) // the road to Dunmoor: farmsteads, watchtowers and palisades, then the moat and gatehouse
     {
         enum { B_HOUSE, B_TOWER, B_PALISADE, B_MINE, B_SMITH, B_APOTH, B_ARMORY };
@@ -3234,7 +3615,7 @@ static void upscaleWorld(int k, bool fineBack = false)
     {
         std::vector<Color> back((size_t)c.w * c.h), fine;
         for (int y = 0; y < c.h; y++)
-            for (int x = 0; x < c.w; x++) back[(size_t)y * c.w + x] = c.skyOf(x, y) ? Color{0, 0, 0, 0} : c.bgOf(x, y); // the sky isn't part of it
+            for (int x = 0; x < c.w; x++) back[(size_t)y * c.w + x] = c.skyOf(x, y) == 1 ? Color{0, 0, 0, 0} : c.bgOf(x, y); // the sky isn't part of it
         detail2x(back.data(), c.w, c.h, fine);
         for (int y = 0; y < c.h * k; y++)
             for (int x = 0; x < c.w * k; x++)
@@ -3390,7 +3771,7 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
         if (sx >= kx0 && sx < kx1) top = ky0 + (int)ly;
         int qx = x - (int)nx;
         if (next && qx >= 0 && qx < next->w.w) top = (int)ny;
-        if (top <= 0 || !world.skyOf(x, top)) continue;
+        if (top <= 0 || world.skyOf(x, top) != 1) continue;
         Color topBg = world.bgOf(x, top);
         for (int y = 0; y < top; y++)
         {
@@ -3428,7 +3809,7 @@ static Vector2 compose(Piece& live, Rectangle keep, Piece* next, int attachX, in
                 if (!fa && !fb) continue;
                 Cell a = world.get(x, y), b = world.get(xm, y);
                 Color ba = world.bgOf(x, y), bb = world.bgOf(xm, y);
-                bool rock = plainRock(a.material) && plainRock(b.material), back = !world.skyOf(x, y) && !world.skyOf(xm, y);
+                bool rock = plainRock(a.material) && plainRock(b.material), back = world.skyOf(x, y) != 1 && world.skyOf(xm, y) != 1;
                 if (fa) { if (rock) world.at(x, y) = b; if (back) world.bgAt(x, y) = bb; }
                 if (fb) { if (rock) world.at(xm, y) = a; if (back) world.bgAt(xm, y) = ba; }
             }
@@ -4440,16 +4821,7 @@ void generateVillage()
             for (int y = base - 11; y < base - 8; y++) for (int x = gx - 1; x <= gx + 1; x++) bgPut(x, y, {92, 64, 40, 255});
         }
         else // a runestone, a serpent carved round its face
-        {
-            for (int y = base - 18; y < base; y++)
-                for (int x = gx - 5; x <= gx + 5; x++)
-                {
-                    float u = (x - gx) / 5.5f, v = (base - y) / 18.0f;
-                    if (u * u + (v > 0.7f ? (v - 0.7f) * (v - 0.7f) * 11 : 0) > 1) continue; // a rounded top
-                    bool band = std::fabs((x - gx) - std::sin((base - y) * 0.45f) * 3) < 1.0f;
-                    bgPut(x, y, band ? Color{170, 46, 40, 255} : shadeC({128, 126, 120, 255}, 0.7f + 0.3f * hash2(x, y / 2, seed + 3)));
-                }
-        }
+            paintStandingStone(gx, base, 22, 5, {170, 46, 40, 255}, 0.22f, gx);
         halls.push_back({gx - 12, gx + 12}); // no tree on top of it
     }
     {

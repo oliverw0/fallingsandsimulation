@@ -5,6 +5,7 @@
 #include "game.h"
 #include "util.h"
 #include "sounds.h"
+#include "sounds_fs.h" // freesound.org recordings (CC0): chest, armour clank, splash, swimming
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -225,17 +226,12 @@ static void build()
             return softclip(thump * 1.2f + squelch + click * 0.6f);
         });
     });
-    // armour clang: modal synthesis of a struck plate (inharmonic partials, faster decay up high)
+    // armour clang: three recorded steel-on-steel strikes (freesound, CC0): a blade on plate, a bright clank, a heavy impact
     add(SFX_CLANG, 2, 3, [](int v) {
-        Rng n(30 + v); Biquad ck;
-        ck.set(HP, 2500, 0.7f);
-        float f0 = 560 + v * 70;
-        const float ratio[5] = {1.0f, 2.76f, 5.40f, 8.93f, 13.34f}, dec[5] = {0.45f, 0.28f, 0.16f, 0.09f, 0.05f};
-        return render(0.7f, 0.25f, 0.55f, 0.6f, [=](float t) mutable {
-            float s = 0;
-            for (int i = 0; i < 5; i++) s += std::sin(TAU * f0 * ratio[i] * t * (1 + 0.002f * std::sin(TAU * 5 * t))) * std::exp(-t / dec[i]) / (1 + i * 0.6f);
-            return s * env(t, 0.0008f, 1) + ck(n()) * env(t, 0.0005f, 0.006f) * 0.8f;
-        });
+        static const Wave hits[3] = {{CLANK1_FRAME_COUNT, CLANK1_SAMPLE_RATE, CLANK1_SAMPLE_SIZE, CLANK1_CHANNELS, CLANK1_DATA},
+                                     {CLANK2_FRAME_COUNT, CLANK2_SAMPLE_RATE, CLANK2_SAMPLE_SIZE, CLANK2_CHANNELS, CLANK2_DATA},
+                                     {CLANK3_FRAME_COUNT, CLANK3_SAMPLE_RATE, CLANK3_SAMPLE_SIZE, CLANK3_CHANNELS, CLANK3_DATA}};
+        return LoadSoundFromWave(hits[v]);
     });
     // frying pan: a light whoosh as it's swung, and a bright metal clang when it lands (all recorded)
     add(SFX_WHOOSH, 2, 1, [](int) {
@@ -382,20 +378,11 @@ static void build()
             return hp(n()) * clicks * 2 + std::sin(TAU * (3200 + v * 300) * t) * env(t, 0.001f, 0.03f) * 0.3f;
         });
     });
-    // chest: stick-slip wood creak then a clunk
-    add(SFX_CHEST, 10, 1, [](int) {
-        Rng n(160); Biquad bp, lp;
-        bp.set(BP, 420, 4);
-        lp.set(LP, 250, 0.8f);
-        float ph = 0;
-        return render(0.7f, 0.15f, 0.4f, 0.6f, [=](float t) mutable {
-            float rate = 40 + 60 * std::sin(TAU * 1.3f * t) * std::sin(TAU * 1.3f * t);
-            ph += rate / SR;
-            float pulse = std::fmod(ph, 1.0f) < 0.05f ? 1.0f : 0.0f;
-            float creak = bp(pulse + n() * 0.05f) * 4 * (t < 0.5f ? 1 : env(t - 0.5f, 0.001f, 0.05f));
-            float clunk = t > 0.5f ? (lp(n()) * 3 + std::sin(TAU * 110 * t)) * env(t - 0.5f, 0.001f, 0.06f) : 0;
-            return creak + clunk;
-        });
+    // chest: two recorded wooden chests opening (freesound, CC0): a lid creaking up, and one with latches
+    add(SFX_CHEST, 10, 2, [](int v) {
+        static const Wave lids[2] = {{CHEST1_FRAME_COUNT, CHEST1_SAMPLE_RATE, CHEST1_SAMPLE_SIZE, CHEST1_CHANNELS, CHEST1_DATA},
+                                     {CHEST2_FRAME_COUNT, CHEST2_SAMPLE_RATE, CHEST2_SAMPLE_SIZE, CHEST2_CHANNELS, CHEST2_DATA}};
+        return LoadSoundFromWave(lids[v]);
     });
     // portal: swelling chorus with a rushing wind
     add(SFX_PORTAL, 30, 1, [](int) {
@@ -451,19 +438,23 @@ static void build()
             return bp(std::sin(TAU * (180 + 1200 * g) * t)) * env(g, 0.01f, 0.04f) * 3;
         });
     });
-    // splash: falling band of noise with droplet chirps
+    // splash (recorded, freesound CC0): a big plunge and a sharper slap; and the strokes of a swimmer
     add(SFX_SPLASH, 8, 2, [](int v) {
-        Rng n(220 + v); Biquad bp;
-        return render(0.5f, 0.12f, 0.4f, 0.55f, [=](float t) mutable {
-            bp.set(BP, 1600 - 1200 * t, 1.0f);
-            float drops = 0;
-            for (int i = 0; i < 4; i++)
-            {
-                float st = 0.05f + i * 0.07f + v * 0.01f;
-                if (t > st) drops += std::sin(TAU * (900 + 1600 * (t - st) * 20) * (t - st)) * env(t - st, 0.001f, 0.015f);
-            }
-            return bp(n()) * 2 * env(t, 0.005f, 0.12f) + drops * 0.4f;
-        });
+        static const Wave sp[2] = {{SPLASH1_FRAME_COUNT, SPLASH1_SAMPLE_RATE, SPLASH1_SAMPLE_SIZE, SPLASH1_CHANNELS, SPLASH1_DATA},
+                                   {SPLASH2_FRAME_COUNT, SPLASH2_SAMPLE_RATE, SPLASH2_SAMPLE_SIZE, SPLASH2_CHANNELS, SPLASH2_DATA}};
+        return LoadSoundFromWave(sp[v]);
+    });
+    // a longship casting off: timber creaking and straining against the rope (freesound, CC0)
+    add(SFX_CREAK, 30, 3, [](int v) {
+        static const Wave cr[3] = {{CREAK1_FRAME_COUNT, CREAK1_SAMPLE_RATE, CREAK1_SAMPLE_SIZE, CREAK1_CHANNELS, CREAK1_DATA},
+                                   {CREAK2_FRAME_COUNT, CREAK2_SAMPLE_RATE, CREAK2_SAMPLE_SIZE, CREAK2_CHANNELS, CREAK2_DATA},
+                                   {CREAK3_FRAME_COUNT, CREAK3_SAMPLE_RATE, CREAK3_SAMPLE_SIZE, CREAK3_CHANNELS, CREAK3_DATA}};
+        return LoadSoundFromWave(cr[v]);
+    });
+    add(SFX_SWIM, 14, 2, [](int v) {
+        static const Wave sw[2] = {{SWIM1_FRAME_COUNT, SWIM1_SAMPLE_RATE, SWIM1_SAMPLE_SIZE, SWIM1_CHANNELS, SWIM1_DATA},
+                                   {SWIM2_FRAME_COUNT, SWIM2_SAMPLE_RATE, SWIM2_SAMPLE_SIZE, SWIM2_CHANNELS, SWIM2_DATA}};
+        return LoadSoundFromWave(sw[v]);
     });
     // grapple: metallic tink plus a rope whip
     add(SFX_HOOK, 3, 2, [](int v) {

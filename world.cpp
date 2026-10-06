@@ -914,6 +914,8 @@ int workerCount() { return (int)pool().ts.size() + 1; }
 
 // Back-wall patterns (see WallStyle in world.h), worked out per cell as the frame is drawn: `b` is the tone the level
 // painted at one colour per unit, and the pattern lays a cell-fine grain over it - tile joints, plank seams, stones.
+static float g_rayLut[1024]; // the moon's shafts: beam strength against dx/dy from the moon, rebuilt every frame in renderWorld
+static float g_rayK = 0;
 static Color wallStyle(Color b, int x, int y)
 {
     float k = 1;
@@ -923,7 +925,7 @@ static Color wallStyle(Color b, int x, int y)
     {
     case WALL_TILE: // the same blocks as the Masonry terrain (levelgen.cpp:fineGrain), in the same palette, a little darker; some stones blood-soaked
     {
-        int ph = y + (int)(hash2(x / 30, 1, 41) * 5), row = ph / 11, v = ph % 11;
+        int ph = y + (int)(vnoise(x * 0.025f, 3.0f, 41) * 6.0f), row = ph / 11, v = ph % 11; // (courses wander smoothly: stepping every 30 cells cut visible vertical seams)
         int xo = x + (int)(hash2(row, 2, 42) * 40) + (int)(3.0f * std::sin(x * 0.09f + row * 1.7f)), col = xo / 22, u = xo % 22;
         float th = hash2(col, row, 9);
         int bw = 20 - (int)(hash2(col, row, 43) * 4), bh = 10 - (int)(hash2(col, row, 44) * 3);
@@ -1036,6 +1038,15 @@ void renderWorld(Color* px, int camX, int camY, int vw, int vh, bool mask)
     g_grass.resize(vh);
     for (auto& r : g_grass) r.clear();
     parallaxPrep(camX, camY, vw, vh, world.frame);
+    cavePrep(camX, camY, vw, vh);
+    // moon shafts through the sky: a table of beam strength against the ratio dx/dy from the moon, rebuilt each frame (a pixel costs a lookup)
+    for (int k = 0; k < 1024; k++)
+    {
+        float t = (k - 512) / 64.0f, ang = std::atan(t);
+        float v = std::sin(ang * 9.0f + world.frame * 0.0035f + 2.0f * vnoise(ang * 6.0f, world.frame * 0.002f, 71)) * 0.5f + 0.5f;
+        g_rayLut[k] = std::pow(v, 5.0f) * (0.55f + 0.45f * vnoise(ang * 22.0f, world.frame * 0.006f, 72));
+    }
+    g_rayK = 0.62f * (1 - 0.85f * world.storm);
     int nb = nt * 6; // thin bands handed out as threads come free: sky rows are far cheaper than ground rows
     parallelFor(nb, [&](int t) { renderRows(px, camX, camY, vw, vh, vh * t / nb, vh * (t + 1) / nb); });
     drawGrass(px, camX, camY, vw, vh);
@@ -1144,7 +1155,8 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                     if (ch && c.material == M::Empty) fineBg(ch, kb, x, y, b, skyk);
                     col = b.a == 255 ? b : wallStyle(b, x, y);
                     if (!skyk && b.a == 255) col = brighten(col, (int)(hash2(x, y, 31) * 7) - 3);
-                    if (ch && skyk)
+                    if (ch && skyk >= 2) col = lerpColor(col, caveAt(i, j, col), (skyk - 2) / 7.0f); // a cave's far depths: layers of stalactites and stalagmites, fading in away from the rock's edge
+                    else if (ch && skyk)
                     {
                         float dx = i - mx, d2 = dx * dx + dy2, gw = 0;
                         Color pc;
@@ -1165,6 +1177,15 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                         else if (hash2(i, j, 77) > 1 - 0.0035f / (world.scale * world.scale) && hash2(i, j, world.frame / 20) > 0.25f) // twinkling stars, fixed on the screen
                             col = Color{210, 214, 236, 255};
                         if (gw > 0.01f) col = lerpColor(col, Color{255, 120, 40, 255}, gw * 0.55f); // firelight from the burning houses
+                        if (dy > 4) // the moon's shafts, fanning down through the sky and over the far hills
+                        {
+                            int ri = (int)(dx / dy * 64.0f) + 512;
+                            if (ri >= 0 && ri < 1024)
+                            {
+                                float fall = std::max(0.0f, 1 - dy / (vh * 0.95f)), rk = g_rayLut[ri] * fall * fall * g_rayK;
+                                if (rk > 0.01f) col = Color{(unsigned char)std::min(255.0f, col.r + 70 * rk), (unsigned char)std::min(255.0f, col.g + 96 * rk), (unsigned char)std::min(255.0f, col.b + 128 * rk), 255};
+                            }
+                        }
                         if (world.storm > 0.01f) // storm clouds roll in over moon and stars, lit by the lightning
                         {
                             if (i - clAt >= 4)

@@ -107,25 +107,28 @@ SPEAR_LUNGE = [(-72, (9, 14), -86, 0, (7, -8), 70), (-12, (-4, 8), -100, 4, (6, 
 
 
 
-def side_swings(rest, hold):
+def side_swings(rest, hold, k=1.0, dy=0):
     """The heavy weapons' first two blows of the chain, level sweeps across the body. Seen side-on, the head swings out of the picture
     toward the viewer and shortens ('fore', with its depth) as it crosses in front, then opens out again: the left swing runs from behind
-    across the near side to the front; the right swing comes back across the far side, behind him, to the rear. Extra fields: fore, head depth."""
-    r = (rest, hold, -84, 0, (7, -8), 80)
-    a = [r, (172, (-4, 5), -92, 2, (8, -9), 70, 0.95, 12), (178, (-9, 4), -96, 3, (9, -10), 110, 1.0, 12),
-         (170, (-2, 5), -92, 3, (12, -10), 32, 0.7, 19), (100, (8, 6), -86, 3, (14, -10), 30, 0.2, 24),
-         (8, (16, 5), -80, 3, (15, -11), 30, 0.7, 18), (-4, (20, 5), -76, 4, (15, -12), 110, 0.97, 12),
-         (-14, (15, 5), -80, 3, (13, -11), 70, 1.0, 12), (rest, hold, -84, 1, (7, -8), 90)]
-    b = [r, (10, (14, 4), -88, 2, (8, -9), 70, 0.92, 12), (14, (19, 4), -92, 3, (9, -10), 110, 1.0, 12),
-         (-6, (18, 4), -88, 3, (12, -10), 32, 0.75, 4), (-72, (8, 4), -92, 3, (14, -10), 30, 0.2, -8),
-         (-170, (-4, 5), -96, 3, (15, -11), 30, 0.75, 6), (-186, (-10, 4), -98, 4, (15, -12), 110, 1.0, 10),
-         (-194, (-6, 5), -92, 3, (13, -11), 70, 1.0, 12), (rest, hold, -84, 1, (7, -8), 90)]
+    across the near side to the front; the right swing comes back across the far side, behind him, to the rear. Extra fields: fore, head depth.
+    `k` scales the timings (a sword is quicker than a mace) and `dy` lowers or raises the whole sweep."""
+    def T(ang, g, lean, cr, feet, ms, fore, zh): return (ang, (g[0], g[1] + dy), lean, cr, feet, max(20, int(ms * k)), fore, zh)
+    r = (rest, hold, -84, 0, (7, -8), int(80 * k))
+    a = [r, T(172, (-4, 5), -92, 2, (8, -9), 70, 0.95, 12), T(178, (-9, 4), -96, 3, (9, -10), 110, 1.0, 12),
+         T(170, (-2, 5), -92, 3, (12, -10), 32, 0.7, 19), T(100, (8, 6), -86, 3, (14, -10), 30, 0.2, 24),
+         T(8, (16, 5), -80, 3, (15, -11), 30, 0.7, 18), T(-4, (20, 5), -76, 4, (15, -12), 110, 0.97, 12),
+         T(-14, (15, 5), -80, 3, (13, -11), 70, 1.0, 12), (rest, hold, -84, 1, (7, -8), int(90 * k))]
+    b = [r, T(10, (14, 4), -88, 2, (8, -9), 70, 0.92, 12), T(14, (19, 4), -92, 3, (9, -10), 110, 1.0, 12),
+         T(-6, (18, 4), -88, 3, (12, -10), 32, 0.75, 4), T(-72, (8, 4), -92, 3, (14, -10), 30, 0.2, -8),
+         T(-170, (-4, 5), -96, 3, (15, -11), 30, 0.75, 6), T(-186, (-10, 4), -98, 4, (15, -12), 110, 1.0, 10),
+         T(-194, (-6, 5), -92, 3, (13, -11), 70, 1.0, 12), (rest, hold, -84, 1, (7, -8), int(90 * k))]
     return a, b
 
 
 AXE_L, AXE_R = side_swings(-137, (8, 12))
 MACE_L, MACE_R = side_swings(-125, (8, 12))
-ATTACKS = {'axe': [AXE_L, AXE_R, AXE_CHOP], 'mace': [MACE_L, MACE_R, MACE_SLAM], 'pan': [PAN_BONK, PAN_BONK], 'sword': [SWORD_SWEEP, SWORD_SLASH],
+SWORD_L, SWORD_R = side_swings(-58, (10, 9), 0.8, -3)   # the sword's level cuts: quicker than the mace's, from the belly
+ATTACKS = {'axe': [AXE_L, AXE_R, AXE_CHOP], 'mace': [MACE_L, MACE_R, MACE_SLAM], 'pan': [PAN_BONK, PAN_BONK], 'sword': [SWORD_L, SWORD_R, SWORD_SLASH, SWORD_SWEEP],
            'dagger': [DAGGER_STAB, DAGGER_SLASH], 'spear': [SPEAR_THRUST, SPEAR_LUNGE]}
 # the frames in which the blow is live (the first and last are the ready stance)
 STRIKE = {'axe': (4, 7), 'mace': (4, 7), 'pan': (3, 5), 'sword': (3, 6), 'dagger': (3, 4), 'spear': (3, 4)}
@@ -137,7 +140,7 @@ def attack(w, variant=0):
     table = ATTACKS[w][variant]
     s0, s1 = STRIKE[w]
     if w in ('axe', 'mace') and variant < 2: s0, s1 = 3, 6     # the side swings are shorter than the overhead blow
-    if w == 'sword' and variant == 0: s0, s1 = 3, 6
+    if w == 'sword': s0, s1 = 3, 6
     if w == 'dagger' and variant == 1: s0, s1 = 3, 4
     out, ms = [], []
     prev = None
@@ -325,6 +328,7 @@ def weapon_clips(w):
         c['atk0'] = attack(w, 0)
         c['atk1'] = attack(w, 1)
         if len(ATTACKS[w]) > 2: c['atk2'] = attack(w, 2)
+        if len(ATTACKS[w]) > 3: c['atk3'] = attack(w, 3)
     else:
         c['aim'] = aim(w)
         c['fire'] = aim(w, recoil=True)

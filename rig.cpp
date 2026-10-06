@@ -3,6 +3,7 @@
 //  - when a creature dies its body becomes a Verlet ragdoll of parts cut from the same painting
 //  - the player's cape is cloth, simulated and drawn into a small pixel canvas
 #include "game.h"
+#include <unordered_map>
 #include "sprites.h"
 #include "sprites_hd.h"
 #include "sprites_anim.h"
@@ -568,9 +569,15 @@ static void drawBig(const BigSprite& b, float ax, float ay, bool flip, float sxs
 
 // One tongue of flame as 0.5-unit pixels, its root at (x, by): a white-yellow core, yellow, orange and red toward a ragged,
 // swaying tip. `seed` makes every tongue its own; `alpha` thins the whole thing.
-static void flameShape(float x, float by, float w, float h, int seed, float alpha)
+// A tongue of flame rooted at (x, by). Painting one rectangle by rectangle every frame was the most expensive thing in the castle's halls
+// (a torch every few paces), so each flame shape is painted once into a small texture, 8 looks x 32 phases, and drawn from there.
+static Image flameImage(float w, float h, int seed, int phase, float& xoff, int& H)
 {
-    float f = (float)G.frame;
+    float f = phase * 2.0f, hmax = h * 1.3f;
+    xoff = w * 0.6f + 0.5f;
+    int Wd = (int)std::ceil(xoff * 2 / 0.5f) + 1;
+    H = (int)std::ceil(hmax / 0.5f) + 1;
+    Image img = GenImageColor(Wd, H, BLANK);
     for (float cx = -w / 2; cx <= w / 2; cx += 0.5f)
     {
         float u = cx / (w / 2), prof = std::pow(std::max(0.0f, 1 - u * u), 0.7f);
@@ -582,44 +589,85 @@ static void flameShape(float x, float by, float w, float h, int seed, float alph
             if (t > 0.55f && hash2((int)(cx * 2) + seed * 7, (int)(y * 2) - (int)(f * 1.5f), 13) > 1.25f - t * 0.9f) continue; // ragged, flickering edges
             float v = t * 0.85f + std::fabs(u) * 0.55f;
             Color c = v < 0.26f ? Color{255, 247, 200, 255} : (v < 0.5f ? Color{255, 208, 74, 255} : (v < 0.75f ? Color{250, 126, 30, 240} : (v < 0.95f || t < 0.8f ? Color{206, 54, 24, 210} : Color{120, 30, 20, 140})));
-            c.a = (unsigned char)(c.a * alpha);
-            DrawRectangleRec({x + cx + lean, by - y - 0.5f, 0.5f, 0.5f}, c);
+            int px = (int)std::floor((cx + lean + xoff) / 0.5f + 0.001f), py = H - 1 - (int)std::floor(y / 0.5f + 0.001f);
+            if (px >= 0 && px < Wd && py >= 0 && py < H) ImageDrawPixel(&img, px, py, c);
         }
     }
+    return img;
+}
+
+static void flameShape(float x, float by, float w, float h, int seed, float alpha)
+{
+    static std::unordered_map<unsigned long long, Texture2D> cache;
+    int wq = std::max(2, (int)std::lround(w * 2)), hq = std::max(2, (int)std::lround(h * 2)), var = ((seed % 8) + 8) % 8;
+    int phase = ((G.frame / 2 + seed * 5) % 32 + 32) % 32;
+    unsigned long long key = ((unsigned long long)wq << 40) | ((unsigned long long)hq << 20) | (var << 8) | phase;
+    auto it = cache.find(key);
+    if (it == cache.end())
+    {
+        float xoff; int H;
+        Image img = flameImage(wq * 0.5f, hq * 0.5f, var, phase, xoff, H);
+        Texture2D t = LoadTextureFromImage(img);
+        UnloadImage(img);
+        SetTextureFilter(t, TEXTURE_FILTER_POINT);
+        it = cache.emplace(key, t).first;
+    }
+    const Texture2D& t = it->second;
+    float xoff = wq * 0.5f * 0.6f + 0.5f;
+    DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {x - xoff, by - t.height * 0.5f, t.width * 0.5f, t.height * 0.5f}, {0, 0}, 0, {255, 255, 255, (unsigned char)(255 * alpha)});
+}
+
+static std::vector<std::function<void()>> additiveQueue;
+void deferAdditive(std::function<void()> f) { additiveQueue.push_back(std::move(f)); }
+void flushAdditive()
+{
+    if (additiveQueue.empty()) return;
+    BeginBlendMode(BLEND_ADDITIVE);
+    for (auto& f : additiveQueue) f();
+    EndBlendMode();
+    additiveQueue.clear();
 }
 
 // A live flame rooted at (x, y), about 7 * s units tall, with its glow and the odd spark.
 void drawFlame(float x, float y, float s, int seed)
 {
     float fl = hash2(seed, G.frame / 4, 9);
-    BeginBlendMode(BLEND_ADDITIVE);
-    DrawCircleGradient((int)x, (int)(y - 3 * s), 9 * s + fl * 2, {255, 140, 50, 60}, {255, 140, 50, 0});
-    EndBlendMode();
+    deferAdditive([=]() { DrawCircleGradient((int)x, (int)(y - 3 * s), 9 * s + fl * 2, {255, 140, 50, 60}, {255, 140, 50, 0}); });
     flameShape(x, y, 3.2f * s, 7.5f * s, seed, 1);
     flameShape(x + (fl - 0.5f) * s, y, 2.0f * s, 5.0f * s, seed + 5, 1);
     if (fl > 0.84f) spawnParticle(x + G.rcx + frange(-s, s), y + G.rcy - 6 * s, frange(-0.2f, 0.2f), -0.45f, 28, {255, 180, 70, 255}, -0.004f);
 }
 
-// Fire you can't miss: a glare round the body and tongues of flame licking up its length, taller where the oil is,
-// with embers and smoke rising off it.
+// The burning body itself: an orange shade that flickers (multiplied over the sprite), and a faint hot glow added on top by the callers.
+Color burnTint(const Mob& m)
+{
+    float fl = 0.5f + 0.5f * std::sin(G.frame * 0.33f + m.id * 1.7f) * (0.6f + 0.4f * std::sin(G.frame * 0.11f + m.id));
+    return {255, (unsigned char)(176 + 34 * fl), (unsigned char)(118 + 42 * fl), 255};
+}
+
+// Fire you can see without losing the figure: the sprite is shaded orange (burnTint), and the flames lick up round its edge, from
+// the shoulders and head and down the sides, taller where the oil is, with embers and a little smoke coming off the outline.
 void drawBurning(const Mob& m, int camX, int camY)
 {
     float x0 = std::floor(m.x) - camX, top = std::floor(m.y) - camY, h = (float)m.h, w = (float)m.w, f = (float)G.frame;
-    BeginBlendMode(BLEND_ADDITIVE);
+    float cx = x0 + w / 2, cy = top + h * 0.5f, rx = w * 0.5f + 0.8f, ry = h * 0.5f + 0.5f;
     float pulse = 0.85f + 0.15f * std::sin(f * 0.3f);
-    DrawCircleGradient((int)(x0 + w / 2), (int)(top + h * 0.5f), h * 0.95f * pulse, {255, 120, 30, 70}, {255, 80, 20, 0});
-    EndBlendMode();
-    int n = 5 + (int)(w / 4) + (m.oily ? 3 : 0);
+    deferAdditive([=]() { DrawCircleGradient((int)cx, (int)cy, h * 0.85f * pulse, {255, 120, 30, 34}, {255, 80, 20, 0}); });   // a faint aura, not a glare
+    int n = 3 + (int)(w / 5) + (m.oily ? 2 : 0);
     for (int i = 0; i < n; i++)
     {
-        int seed = m.id * 13 + i + (G.frame / 14 + i * 3) / 5 * 31; // tongues pop up in new places now and then
-        float fx = x0 + 0.5f + (w - 1) * hash2(seed, i, 41), fy = top + h * (0.3f + 0.65f * hash2(seed, i, 43));
-        float th = h * (m.oily ? 0.55f : 0.38f) * (0.7f + 0.5f * hash2(seed, i, 47));
-        flameShape(fx, fy, std::max(2.4f, w * 0.38f), th, seed, 0.95f);
+        int seed = m.id * 13 + i + (G.frame / 16 + i * 3) / 5 * 31; // tongues pop up in new places now and then
+        float th = (-195.0f + 215.0f * hash2(seed, i, 41)) * DEG2RAD;                       // from low on the left, over the head, to low on the right
+        float fx = cx + rx * std::cos(th), fy = cy + ry * std::sin(th) + 1.0f;
+        float fh = h * (m.oily ? 0.34f : 0.24f) * (0.7f + 0.5f * hash2(seed, i, 47));
+        flameShape(fx, fy, std::max(2.0f, w * 0.3f), fh, seed, 0.95f);
     }
-    if (G.frame % 3 == 0)
-        spawnParticle(m.x + frange(0, w), m.y + frange(0, h * 0.5f), frange(-0.1f, 0.1f), frange(-0.5f, -0.25f), irange(20, 36), {255, 170, 60, 255}, -0.004f);
-    if (G.frame % 6 == 0)
+    if (G.frame % 2 == 0) // embers peel off the outline and rise
+    {
+        float th = (-190.0f + 200.0f * frand()) * DEG2RAD;
+        spawnParticle(m.x + w / 2 + (w * 0.5f + 0.8f) * std::cos(th), m.y + h * 0.5f + (h * 0.5f) * std::sin(th), std::cos(th) * 0.08f + frange(-0.08f, 0.08f), frange(-0.55f, -0.3f), irange(20, 38), {255, 170, 60, 255}, -0.004f);
+    }
+    if (G.frame % 7 == 0)
         spawnParticle(m.x + frange(0, w), m.y - 1, frange(-0.1f, 0.1f), frange(-0.4f, -0.2f), irange(40, 70), {60, 56, 58, 120}, -0.002f);
 }
 
@@ -960,6 +1008,15 @@ void drawDecor(const Interact& it, float x, float y)
     top = std::floor(top * 2 + 0.5f) / 2;
     if (c->second.sh.id) DrawTexturePro(c->second.sh, {0, 0, (float)c->second.sh.width, (float)c->second.sh.height}, {left, top, c->second.sh.width * 0.5f, c->second.sh.height * 0.5f}, {0, 0}, 0, Color{255, 255, 255, an == 0 ? (unsigned char)58 : (unsigned char)78});
     DrawTexturePro(t, {0, 0, (float)t.width, (float)t.height}, {left, top, w, h}, {0, 0}, 0, it.data == DK_SPEARPOST ? Color{176, 176, 188, 255} : WHITE);
+    if (it.data == DK_CHANDELIER) // the candles are lit
+    {
+        int W, H, n, ringY;
+        chandelierGeom(var, it.w, W, H, n, ringY);
+        float cxp = left + W * 0.25f;
+        for (int k = 0; k < n; k++) drawFlame(cxp + (k - (n - 1) / 2) * 4.0f, top + (ringY - 10) * 0.5f, 0.36f, (int)it.x + k * 7);
+        float gy = top + ringY * 0.5f - 4, fl = 0.85f + 0.15f * hash2((int)it.x, G.frame / 4, 9);
+        deferAdditive([=]() { DrawCircleGradient((int)cxp, (int)gy, 15 * fl, {255, 170, 80, 48}, {255, 170, 80, 0}); });
+    }
     if (it.data == DK_SPEARPOST && (var & 32)) // the cloth is tied to the lashing just under the butt
         drawPennant((it.style & 64) ? left + w - 5.5f * 0.5f : left + 6.0f * 0.5f, top + 6.5f * 0.5f, (it.style & 64) ? -1 : 1, var, (float)G.frame);
 }
@@ -997,6 +1054,118 @@ void drawSpriteBig(const Sprite& s, float x, float bottom, bool flip, Color tint
 
 static const RigSpec* rigFor(int type);
 static const AnimSheet& animFor(int type);
+// ---------------------------------------------------------------- runes: every spell has its own, drawn as strokes in the spell's colour
+enum Rune { RU_MANNAZ, RU_EHWAZ, RU_PERTHRO, RU_ISAZ, RU_THURISAZ, RU_ANSUZ, RU_SOWILU, RU_KAUNA, RU_LAGUZ, RU_TIWAZ, RU_URUZ, RU_COUNT };
+struct RuneGlyph { int n; float s[6][4]; }; // strokes as (x0, y0, x1, y1) in a 1 x 1 box, y down
+static const RuneGlyph RUNE_GLYPHS[RU_COUNT] = {
+    {5, {{0, 0, 0, 1}, {1, 0, 1, 1}, {0, 0, 0.5f, 0.5f}, {1, 0, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f, 1}}},                       // Mannaz (fire): the man, a central stave in the M
+    {4, {{0, 0, 0, 1}, {1, 0, 1, 1}, {0, 0, 0.5f, 0.4f}, {1, 0, 0.5f, 0.4f}}},                                          // Ehwaz (wind)
+    {4, {{0, 0, 0, 1}, {0, 0, 0.85f, 0.2f}, {0.85f, 0.2f, 0.85f, 0.8f}, {0.85f, 0.8f, 0, 1}}},                           // Perthro (ice)
+    {3, {{0.5f, 0, 0.5f, 1}, {0.28f, 0, 0.72f, 0}, {0.28f, 1, 0.72f, 1}}},                                                // Isaz (lightning): a single stave (with serifs, so it reads as a rune)
+    {3, {{0, 0, 0, 1}, {0, 0.18f, 0.85f, 0.5f}, {0.85f, 0.5f, 0, 0.82f}}},                                              // Thurisaz (acid): the thorn
+    {3, {{0, 0, 0, 1}, {0, 0, 0.85f, 0.22f}, {0, 0.36f, 0.85f, 0.6f}}},                                                // Ansuz (the arcane)
+    {3, {{0.8f, 0, 0.2f, 0.4f}, {0.2f, 0.4f, 0.8f, 0.6f}, {0.8f, 0.6f, 0.2f, 1}}},                                      // Sowilu (the spark)
+    {2, {{0.85f, 0.12f, 0.2f, 0.5f}, {0.2f, 0.5f, 0.85f, 0.88f}}},                                                      // Kauna (the bomb): the torch
+    {2, {{0.1f, 0, 0.1f, 1}, {0.1f, 0.15f, 0.8f, 0}}},                                                                  // Laguz (water)
+    {3, {{0.5f, 0, 0.5f, 1}, {0.5f, 0, 0.1f, 0.35f}, {0.5f, 0, 0.9f, 0.35f}}},                                          // Tiwaz (the trigger): the arrow
+    {3, {{0.1f, 1, 0.1f, 0}, {0.1f, 0, 0.9f, 0.25f}, {0.9f, 0.25f, 0.9f, 1}}},                                          // Uruz (digging)
+};
+int runeOfSpell(int sp)
+{
+    switch (sp)
+    {
+    case SP_FIREBALL: return RU_MANNAZ;
+    case SP_MISSILE: return RU_EHWAZ; // the Magus's wind blast
+    case SP_ICE: return RU_PERTHRO;
+    case SP_LIGHTNING: return RU_ISAZ;
+    case SP_ACID: return RU_THURISAZ;
+    case SP_SPARK: return RU_SOWILU;
+    case SP_BOMB: return RU_KAUNA;
+    case SP_WATER: return RU_LAGUZ;
+    case SP_TRIGGER: return RU_TIWAZ;
+    case SP_DIG: return RU_URUZ;
+    default: return RU_ANSUZ;
+    }
+}
+Color runeColour(int sp)
+{
+    switch (sp)
+    {
+    case SP_FIREBALL: return {255, 132, 40, 255};
+    case SP_MISSILE: return {205, 232, 255, 255}; // wind
+    case SP_ICE: return {150, 214, 255, 255};
+    case SP_LIGHTNING: return {255, 240, 120, 255};
+    case SP_ACID: return {140, 255, 90, 255};
+    default: return SPELLS[sp].col;
+    }
+}
+
+// Carve a rune in light: a wide soft stroke in its colour under a thin white-hot one, a halo behind, and what its element throws off.
+static void drawRune(int sp, float cx, float cy, float h, float power, float flash)
+{
+    Color c = runeColour(sp);
+    const RuneGlyph& g = RUNE_GLYPHS[runeOfSpell(sp)];
+    float w = h * 0.56f, x0 = cx - w / 2, y0 = cy - h / 2, f = (float)G.frame;
+    unsigned char a = (unsigned char)(255 * std::min(1.0f, power));
+    DrawCircleGradient((int)cx, (int)cy, h * 0.95f, {c.r, c.g, c.b, (unsigned char)(80 * power * flash)}, {c.r, c.g, c.b, 0});
+    for (int k = 0; k < g.n; k++)
+    {
+        Vector2 p0 = {x0 + g.s[k][0] * w, y0 + g.s[k][1] * h}, p1 = {x0 + g.s[k][2] * w, y0 + g.s[k][3] * h};
+        DrawLineEx(p0, p1, std::max(1.2f, h * 0.2f), {c.r, c.g, c.b, (unsigned char)(a * 0.45f)});                       // the glow of the stroke
+        DrawLineEx(p0, p1, std::max(0.8f, h * 0.085f), {(unsigned char)std::min(255.0f, c.r + 120 * flash), (unsigned char)std::min(255.0f, c.g + 120 * flash), (unsigned char)std::min(255.0f, c.b + 120 * flash), a});
+    }
+    switch (runeOfSpell(sp)) // the element, licking round the glyph
+    {
+    case RU_MANNAZ: // flames at its foot
+        for (int k = 0; k < 4; k++)
+        {
+            float fx = x0 + w * (0.1f + 0.27f * k), fh = h * (0.28f + 0.12f * std::sin(f * 0.4f + k * 1.7f));
+            DrawTriangle({fx - h * 0.07f, y0 + h * 1.02f}, {fx + h * 0.07f, y0 + h * 1.02f}, {fx + std::sin(f * 0.3f + k) * h * 0.05f, y0 + h * 1.02f - fh}, {255, 170, 60, (unsigned char)(200 * power)});
+        }
+        break;
+    case RU_EHWAZ: // a swirl of wind
+        for (int k = 0; k < 2; k++) DrawRing({cx, cy}, h * (0.62f + 0.14f * k), h * (0.65f + 0.14f * k), f * 4 + k * 150, f * 4 + k * 150 + 110, 14, {c.r, c.g, c.b, (unsigned char)(170 * power)});
+        break;
+    case RU_PERTHRO: // shards of ice
+        for (int k = 0; k < 5; k++) { float an = k * 1.26f + 0.3f; DrawLineEx({cx + std::cos(an) * h * 0.62f, cy + std::sin(an) * h * 0.62f}, {cx + std::cos(an) * h * 0.86f, cy + std::sin(an) * h * 0.86f}, 1.4f, {230, 246, 255, (unsigned char)(220 * power)}); }
+        break;
+    case RU_ISAZ: // a bolt through the stave
+    {
+        float px = cx, py = y0;
+        for (int k = 1; k <= 5; k++) { float nx = cx + (k % 2 ? 1 : -1) * h * 0.22f * (hash2(k, G.frame / 2, 61) + 0.4f), ny = y0 + h * k / 5.0f; DrawLineEx({px, py}, {nx, ny}, 1.5f, {255, 255, 210, (unsigned char)(235 * power)}); px = nx; py = ny; }
+        break;
+    }
+    case RU_THURISAZ: // drips
+        for (int k = 0; k < 3; k++) { float dx = x0 + w * (0.1f + 0.4f * k), dy = std::fmod(f * 0.5f + k * 5, h * 0.5f); DrawCircle((int)dx, (int)(y0 + h * 0.95f + dy), 0.9f, {c.r, c.g, c.b, (unsigned char)(200 * power)}); }
+        break;
+    default: break;
+    }
+}
+
+// The Skeletal Magus casting: as he winds up (his arms rising over his head) the rune of his spell is cut in light between his hands, growing and flaring
+// white as he gathers it; as the spell is thrown it sweeps forward with his arms and fades. Additive.
+static void drawMageCast(const Mob& m, const Vector2* J)
+{
+    bool wind = m.aggro && m.los && m.cd > 0 && m.cd <= 34, rel = m.attackT > 0;
+    if (!wind && !rel) return;
+    int sp = rel ? m.spellFired : m.spell;
+    if (sp < 0) return;
+    Color c = runeColour(sp);
+    Vector2 hn = J[J_HAN], hf = J[J_HAF];
+    float t = wind ? 1 - m.cd / 34.0f : 1.0f, fade = rel ? m.attackT / 34.0f : 1.0f, f = (float)G.frame;
+    Vector2 mid = {(hn.x + hf.x) * 0.5f, (hn.y + hf.y) * 0.5f};
+    float power = wind ? std::min(1.0f, t * 1.6f) : fade, flash = wind ? (t > 0.8f ? 0.6f + 0.4f * std::sin(f * 1.5f) : 0.2f * t) : fade;
+    float h = wind ? 6 + 9 * t : 9 + 7 * (1 - fade);
+    Vector2 cp = wind ? Vector2{mid.x + m.facing * 1.0f, mid.y - 9.0f - 4.0f * t} : Vector2{mid.x + m.facing * (4 + 18 * (1 - fade)), mid.y - 9.0f * fade};
+    deferAdditive([=]() {
+        DrawCircleGradient((int)hn.x, (int)hn.y, 4.5f * power, {c.r, c.g, c.b, (unsigned char)(150 * power)}, {c.r, c.g, c.b, 0});   // the hands glow
+        DrawCircleGradient((int)hf.x, (int)hf.y, 4.5f * power, {c.r, c.g, c.b, (unsigned char)(150 * power)}, {c.r, c.g, c.b, 0});
+        drawRune(sp, cp.x, cp.y, h, power, flash);
+    });
+    if (G.frame % 2 == 0) // motes of its colour come off it
+        spawnParticle(cp.x + G.rcx + frange(-h * 0.4f, h * 0.4f), cp.y + G.rcy + frange(-h * 0.5f, h * 0.5f), frange(-0.15f, 0.15f), frange(-0.4f, 0.1f), irange(10, 24), c, -0.002f);
+}
+
 static void drawAnimMob(const Mob& m, const AnimSheet& A, int camX, int camY);
 
 void drawMobAnimated(const Mob& m, int camX, int camY)
@@ -1164,6 +1333,9 @@ static const RigSpec* rigFor(int type) // its corpse's parts, cut from its paint
     case E_GOBLIN: return &RIG_A_GOBLIN;
     case E_BOMBER: return &RIG_A_BOMBER;
     case E_SKELETON: return &RIG_A_SKELETON;
+    case E_SKELSPEAR: return &RIG_A_SKELSPEAR;
+    case E_SKELSHIELD: return &RIG_A_SKELSHIELD;
+    case E_BONEMAGE: return &RIG_A_BONEMAGE;
     case E_ARCHER: return &RIG_A_ARCHER;
     case E_BAT: return &RIG_A_BAT;
     case E_CULTIST: return &RIG_A_CULTIST;
@@ -1314,6 +1486,9 @@ static const AnimSheet& animFor(int type)
     case E_GOBLIN: return ANIM_GOBLIN;
     case E_BOMBER: return ANIM_BOMBER;
     case E_SKELETON: return ANIM_SKELETON;
+    case E_SKELSPEAR: return ANIM_SKELSPEAR;
+    case E_SKELSHIELD: return ANIM_SKELSHIELD;
+    case E_BONEMAGE: return ANIM_BONEMAGE;
     case E_ARCHER: return ANIM_ARCHER;
     case E_BAT: return ANIM_BAT;
     case E_SLIME: return ANIM_SLIME;
@@ -1381,8 +1556,9 @@ static int mobFrame(const Mob& m, const AnimSheet& A)
     if (m.atkPhase == 2) return clipFrame(A, AC_STRIKE, 1 - m.atkT / (m.type == E_SLIME ? 45.0f : m.type == E_BAT ? 32.0f : leaps ? 30.0f : 6.0f));
     if (m.atkPhase == 3) return clipFrame(A, AC_RECOVER, 1 - m.atkT / (leaps ? 18.0f : m.w > 16 ? 22.0f : 14.0f));
     if (m.hitT > 0) return clipFrame(A, AC_HURT, 1 - m.hitT / 14.0f);
-    if (m.attackT > 0) return clipFrame(A, A.clip[AC_CAST][1] ? AC_CAST : AC_STRIKE, 1 - m.attackT / 15.0f); // the shot, the throw, the spell let go
-    if (ranged && m.aggro && m.los && m.cd > 0 && m.cd <= 16) return clipFrame(A, AC_WINDUP, 1 - m.cd / 16.0f); // drawing, aiming, gathering it
+    float castLen = m.type == E_BONEMAGE ? 34.0f : 15.0f, windLen = m.type == E_BONEMAGE ? 34.0f : 16.0f; // the Magus takes his time
+    if (m.attackT > 0) return clipFrame(A, A.clip[AC_CAST][1] ? AC_CAST : AC_STRIKE, 1 - m.attackT / castLen); // the shot, the throw, the spell let go
+    if (ranged && m.aggro && m.los && m.cd > 0 && m.cd <= windLen) return clipFrame(A, AC_WINDUP, 1 - m.cd / windLen); // drawing, aiming, gathering it
     if (flying) return clipFrame(A, AC_IDLE, std::fmod((G.frame + m.id * 7) / 24.0f, 1.0f)); // wingbeats, drifting
     if (!m.onGround && !m.inLiquid) return clipFrame(A, AC_WALK, 0.3f);
     if (m.squash < 0.9f && A.clip[AC_LAND][1]) return clipFrame(A, AC_LAND, 0); // just come down hard
@@ -1439,6 +1615,12 @@ static void drawAnimMob(const Mob& m, const AnimSheet& A, int camX, int camY)
     int fr = mobFrame(m, A);
     float x = m.cx() - camX, y = m.y + m.h - camY;
     drawSheet(A, fr, x, y, m.facing, coatTint(m), m.hurtFlash > 0);
+    if (m.type == E_BONEMAGE) { Vector2 JJ[RJ_COUNT]; animJoints(A, fr, x, y, m.facing, JJ); drawMageCast(m, JJ); }
+    if (m.burn > 0) // a hot glow added over the orange shade
+    {
+        int facing = m.facing;
+        deferAdditive([=, &A]() { drawSheet(A, fr, x, y, facing, {34, 11, 0, 255}, false); });
+    }
     const RigSpec* R = rigFor(m.type);
     if (!m.nWounds || !R) return;
     Vector2 J[RJ_COUNT];
@@ -1477,7 +1659,7 @@ static Color coatTint(const Mob& m)
     if (m.wet) c = {190, 210, 255, 255};
     if (m.chill > 0) c = {180, 220, 255, 255};
     if (m.poison > 0) c = {170, 230, 150, 255};
-    if (m.burn > 0) c = {255, 190, 150, 255};
+    if (m.burn > 0) c = burnTint(m);
     if (m.type == E_BLACKKNIGHT && m.state == 2 && (G.frame / 3) % 2) c = {255, 90, 90, 255};
     if (m.type == E_WRAITH || m.type == E_BANSHEE) c.a = 200;
     return c;

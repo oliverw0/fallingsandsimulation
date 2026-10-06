@@ -11,7 +11,7 @@ import viking_clips as VC
 
 SCALE = 0.62
 FW, FH, GX, GND = 112, 100, 48, 86
-CLIP_NAMES = ['idle', 'run', 'atk0', 'atk1', 'atk2', 'aim', 'fire', 'jump', 'fall', 'land', 'crouch', 'crouchwalk', 'crawl', 'rollin', 'roll', 'rollout',
+CLIP_NAMES = ['idle', 'run', 'atk0', 'atk1', 'atk2', 'atk3', 'aim', 'fire', 'jump', 'fall', 'land', 'crouch', 'crouchwalk', 'crawl', 'rollin', 'roll', 'rollout',
               'climb', 'wall', 'hang', 'swim', 'tread', 'hurt', 'hookaim']
 SMEAR = [(255, 252, 236, 235), (255, 232, 160, 205), (255, 170, 60, 175), (226, 92, 40, 140)]   # by how old that part of the sweep is
 
@@ -28,6 +28,9 @@ def held_polys(H):
         return [[head + a * u * fo + s * v for v, u in AXE_HEAD]]
     if t in ('sword', 'dagger'):
         L = 46 if t == 'sword' else 21
+        if t == 'sword':
+            fo = H.get('fore', 1.0)
+            pt = lambda base, u, v: base + a * (u * fo) + s * v
         return [[pt(g, 2, 2.4), pt(g, L, 2.4), pt(g, L + 2, 0), pt(g, L, -2.4), pt(g, 2, -2.4)]]
     if t == 'spear':
         tip = g + a * 34

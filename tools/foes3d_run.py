@@ -7,15 +7,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import viking as VK
 from viking import Canvas, Draw, V
 import foes3d as F
+VK.SMOOTH = 3          # the foes' surfaces are blended across their joints (tools/viking.py:smoothed_normals)
 
 JOINT_NAMES = ['neck', 'pel', 'headb', 'headt', 'shF', 'elF', 'haF', 'shN', 'elN', 'haN', 'hipF', 'knF', 'ftF', 'hipN', 'knN', 'ftN', 'wb', 'wt']
-CLIP_ORDER = ['idle', 'walk', 'windup', 'strike', 'recover', 'hurt', 'land']
+CLIP_ORDER = ['idle', 'walk', 'windup', 'strike', 'cast', 'recover', 'hurt', 'land']
 
 # canvas (w, h, gx, ground) per biped
-CANVAS = {'goblin': (56, 46, 24, 40), 'bomber': (56, 48, 24, 42), 'redcap': (84, 54, 26, 48), 'raider': (92, 70, 28, 64), 'risen': (92, 70, 28, 64)}
+CANVAS = {'goblin': (56, 46, 24, 40), 'bomber': (56, 48, 24, 42), 'redcap': (84, 54, 26, 48), 'raider': (92, 70, 28, 64), 'risen': (92, 70, 28, 64),
+          'guard': (104, 80, 28, 74), 'knight': (104, 80, 30, 74), 'cultist': (84, 82, 28, 76), 'archer': (92, 70, 28, 64),
+          'skeleton': (92, 70, 28, 64), 'skelspear': (98, 70, 28, 64), 'skelshield': (92, 70, 28, 64), 'bonemage': (130, 96, 48, 90), 'draugr': (98, 70, 28, 64)}
 # RigSpec shoulder placement: shoulder drop fraction, shoulder half-width and hip half-width (px)
-BODY = {'goblin': (0.2, 3.0, 1.6), 'bomber': (0.2, 3.0, 1.6), 'redcap': (0.2, 3.4, 1.8), 'raider': (0.16, 4.4, 2.4), 'risen': (0.16, 4.4, 2.4)}
-KIND = {'goblin': 'stab', 'bomber': 'throw', 'redcap': 'thrust', 'raider': 'thrust', 'risen': 'thrust'}
+BODY = {'goblin': (0.2, 3.0, 1.6), 'bomber': (0.2, 3.0, 1.6), 'redcap': (0.2, 3.4, 1.8), 'raider': (0.16, 4.4, 2.4), 'risen': (0.16, 4.4, 2.4),
+        'guard': (0.16, 4.4, 2.4), 'knight': (0.16, 4.6, 2.5), 'cultist': (0.16, 4.2, 2.2), 'archer': (0.16, 2.6, 1.8),
+        'skeleton': (0.16, 2.6, 1.8), 'skelspear': (0.16, 2.6, 1.8), 'skelshield': (0.16, 3.0, 2.0), 'bonemage': (0.16, 6.0, 3.8), 'draugr': (0.16, 4.2, 2.4)}
+KIND = {'goblin': 'stab', 'bomber': 'throw', 'redcap': 'thrust', 'raider': 'thrust', 'risen': 'thrust',
+        'guard': 'swing', 'knight': 'chop', 'cultist': 'cast', 'archer': 'shoot',
+        'skeleton': 'swing', 'skelspear': 'thrust', 'skelshield': 'chop', 'bonemage': 'bonecast', 'draugr': 'swing'}
 
 
 def clips_of(name):
@@ -30,6 +37,7 @@ def render_biped(name, P, only=None):
     cv = Canvas(fw, fh, gnd, 1.0)
     d = Draw(cv, gx, 1, 1.0)
     w = F.FoeW(d, only)
+    VK.SMOOTH = 0 if T.get('skel') else 3     # bones are all fine detail: smoothing the shading across them would melt the ribs into one lump
     J = F.build_biped(w, P, T)
     rgb, tag, op = cv.render(rim_side=1)
     return rgb, tag, op, J, d
@@ -98,7 +106,7 @@ def emit_foe(out, name):
     frames = [(f[0], g, f[2]) for f, g in zip(frames, red)]
     P0 = dict(F.bpose(T), held=None)
     slots = {'HEAD': ({'head'}, 'headb', 'headt'), 'TORSO': ({'torso'}, 'neck', 'pel'), 'UARM': ({'uarm'}, 'shN', 'elN'), 'FARM': ({'farm'}, 'elN', 'haN'),
-             'THIGH': ({'thigh'}, 'hipN', 'knN'), 'SHIN': ({'shin'}, 'knN', 'ftN')}
+             'THIGH': ({'thigh'}, 'hipN', 'knN'), 'SHIN': ({'shin'}, 'knN', 'ftN'), 'SHIELD': ({'shield'}, 'haF', 'haF')}
     rgb0, tag0, op0, J0, d0 = render_biped(name, P0)
     pts = dict(zip(JOINT_NAMES, joints_biped(name, J0, P0, d0)))
     cells = []
@@ -117,9 +125,10 @@ def emit_foe(out, name):
         out.append('};')
         out.append(f'static const HDSprite HD_A_{nm} = {{{x1 - x0}, {y1 - y0}, HDP_A_{nm}, HDR_A_{nm}}};')
         pa, pb = pts[a], pts[b]
+        if slot == 'SHIELD': pb = (pa[0] + 4.0, pa[1])
         cells.append(f'{{&HD_A_{nm}, {pa[0] - x0:.2f}f, {pa[1] - y0:.2f}f, {pb[0] - x0:.2f}f, {pb[1] - y0:.2f}f}}')
     shp, sw, hw = BODY[name]
-    out.append(f'static const RigSpec RIG_A_{name.upper()} = {{RK_BIPED, {{{", ".join(cells)}}}, 0.0f, 0.0f, {shp:.3f}f, {sw * 2:.2f}f, {hw * 2:.2f}f, RW_NONE, 0}};')
+    out.append(f'static const RigSpec RIG_A_{name.upper()} = {{RK_BIPED, {{{", ".join(cells)}}}, 0.0f, 0.0f, {shp:.3f}f, {sw * 2:.2f}f, {hw * 2:.2f}f, RW_NONE, {1 if T.get("shield") else 0}}};')
     out.append('')
     fw, fh, gx, gnd = CANVAS[name]
     anim.emit_sheet(out, name.upper(), None, frames, gx, gnd)

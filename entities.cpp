@@ -43,6 +43,9 @@ const EnemyDef ENEMIES[ENEMY_COUNT] = {
     {"Sand Raider", 10, 23, 45, 0.8f, 13, AI_WALK, EL_PHYS, {0.9f, 0.8f, 1.2f, 1, 1}, 14, 50, false, FLESH, M::Blood},
     {"The Black Knight", 20, 27, 900, 0.75f, 25, AI_BOSS_KNIGHT, EL_PHYS, {0.6f, 0.8f, 1, 1.3f, 1}, 14, 60, false, FLESH, M::Blood},
     {"The Lich King", 16, 23, 1500, 0.9f, 20, AI_BOSS_LICH, EL_ICE, {0.8f, 1, 0.5f, 1, 0}, 220, 70, true, BONEC, M::Bone},
+    {"Skeleton Spearman", 10, 22, 30, 0.6f, 10, AI_WALK, EL_PHYS, {1, 1, 0.6f, 1, 0}, 16, 50, false, BONEC, M::Bone},
+    {"Skeleton Guard", 10, 22, 46, 0.5f, 11, AI_WALK, EL_PHYS, {0.7f, 1, 0.6f, 1, 0}, 11, 60, false, BONEC, M::Bone},
+    {"Skeletal Magus", 11, 32, 150, 0.45f, 16, AI_RANGED, EL_PHYS, {0.8f, 1, 0.5f, 1, 0}, 230, 120, false, BONEC, M::Bone},
 };
 
 static std::vector<Mob> pendingMobs; // spawned during the mob loop
@@ -925,7 +928,7 @@ static void hitMob(Proj& p, Mob& m)
 {
     float sp = std::hypot(p.vx, p.vy) + 0.01f;
     if (p.kind == PK_BOLT || p.kind == PK_ARROW) { nextHit = HK_BOLT; nextAng = std::atan2(p.vy, p.vx); nextK = sp; nextAt = {p.x, p.y}; }
-    damageMob(m, p.dmg, p.el, p.vx / sp * 1.5f, p.vy / sp * 1.5f - 0.5f, DMG_HIT);
+    damageMob(m, p.dmg, p.el, p.vx / sp * (1.5f + p.push), p.vy / sp * (1.5f + p.push) - 0.5f - p.push * 0.25f, DMG_HIT);
     if (p.el == EL_SHOCK && p.friendly) chainShock(m, p.dmg * 0.5f);
 }
 
@@ -1477,7 +1480,7 @@ static AttackDef attackFor(int type, int combo)
     // axes and hammers chain a left swing, a right swing, then the overhead blow; all strike where you aim
     case W_AXE: return fin ? AttackDef{ATK_CHOP, 22, 10} : AttackDef{ATK_SLASH, 19, 8};
     case W_MACE: return fin ? AttackDef{ATK_SLAM, 26, 12} : AttackDef{ATK_SLASH, 22, 9};
-    default: return fin ? AttackDef{ATK_SLASH, 21, 7} : AttackDef{ATK_SWEEP, 16, 5}; // the sword sweeps, and the third blow comes over the top
+    default: return fin ? AttackDef{ATK_SLASH, 21, 7} : AttackDef{ATK_SLASH, 16, 5}; // the sword cuts level (or sweeps under), and the third blow comes over the top
     }
 }
 
@@ -1489,6 +1492,8 @@ void startAttack(const Weapon& w)
     P.atkStyle = d.style;
     P.atkLen = P.swingT = d.len;
     P.atkHitAt = d.hitAt;
+    // the sword's first two blows pick among its clips: a level cut left or right, or the low sweep (viking.cpp)
+    P.swingVar = w.type == W_SWORD && P.combo < 2 && irand(100) < 35 ? 3 : P.combo;
     P.swingId++;
     P.swingDir = -P.swingDir;
     P.comboT = d.len + 20; // press again before this runs out to carry the chain on
@@ -1561,7 +1566,7 @@ static void meleeStrike(const Weapon& w, bool impact)
             for (int k = 0; k < 6; k++) spawnCellParticle(m.cx(), m.cy(), std::cos(aim) * frange(0.5f, 2) + frange(-1, 1), frange(-2, 0), ENEMIES[m.type].gore, 0);
         }
         if (fx & UF_LEECH) pm.hp = std::min(pm.maxHp, pm.hp + dmg * 0.15f);
-        bool armoured = m.type == E_KNIGHT || m.type == E_GOLEM || m.type == E_BLACKKNIGHT || m.type == E_SKELETON || m.type == E_GUARD || m.type == E_DRAUGR;
+        bool armoured = m.type == E_SKELSHIELD || m.type == E_BONEMAGE || m.type == E_KNIGHT || m.type == E_GOLEM || m.type == E_BLACKKNIGHT || m.type == E_SKELETON || m.type == E_GUARD || m.type == E_DRAUGR;
         if (w.type == W_PAN) playSfx(SFX_DING, 1.0f); // the pan rings like a bell
         else playSfx(armoured ? SFX_CLANG : SFX_HIT, heavy ? 1.0f : 0.8f, heavy ? 0.8f : 1.0f);
         for (int k = 0; k < (heavy || fin ? 12 : 6); k++) // sparks fly off along the blow
@@ -1977,6 +1982,11 @@ static void updatePlayer()
     if (m.inLiquid && !wasWet) playSfx(SFX_SPLASH, 0.6f);
     wasWet = m.inLiquid;
     if (m.inLiquid && std::fabs(m.vx) > 0.4f && G.frame % 5 == 0) spawnParticle(m.cx() - m.facing * 4, m.cy() + frange(-3, 3), -m.vx * 0.1f, -0.4f, 30, {200, 232, 255, 170}, -0.01f); // a trail of bubbles behind a swimmer
+    if (m.inLiquid && !m.onGround) // a stroke as he swims, a softer paddle as he treads water
+    {
+        bool going = std::fabs(m.vx) > 0.3f || std::fabs(m.vy) > 0.3f;
+        if (G.frame % (going ? 24 : 56) == 0) playSfx(SFX_SWIM, going ? 0.5f : 0.3f, frange(0.92f, 1.08f));
+    }
     G.underwater = isLiquidAt((int)m.cx(), (int)m.y + 1);
     if (P.ondT > 0) { P.ondT--; P.breath = 100; if (G.frame % 6 == 0) spawnParticle(m.cx() + frange(-3, 3), m.y + 2, 0, -0.4f, 30, {170, 240, 250, 160}, -0.01f); } // Ã–nd: no need of air
     else if (G.underwater && P.amulet != AM_NJORD) // head under: about 14 seconds of air
@@ -2373,6 +2383,7 @@ static void updateEnemy(Mob& m)
         if (m.aggro)
         {
             m.facing = fdir;
+            if (m.type == E_BONEMAGE && m.spell < 0) { static const int SPS[5] = {SP_FIREBALL, SP_ICE, SP_LIGHTNING, SP_ACID, SP_MISSILE}; m.spell = SPS[irand(5)]; }
             float tv = 0;
             if (dist < 55) tv = -fdir * spd;
             else if (dist > 120 || !m.los) tv = fdir * spd;
@@ -2387,6 +2398,21 @@ static void updateEnemy(Mob& m)
                     float sp = 5.0f, g = 0.04f, t = dist / sp;
                     float a = std::atan2(dy - 0.5f * g * t * t, dx);
                     enemyProj(PK_ARROW, cx, cy - 2, std::cos(a) * sp, std::sin(a) * sp, m.dmg, EL_PHYS, g, 0);
+                }
+                else if (m.type == E_BONEMAGE) // the Magus casts what his rune showed (it shows the next one as soon as he has let this go)
+                {
+                    static const int SPS[5] = {SP_FIREBALL, SP_ICE, SP_LIGHTNING, SP_ACID, SP_MISSILE}; // (the arcane missile slot is his wind blast: Ehwaz)
+                    int sp = m.spell >= 0 ? m.spell : SP_FIREBALL;
+                    enemySpell(sp, m, aimAng, m.dmg * (sp == SP_LIGHTNING ? 0.8f : (sp == SP_MISSILE ? 0.45f : 1.0f)), SPELLS[sp].el);
+                    if (sp == SP_MISSILE) // a gust: pale, fast, short, no burst - it throws you back
+                    {
+                        Proj& wp = G.projs.back();
+                        wp.col = {205, 232, 255, 255}; wp.blast = 0; wp.push = 4.2f; wp.life = 34; wp.vx *= 1.7f; wp.vy *= 1.7f;
+                    }
+                    m.spellFired = sp;
+                    m.spell = SPS[irand(5)];
+                    m.attackT = 34; // a slow, heavy throw
+                    m.cd += 16;
                 }
                 else if (m.type == E_CULTIST)
                     enemySpell(G.stage >= 3 && chance(2) ? SP_ICE : SP_FIREBALL, m, aimAng, m.dmg, G.stage >= 3 && chance(2) ? EL_ICE : EL_FIRE);
@@ -3109,7 +3135,7 @@ static void updateInteract()
     case IT_SHOP: G.shopId = it.data; G.state = GS_SHOP; break;
     case IT_BOAT: // cast off: the longship carries you out of the harbour
         G.sailT = 1;
-        playSfx(SFX_SPLASH, 0.7f, 0.7f);
+        playSfx(SFX_CREAK, 0.9f, 0.95f); // the timbers groan as she pulls away from the quay
         message("You cast off. The longship slips out into the dark...");
         break;
     }
@@ -3599,7 +3625,7 @@ static void updateStorm()
     {
         float x = G.camX + frange(-20, G.vw + 40), y = G.camY + frange(-10, G.vh * 0.6f);
         int cx = (int)(x * world.scale), cy = (int)(y * world.scale);
-        if (!world.in(cx, cy) || !world.skyOf(cx, cy) || world.get(cx, cy).material != M::Empty) continue;
+        if (!world.in(cx, cy) || world.skyOf(cx, cy) != 1 || world.get(cx, cy).material != M::Empty) continue;
         spawnParticle(x, y, -0.9f, 4.5f, 70, {150, 160, 190, 150}, 0.12f);
     }
 }
@@ -3912,6 +3938,7 @@ static void drawStall(float fx, float fy, int kind, int layer)
         {
         case UK_WEAPON:
         {
+            if (kind == 0) break; // the smith's wares are racked on the wall behind the awning (drawStallRack)
             Weapon w; w.type = un.a; w.metal = un.b;
             const float* p = WPOS[std::min(s, 5)];
             drawWeaponSprite(w, {fx + p[0], fy + p[1]}, p[2], 0.5f, false);
@@ -3973,6 +4000,53 @@ void prepareStallArt()
             SetTextureFilter(stallArt[kind][layer], TEXTURE_FILTER_POINT);
         }
     UnloadRenderTexture(canvas);
+}
+
+// The weaponsmith's wares, racked dark on the wall behind the counter: small silhouettes standing in the notched rails painted on the stall's
+// back (decor.cpp:stallBack), under the awning and behind the merchant. A peg stands empty once the weapon is yours.
+static void drawStallRack(float fx, float fy, int kind)
+{
+    if (kind != 0) return;
+    auto hp = [&](float x0, float y0, float w, float h, Color c) { DrawRectangleRec({fx + x0, fy + y0, w, h}, c); }; // half-unit art
+    auto dim = [](Color c, float k) { return Color{(unsigned char)(c.r * k), (unsigned char)(c.g * k), (unsigned char)(c.b * k), 255}; };
+    const Color wood = {50, 34, 24, 255}, woodL = {70, 48, 32, 255}, leather = {38, 28, 22, 255}, brass = {78, 62, 30, 255};
+    int w = 0;
+    for (int i = 0; i < UNLOCK_COUNT; i++)
+    {
+        const Unlock& un = UNLOCKS[i];
+        if (un.shop != 0 || un.kind != UK_WEAPON) continue;
+        float cx = -16.5f + 6.6f * (w++);
+        if (META.stocked[i] || META.owned[i]) continue;
+        Color m = dim(METALS[un.b].color, 0.55f), ml = dim(METALS[un.b].color, 0.85f);
+        float y0 = -31.0f; // the weapon hangs from the upper rail, its foot at the lower one
+        switch (un.a)
+        {
+        case W_SWORD: case W_DAGGER:
+        {
+            float bl = un.a == W_SWORD ? 9.5f : 5.5f, by = y0 + (un.a == W_SWORD ? 0.5f : 4.5f);
+            hp(cx - 0.5f, by, 1, bl, m); hp(cx - 0.5f, by, 0.5f, bl, ml); hp(cx - 0.25f, by - 0.5f, 0.5f, 0.5f, m);
+            hp(cx - 2, by + bl, 4, 0.8f, brass); hp(cx - 0.5f, by + bl + 0.8f, 1, 3, leather); hp(cx - 0.8f, by + bl + 3.8f, 1.6f, 1, brass);
+            break;
+        }
+        case W_AXE:
+            hp(cx - 0.5f, y0 + 1, 1, 15, wood); hp(cx - 0.5f, y0 + 1, 0.5f, 15, woodL);
+            hp(cx + 0.5f, y0 + 1, 3.5f, 4, m); hp(cx + 0.5f, y0 + 1, 3.5f, 0.5f, ml); hp(cx + 3.5f, y0 + 1.5f, 0.5f, 3.5f, ml); hp(cx + 0.5f, y0 + 5, 2, 1.5f, m);
+            break;
+        case W_MACE:
+            hp(cx - 0.5f, y0 + 4, 1, 12, wood); hp(cx - 0.5f, y0 + 4, 0.5f, 12, woodL);
+            hp(cx - 2, y0 + 0.5f, 4, 4, m); hp(cx - 2, y0 + 0.5f, 1, 4, ml); hp(cx - 2.5f, y0 + 1.5f, 0.5f, 1, ml); hp(cx + 2, y0 + 1.5f, 0.5f, 1, ml); hp(cx - 0.5f, y0, 1, 0.5f, ml);
+            break;
+        case W_SPEAR:
+            hp(cx - 0.5f, y0 + 3.5f, 1, 12.5f, wood); hp(cx - 0.5f, y0 + 3.5f, 0.5f, 12.5f, woodL);
+            hp(cx - 1, y0 + 0.8f, 2, 3, m); hp(cx - 1, y0 + 0.8f, 0.5f, 3, ml); hp(cx - 0.5f, y0, 1, 0.8f, ml);
+            break;
+        default: // the crossbow, stock down, limbs across the top
+            hp(cx - 0.5f, y0 + 3, 1, 13, wood); hp(cx - 0.5f, y0 + 3, 0.5f, 13, woodL);
+            hp(cx - 3.5f, y0 + 4.2f, 7, 1, m); hp(cx - 3.5f, y0 + 4.2f, 7, 0.5f, ml); hp(cx - 3.5f, y0 + 3.2f, 0.5f, 1, m); hp(cx + 3, y0 + 3.2f, 0.5f, 1, m);
+            hp(cx - 3.2f, y0 + 5.2f, 6.4f, 0.4f, leather);
+            break;
+        }
+    }
 }
 
 static void drawStallLayer(float x, float y, int kind, int layer)
@@ -4118,9 +4192,7 @@ void drawEntities(int camX, int camY)
                     DrawRectangle((int)std::floor(x + (lx - x) * t), (int)std::floor(y + (ly - y) * t), 1, 1, k % 2 ? Color{92, 92, 100, 255} : Color{52, 52, 58, 255});
                 }
             float fl = 0.85f + 0.15f * hash2((int)it.x, G.frame / 4, 9);
-            BeginBlendMode(BLEND_ADDITIVE);
-            DrawCircleGradient((int)lx, (int)ly + 4, 9 * fl, {255, 160, 70, 60}, {255, 160, 70, 0});
-            EndBlendMode();
+            deferAdditive([=]() { DrawCircleGradient((int)lx, (int)ly + 4, 9 * fl, {255, 160, 70, 60}, {255, 160, 70, 0}); });
             for (int layer = 1; layer >= 0; layer--) // the flame behind the cage
             {
                 const Texture2D& lt = propTex(PR_LANTERN, layer);
@@ -4133,6 +4205,37 @@ void drawEntities(int camX, int camY)
         {
             auto px = [](float X, float Y, float W, float H, Color c) { DrawRectangleRec({X, Y, W, H}, c); }; // half-unit art
             float tx = std::floor(x);
+            if (it.style == 2) // a candle bracket: an iron dish on a bracket with three candles guttering in it, wax run down the stone
+            {
+                px(tx - 3.5f, y + 0.5f, 7, 1, {60, 62, 72, 255}); px(tx - 3.5f, y + 0.5f, 7, 0.5f, {128, 132, 146, 255}); px(tx - 3, y + 1.5f, 6, 1, {38, 38, 46, 255});
+                px(tx - 0.5f, y + 2.5f, 1, 3, {48, 48, 58, 255}); px(tx - 1.5f, y + 5, 3, 0.5f, {70, 72, 84, 255});
+                static const float CX[3] = {-2.2f, 0.2f, 2.4f}, CH[3] = {3.0f, 4.5f, 2.5f};
+                for (int k = 0; k < 3; k++)
+                {
+                    px(tx + CX[k] - 0.5f, y - CH[k] + 0.5f, 1, CH[k], {222, 212, 186, 255}); px(tx + CX[k] - 0.5f, y - CH[k] + 0.5f, 0.5f, CH[k], {246, 238, 214, 255});
+                    px(tx + CX[k] + 0.2f, y - CH[k] + 1.5f, 0.5f, 1.5f, {190, 178, 150, 255});
+                    drawFlame(tx + CX[k], y - CH[k] + 0.5f, 0.3f, (int)it.x + k * 5);
+                }
+                px(tx - 3.5f, y + 1.5f, 0.5f, 3, {200, 190, 166, 255}); // wax
+                break;
+            }
+            if (it.style == 1) // a wall sconce: an iron plate bolted to the stonework, a curved arm, a cup holding a pitch-soaked brand
+            {
+                px(tx - 2, y + 0.5f, 4, 6, {40, 40, 48, 255});            // the plate
+                px(tx - 2, y + 0.5f, 4, 0.5f, {110, 112, 126, 255});
+                px(tx - 2, y + 0.5f, 0.5f, 6, {84, 86, 98, 255});
+                px(tx + 1.5f, y + 1, 0.5f, 5.5f, {22, 22, 28, 255});
+                px(tx - 1.5f, y + 1.5f, 0.5f, 0.5f, {170, 172, 184, 255}); px(tx + 0.5f, y + 5, 0.5f, 0.5f, {170, 172, 184, 255}); // rivets
+                px(tx - 1.5f, y - 0.5f, 3, 1.5f, {76, 78, 88, 255});     // the cup
+                px(tx - 1.5f, y - 0.5f, 3, 0.5f, {138, 142, 156, 255});
+                px(tx - 1, y + 1, 2, 3, {96, 62, 36, 255});               // the brand's foot
+                px(tx - 1.5f, y - 3.5f, 3, 3, {38, 28, 22, 255});         // the charred head
+                px(tx - 1, y - 4, 2, 1, {28, 20, 16, 255});
+                px(tx - 1, y - 2.5f, 0.5f, 1, {212, 90, 28, 255});
+                px(tx + 0.5f, y - 3, 0.5f, 0.5f, {240, 140, 40, 255});
+                drawFlame(tx, y - 3.5f, 0.95f, (int)it.x);
+                break;
+            }
             px(tx - 2.5f, y - 1, 5, 1, {58, 52, 48, 255});       // a stone footing
             px(tx - 1.5f, y - 2, 3, 1, {84, 78, 74, 255});
             px(tx - 1, y - 11, 2, 9.5f, {96, 62, 36, 255});       // the pole: lit left, shaded right
@@ -4151,6 +4254,7 @@ void drawEntities(int camX, int camY)
         }
         case IT_SHOP:
             drawStallLayer(x, y, it.data, 0);
+            drawStallRack(std::floor(x), std::floor(y), it.data);
             { static const Color APRON[3] = {{112, 76, 48, 255}, {70, 98, 74, 255}, {120, 52, 44, 255}}; drawFolk(0, it.data % 4, 0, false, -1, x + 4, y - 7, APRON[it.data % 3], it.data); } // the stallholder, a villager like the rest
             drawStallLayer(x, y, it.data, 1);
             drawStall(x, y, it.data, 2);
@@ -4253,7 +4357,7 @@ void drawEntities(int camX, int camY)
         {
             float bx = l.x - camX, cy = l.y - camY, ww = l.w, wh = l.wh, len = l.beam * 1.3f, k = 0.9f, br = 0.9f + 0.1f * std::sin(G.frame * 0.03f + l.x);
             float by = cy + wh / 2; // rays leave from the sill
-            BeginBlendMode(BLEND_ADDITIVE);
+            deferAdditive([=]() {
             DrawCircleGradient((int)bx, (int)cy, std::max(ww, wh) * 1.3f, {170, 205, 255, (unsigned char)(48 * br * l.dim)}, {170, 205, 255, 0}); // a halo round the glass
             if (l.dim >= 0.99f) DrawRectangleRec({bx - ww / 2, cy - wh / 2, ww, wh}, {150, 190, 255, (unsigned char)(70 * br)});                                  // the whole pane glowing
             if (l.dim >= 0.99f) DrawRectangleRec({bx - ww / 2 + 1, cy - wh / 2 + 1, ww - 2, wh - 2}, {200, 225, 255, (unsigned char)(40 * br)});
@@ -4267,7 +4371,7 @@ void drawEntities(int camX, int camY)
                     if (a) DrawRectangleRec({bx + c * spread + xo, by + j, 1, 1}, {170, 205, 255, a});
                 }
             }
-            EndBlendMode();
+            });
             if (G.frame % 18 == 0) spawnParticle(l.x - 0.9f * frange(0, len) + frange(-ww / 2, ww / 2), l.y + wh / 2 + frange(0, len * 0.7f), frange(-0.03f, 0.03f), frange(0.0f, 0.04f), irange(90, 160), {200, 220, 255, 140}, 0);
         }
         if (!l.flame || off(l.x - camX, l.y - camY, 8)) continue;
@@ -4280,9 +4384,24 @@ void drawEntities(int camX, int camY)
                 DrawLineEx({x - 7, y + 3 - 3.0f * k}, {x + 7, y + 1 + 3.0f * k}, 1.6f, {70, 46, 28, 255});
                 DrawLineEx({x - 7, y + 2.4f - 3.0f * k}, {x + 7, y + 0.4f + 3.0f * k}, 0.6f, {120, 82, 50, 255});
             }
-        drawFlame(x - 3.0f * sc * 0.4f, y + 2, sc * 0.9f, (int)l.x);
-        drawFlame(x + 3.0f * sc * 0.4f, y + 2, sc * 0.8f, (int)l.x + 9);
-        drawFlame(x, y + 2, sc, (int)l.x + 4);
+        if (l.r >= 88 && l.r < 100) // a hearth pit under a cauldron: tongues licking up round its belly, low ones in the coals
+        {
+            static const float FX[7] = {-8, -5.5f, -3, 0, 3, 5.5f, 8}, FS[7] = {0.7f, 0.9f, 1.05f, 1.2f, 1.02f, 0.88f, 0.68f};
+            for (int k = 0; k < 7; k++) drawFlame(x + FX[k], y + 2.5f, FS[k] * (0.92f + 0.16f * hash2((int)l.x + k, G.frame / 6, 21)), (int)l.x + k * 3);
+        }
+        else if (l.r < 88) // a fireplace: a bed of flame along the logs
+        {
+            static const float FX[5] = {-6, -3, 0, 3, 6}, FS[5] = {0.55f, 0.8f, 0.95f, 0.78f, 0.58f};
+            for (int k = 0; k < 5; k++) drawFlame(x + FX[k], y + 1.5f, FS[k] * (0.92f + 0.16f * hash2((int)l.x + k, G.frame / 6, 21)), (int)l.x + k * 3);
+        }
+        else
+        {
+            drawFlame(x - 3.0f * sc * 0.4f, y + 2, sc * 0.9f, (int)l.x);
+            drawFlame(x + 3.0f * sc * 0.4f, y + 2, sc * 0.8f, (int)l.x + 9);
+            drawFlame(x, y + 2, sc, (int)l.x + 4);
+        }
+        if (G.frame % 3 == 0 && !off(x, y, 60) && l.r >= 84 && l.r < 100) // sparks and embers lifting off a hearth
+            spawnParticle(l.x + frange(-5, 5), l.y - 2, frange(-0.12f, 0.12f), frange(-0.7f, -0.35f), irange(20, 46), {255, (unsigned char)(150 + irand(80)), 50, 255}, -0.004f);
         if (G.frame % 5 == 0 && !off(x, y, 60)) spawnParticle(l.x + frange(-3, 3), l.y - 4 * sc, frange(-0.15f, 0.15f), frange(-0.6f, -0.3f), irange(24, 50), {255, (unsigned char)(170 + irand(60)), 60, 255}, -0.004f);
     }
     drawTumbleweeds(camX, camY);
@@ -4433,4 +4552,5 @@ void drawEntities(int camX, int camY)
 
     for (auto& q : G.parts)
         if (!off(q.x - camX, q.y - camY, 1)) DrawRectangle((int)(q.x - camX), (int)(q.y - camY), 1, 1, q.col);
+    flushAdditive(); // every queued glow at once
 }

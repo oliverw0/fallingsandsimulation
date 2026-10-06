@@ -22,7 +22,7 @@ static Color texelColour(int ux, int uy)
     const Cell& c = world.get(ux * k, uy * k);
     if (c.material == CellMaterial::Empty)
     {
-        if (world.skyOf(ux * k, uy * k)) return {18, 24, 52, 255};                    // open night sky
+        if (world.skyOf(ux * k, uy * k) == 1) return {18, 24, 52, 255};                    // open night sky
         Color bg = world.bgOf(ux * k, uy * k);
         return {(unsigned char)(10 + bg.r * 0.28f), (unsigned char)(10 + bg.g * 0.28f), (unsigned char)(14 + bg.b * 0.32f), 255}; // back wall: a dim hollow
     }

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./compile.sh)",
+      "Bash(sh compile.sh)",
+      "Bash(./sand)",
+      "Bash(./sand *)",
+      "Bash(g++ *)",
+      "Bash(clang++ *)",
+      "Bash(brew --prefix *)"
+    ]
+  }
+}

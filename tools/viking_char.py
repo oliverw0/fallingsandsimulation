@@ -99,11 +99,13 @@ def draw_held(d, H, k=1.0):
     elif t == 'sword':
         # a Norse sword, weathered: a broad parallel-edged blade with a fuller and a rounded point, nicked along the edge and
         # pitted; a short straight guard, a leather-wrapped grip and a lobed pommel
-        d.cap(g - a * 4.5, g + a * 1.4, 1.3 * k, 1.3 * k, zg, zg, 'belt', tex=binding(-1, 2))
-        d.ball(g - a * 5.6, 1.9 * k, zg, 'steel')
-        d.ball(g - a * 5.6 + s * 1.7 * k, 1.1 * k, zg - 0.5, 'steel')
-        d.ball(g - a * 5.6 - s * 1.7 * k, 1.1 * k, zg - 0.5, 'steel')
-        d.cap(g + a * 1.8 + s * 4.6 * k, g + a * 1.8 - s * 4.6 * k, 1.0 * k, 1.0 * k, zg, zg, 'steel')
+        fo = H.get('fore', 1.0)       # a level sweep seen side-on: the blade turns toward / away from the viewer and shortens
+        d.cap(g - a * 4.5 * fo, g + a * 1.4 * fo, 1.3 * k, 1.3 * k, zg, zg, 'belt', tex=binding(-1, 2))
+        d.ball(g - a * 5.6 * fo, 1.9 * k, zg, 'steel')
+        d.ball(g - a * 5.6 * fo + s * 1.7 * k, 1.1 * k, zg - 0.5, 'steel')
+        d.ball(g - a * 5.6 * fo - s * 1.7 * k, 1.1 * k, zg - 0.5, 'steel')
+        d.cap(g + a * 1.8 * fo + s * 4.6 * k, g + a * 1.8 * fo - s * 4.6 * k, 1.0 * k, 1.0 * k, zg, zg, 'steel')
+        pt = lambda base, u, v: base + a * (u * fo) + s * (v * k)
         w = 1.7
         top = [(2, w), (12, w), (12.7, w - 0.5), (13.4, w), (22, w), (22.6, w - 0.6), (23.3, w), (32, w), (32.5, w - 0.5), (33.2, w), (39, w), (43, w * 0.7), (46, w * 0.3), (47, 0)]
         bot = [(46, -w * 0.3), (43, -w * 0.7), (39, -w), (27, -w), (27.6, -w + 0.5), (28.2, -w), (14, -w), (2, -w)]

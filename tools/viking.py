@@ -37,6 +37,7 @@ RIM = (110, 236, 255)
 OUTLINE_MODE = 'tint'                       # 'tint': the outline is the edge colour darkened (not black); 'black': the old hard outline
 OUTLINE_KEEP = 0.58                         # how much of the edge colour a tinted outline keeps
 DEPTH_LINE = 0.28                           # how far the inner depth lines go toward the outline colour
+SMOOTH = 0                                  # passes of normal smoothing across touching parts: shading flows over joints instead of restarting on every capsule (foes use it)
 RIM_ON = False                              # the cool back-light is off (user: no blue tint)
 OUTLINE = (14, 8, 22)
 EYE = (255, 150, 40); EYE_CORE = (255, 236, 170)
@@ -116,12 +117,34 @@ class Canvas:
         depth = np.full((s.h, s.w), float(z)) if zfn is None else zfn(s.X, s.Y)
         _View(s, (slice(0, s.h), slice(0, s.w))).write(m, depth, nrm, mat_, np.broadcast_to(aux, (s.h, s.w)).astype(int), dark, obj)
 
+    def smoothed_normals(s, passes):
+        """The normal buffer blended with its neighbours where the surface is continuous (close in depth): a limb's shading runs on through
+        the knee, the arm into the shoulder, the head into the neck - no more beads strung on a string."""
+        h, w = s.h, s.w
+        has = s.mat >= 0
+        n = s.n.copy()
+        zthr = 5.0 * s.S
+        pad = lambda a, v: np.pad(a, [(1, 1), (1, 1)] + [(0, 0)] * (a.ndim - 2), constant_values=v)
+        zp, hp = pad(np.where(has, s.z, -1e9), -1e9), pad(has, False)
+        for _ in range(passes):
+            np_ = pad(n, 0.0)
+            acc, wsum = n * 2.0, np.full((h, w), 2.0)
+            for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (-1, -1), (1, -1), (-1, 1)):
+                sl = (slice(1 + dy, 1 + dy + h), slice(1 + dx, 1 + dx + w))
+                wt = (hp[sl] & has & (np.abs(zp[sl] - s.z) < zthr)) * (1.0 if dy == 0 or dx == 0 else 0.6)
+                acc += wt[..., None] * np_[sl]
+                wsum += wt
+            n = acc / wsum[..., None]
+            n /= np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-6)
+            n = np.where(has[..., None], n, 0.0)
+        return n
+
     # ---- shading
     def render(s, outline=True, rim_side=1, floor_clip=True):
         """-> (rgb[h][w][3], tag[h][w], opaque mask). rim_side: +1 puts the rim on right-facing edges, -1 on left-facing."""
         h, w = s.h, s.w
         has = s.mat >= 0
-        n = s.n
+        n = s.smoothed_normals(SMOOTH) if SMOOTH else s.n
         I = 0.18 + 0.82 * np.maximum(0, (n * LIGHT).sum(-1))
         band = np.clip(np.floor(I * 4.6).astype(int) + s.aux - s.dark, 0, 4)
         rgb = np.zeros((h, w, 3), int)

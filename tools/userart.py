@@ -374,6 +374,9 @@ def emit():
                 frames.append((CLIPS.index(an), gr, anim.joints_of(S, J, P)))
         if S.kind != 'none': anim.emit_parts(out, name.upper(), S)
         emit_sheet(out, name.upper(), S, frames, S.cx, S.gy)
+    import foes3d_run
+    for name in foes3d_run.CANVAS:   # the foes that are new (not repaints of an old sheet)
+        if name not in anim.SPECS: foes3d_run.emit_any(out, name)
     return '\n'.join(out) + '\n'
 
 

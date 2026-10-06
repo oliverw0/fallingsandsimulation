@@ -1,6 +1,13 @@
 #pragma once
 #include <raylib.h>
+#if defined(RAYLIB_VERSION_MAJOR) && RAYLIB_VERSION_MAJOR >= 6
+// raylib 6 changed DrawCircleGradient to take a Vector2 centre; keep the old int-centre form working
+static inline void DrawCircleGradient(int cx, int cy, float radius, Color inner, Color outer) {
+    DrawCircleGradient(Vector2{(float)cx, (float)cy}, radius, inner, outer);
+}
+#endif
 #include <vector>
+#include <functional>
 #include <string>
 #include <memory>
 #include <cmath>
@@ -143,7 +150,9 @@ enum EnemyType {
     E_WOLF, E_REDCAP, E_DRAUGR, E_TROLL, E_BANSHEE, E_KELPIE, E_GUARD, // Norse & Scottish folklore
     E_RISEN, // the dead levy on the field before Dunmoor
     E_SERPENT, E_SCORPION, E_RAIDER, // the open sea; the desert east of Dunmoor
-    E_BLACKKNIGHT, E_LICH, ENEMY_COUNT
+    E_BLACKKNIGHT, E_LICH,
+    E_SKELSPEAR, E_SKELSHIELD, E_BONEMAGE, // more of the crypt's dead: a spearman, a helmed shield-and-axe skeleton, the Skeletal Magus (twice your height, casts)
+    ENEMY_COUNT
 };
 enum AIType { AI_WALK, AI_RANGED, AI_FLY, AI_HOP, AI_BOMB, AI_FLYCAST, AI_BOSS_KNIGHT, AI_BOSS_LICH };
 
@@ -176,6 +185,7 @@ struct Mob
     int burn = 0, chill = 0, shock = 0, poison = 0, iframes = 0, hurtFlash = 0, envCd = 0;
     int wet = 0, oily = 0, bloody = 0; // frames left coated: wet won't catch fire but conducts; oil burns longer and hotter
     int cd = 0, timer = 0, state = 0, attackT = 0;
+    int spell = -1, spellFired = -1; // a caster's next spell (its rune shows this colour as it winds up) and the one just let go
     int bleedMark = 0; // struck by a bleeding weapon: dies messily
     int dropT = 0;     // frames left falling through one-way platforms
     int stuckT = 0;    // frames spent wedged inside rock or rubble
@@ -224,7 +234,7 @@ struct Player
     float stamina = 100;
     float breath = 100; // under water it runs out, then you drown
     int attackCd = 0, swingT = 0, swingDir = 1, recoil = 0;
-    int atkStyle = 0, atkLen = 1, atkHitAt = 0, combo = 0, comboT = 0, swingId = 0; // the melee attack under way (swingT: frames left)
+    int atkStyle = 0, atkLen = 1, atkHitAt = 0, combo = 0, swingVar = 0, comboT = 0, swingId = 0; // the melee attack under way (swingT: frames left)
     float aim = 0;
     int coyote = 0, jumpBuf = 0, onWall = 0;
     int mantleT = 0, mantleDir = 0; // pulling up over a ledge: frames left, and which way
@@ -262,6 +272,7 @@ struct Proj
     Element el = EL_PHYS;
     int life = 60, bounce = 0, blast = 0, power = 3;
     float grav = 0;
+    float push = 0; // extra knockback on a hit (a wind blast)
     bool homing = false, pierce = false, friendly = true, trailFire = false, fuse = false, alive = true;
     Color col = WHITE;
     std::shared_ptr<std::vector<Shot>> payload;
@@ -286,11 +297,12 @@ enum InteractType { IT_CHEST, IT_ANVIL, IT_SHRINE, IT_TORCH, IT_STONE, IT_SHOP, 
 enum DecorKind { DK_CACTUS, DK_BUSH, DK_SKELETON, DK_GIANT,
                  DK_DRESSER, DK_TABLE, DK_PICTURE, DK_TOOL, DK_SHELF, DK_RACK, DK_ARROWS, DK_BUNK, DK_HEARTH, DK_SHIELD, DK_POST, DK_LADDER, DK_YARD,
                  DK_TAPESTRY, DK_DRAPE, DK_CHAIN, DK_BLOOD, DK_HORNS, DK_ANTLERS, DK_DRAGONPILLAR, DK_IDOL, DK_CRANE, DK_SPIKE,
-                 DK_LEANSHIELD, DK_SPEARPOST, DK_TARGET, DK_BOWRACK, DK_COBWEB, DK_LEAK };
+                 DK_LEANSHIELD, DK_SPEARPOST, DK_TARGET, DK_BOWRACK, DK_COBWEB, DK_LEAK, DK_CHANDELIER, DK_STATUE };
 Image decorImageFine(int kind, int var, int size);
 enum PropArt { PR_CRATE, PR_BARREL, PR_BOX, PR_PLANK, PR_ANVIL, PR_SHRINE, PR_HEART, PR_POTION, PR_HEN, PR_LANTERN, PR_TABLE, PR_RACK, PR_GRAVE, PR_CART, PR_ICE, PR_ALTAR, PR_STONE };
 Image propImageFine(int what, int var); // decor.cpp: props, pickups and displays at half a unit per pixel (entities.cpp draws them)
 int decorAnchor(int kind, int var);
+void chandelierGeom(int var, int size, int& W, int& H, int& n, int& ringY); // decor.cpp: DK_CHANDELIER's image size, candle count and hoop row (half-unit pixels)
 Color clothTone(int var, int t);
 void exportDecorSheet(const char* path);
 void exportPropSheet(const char* path);
@@ -585,6 +597,8 @@ void drawPlayerRig(int camX, int camY); // the old posed-limb hero (rig.cpp), no
 void drawPlayerViking(int camX, int camY); // the player from the baked Viking sheets (viking.cpp)
 void drawMobAnimated(const Mob& m, int camX, int camY);
 int windupFor(int type); // an enemy's melee wind-up, in frames
+void deferAdditive(std::function<void()> f); // glows are queued and drawn in one additive pass (flushAdditive, end of drawEntities): every blend-mode switch flushes the draw batch
+void flushAdditive();
 void drawFlame(float x, float y, float s, int seed); // a live flame rooted at (x, y), ~7s units tall
 void drawBurning(const Mob& m, int camX, int camY); // flames licking up off anything on fire
 void burstSprite(const Mob& m);
@@ -593,6 +607,7 @@ void detail2x(const Color* src, int w, int h, std::vector<Color>& out); // pixel
 void prepareStallArt(); // builds the stalls' upscaled art (outside any render texture)
 enum AttackStyle { ATK_SLASH, ATK_STAB, ATK_THRUST, ATK_CHOP, ATK_SLAM, ATK_SWEEP };
 void attackPose(float& ang, float& ext, int back);
+Color burnTint(const Mob& m); // the orange shade of a burning body (rig.cpp)
 void startAttack(const Weapon& w);
 void drawWeaponSprite(const Weapon& w, Vector2 at, float ang, float scale, bool centred);
 bool weapon3dDraw(const Weapon& w, Vector2 at, float ang, float scale, bool centred); // viking.cpp: the 3D-modelled weapon icons
@@ -640,7 +655,7 @@ void growDampCaves(); // the damp caves fill in as the camera nears them
 enum Sfx {
     SFX_SWING, SFX_HIT, SFX_CLANG, SFX_EXPLODE, SFX_CAST, SFX_FIRE, SFX_ZAP, SFX_ICE, SFX_BOW, SFX_JUMP,
     SFX_LAND, SFX_STEP, SFX_HURT, SFX_DIE, SFX_PICKUP, SFX_ORE, SFX_CHEST, SFX_PORTAL, SFX_CLICK, SFX_CRAFT,
-    SFX_ROLL, SFX_ROAR, SFX_POTION, SFX_SPLASH, SFX_HOOK, SFX_BARK, SFX_HOWL, SFX_KNOCK, SFX_SMASH, SFX_THRUST, SFX_SLAM, SFX_HEAVY, SFX_XBOW, SFX_DING, SFX_DRAW, SFX_WHOOSH, SFX_COUNT
+    SFX_ROLL, SFX_ROAR, SFX_POTION, SFX_SPLASH, SFX_HOOK, SFX_BARK, SFX_HOWL, SFX_KNOCK, SFX_SMASH, SFX_THRUST, SFX_SLAM, SFX_HEAVY, SFX_XBOW, SFX_DING, SFX_DRAW, SFX_WHOOSH, SFX_SWIM, SFX_CREAK, SFX_COUNT
 };
 void initAudio();
 void closeAudio();

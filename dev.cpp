@@ -31,7 +31,7 @@ static void buildMap()
                 const Cell& c = world.get(cx, cy);
                 Color col;
                 if (c.material != CellMaterial::Empty) col = cellColor(c, cx, cy);
-                else if (world.skyOf(cx, cy)) col = {14, 18, 40, 255};
+                else if (world.skyOf(cx, cy) == 1) col = {14, 18, 40, 255};
                 else { Color b = world.bgOf(cx, cy); col = {(unsigned char)(b.r * 0.45f), (unsigned char)(b.g * 0.45f), (unsigned char)(b.b * 0.45f), 255}; }
                 col.a = 255;
                 px[(size_t)j * mapW + i] = col;

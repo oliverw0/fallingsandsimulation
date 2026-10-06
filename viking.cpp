@@ -115,7 +115,7 @@ static Color statusTint(const Mob& m)
     if (m.wet) c = {190, 210, 255, 255};
     if (m.chill > 0) c = {180, 220, 255, 255};
     if (m.poison > 0) c = {170, 230, 150, 255};
-    if (m.burn > 0) c = {255, 190, 150, 255};
+    if (m.burn > 0) c = burnTint(m);
     if (m.inLiquid) c = {(unsigned char)(c.r * 0.7f), (unsigned char)(c.g * 0.88f), c.b, c.a}; // seen through the water: cooler, dimmer
     return c;
 }
@@ -162,8 +162,8 @@ void drawPlayerViking(int camX, int camY)
     else if (swinging)
     {
         bool heavy2 = wpn->type == W_AXE || wpn->type == W_MACE; // left swing, right swing, overhead
-        int variant = heavy2 ? P.combo : (P.combo == 2 && wpn->type != W_PAN ? 1 : 0);
-        clip = variant == 2 ? VC_ATK2 : (variant ? VC_ATK1 : VC_ATK0);
+        int variant = wpn->type == W_SWORD ? P.swingVar : heavy2 ? P.combo : (P.combo == 2 && wpn->type != W_PAN ? 1 : 0); // sword: level left, level right, overhead, low sweep
+        clip = variant == 3 ? VC_ATK3 : variant == 2 ? VC_ATK2 : (variant ? VC_ATK1 : VC_ATK0);
         int n = S->count[clip], s0, s1;
         strikeOf(wpn->type, variant, s0, s1);
         if (wpn->type == W_DAGGER && variant == 0) s0 = 3, s1 = 4;
@@ -231,6 +231,12 @@ void drawPlayerViking(int camX, int camY)
     Color gem = wpn && wpn->type == W_STAFF ? wpn->staff.gem : Color{150, 200, 255, 255};
     Color armour = P.armour >= 0 ? METALS[P.armour].color : Color{150, 150, 156, 255};
     drawFrame(SS, SS.first[clip] + fr, bx, by, f, metal, gem, armour, statusTint(m), m.hurtFlash > 0 && (m.hurtFlash % 4 < 2));
+    if (m.burn > 0) // a hot glow added over the orange shade
+    {
+        BeginBlendMode(BLEND_ADDITIVE);
+        drawFrame(SS, SS.first[clip] + fr, bx, by, f, metal, gem, armour, {34, 11, 0, 255}, false);
+        EndBlendMode();
+    }
 }
 
 

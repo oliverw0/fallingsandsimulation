@@ -28,6 +28,7 @@ const Ramp OCHRE = {C(52, 32, 10), C(98, 64, 18), C(148, 102, 32), C(198, 148, 5
 const Ramp PLUM = {C(28, 10, 34), C(56, 22, 64), C(88, 38, 96), C(126, 64, 134), C(170, 102, 174)};
 const Ramp NIGHT = {C(6, 6, 8), C(16, 16, 20), C(30, 30, 36), C(48, 48, 56), C(78, 78, 90)};
 const Ramp BLOODR = {C(40, 6, 8), C(70, 10, 12), C(102, 16, 16), C(136, 26, 24), C(170, 42, 36)};
+const Ramp BONE_ = {C(70, 62, 56), C(120, 112, 98), C(170, 162, 142), C(210, 202, 178), C(238, 232, 210)};
 const Ramp CLOTHS[6] = {CRIM, NAVY, FOREST, OCHRE, PLUM, NIGHT};
 
 inline int clampi(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
@@ -360,26 +361,53 @@ void hearth(Cv& c, int H)
     plank(c, 2, H - 31, W - 3, H - 29, true, 77, 4);  // the mantel, a heavy beam
     c.hline(3, W - 4, H - 28, tone(WOOD, 0));
     int x0 = cx - 13, x1 = cx + 13, y0 = H - 22;
-    for (int y = y0; y < H - 3; y++)                   // the opening, arched, black inside
+    auto insideArch = [&](int x, int y, float grow) {
+        float dx = (x - cx) / (13.5f + grow), top = 1 - std::sqrt(std::max(0.0f, 1 - dx * dx)) * 0.5f;
+        return std::fabs(dx) <= 1 && y >= y0 - (int)grow + (int)(top * 6 - 2) && y < H - 3;
+    };
+    for (int y = y0 - 4; y < H - 3; y++)                // the voussoirs: a ring of dressed stones round the arch, a keystone at the crown
+        for (int x = x0 - 4; x <= x1 + 4; x++)
+        {
+            if (!insideArch(x, y, 3.5f) || insideArch(x, y, 0)) continue;
+            float ang = std::atan2((float)(y - (y0 + 6)), (float)(x - cx));
+            int blk = (int)std::floor(ang * 5.2f), sub = (int)std::floor(ang * 5.2f * 3 + 100);
+            bool joint = sub % 3 == 0, key = std::fabs(ang + 1.5708f) < 0.16f;
+            c.px(x, y, joint ? STONE[0] : tone(STONE, (key ? 4 : 3) + (R(blk, 3, 95) > 0.6f) - (R(blk, 4, 96) > 0.75f)));
+        }
+    for (int y = y0; y < H - 3; y++)                    // the firebox: a lining of small bricks, soot-black, glowing faintly at the floor
         for (int x = x0; x <= x1; x++)
         {
-            float dx = (x - cx) / 13.5f, top = 1 - std::sqrt(std::max(0.0f, 1 - dx * dx)) * 0.5f;
-            if (y < y0 + (int)(top * 6 - 2)) continue;
-            c.px(x, y, (y > H - 8) ? C(34, 20, 14) : C(14, 10, 10));
+            if (!insideArch(x, y, 0)) continue;
+            int row = (y - y0) / 3, off = (row & 1) * 3, u = (x - x0 + off) % 6;
+            bool mortar = (y - y0) % 3 == 2 || u == 5;
+            float low = std::max(0.0f, (y - (H - 14)) / 11.0f), soot = R(x, y / 2, 79);
+            Color col = mortar ? C(16, 12, 12) : (soot > 0.6f ? C(22, 18, 18) : C(34, 26, 24));
+            col = lerpColor(col, C(120, 44, 18), low * low * 0.55f);
+            c.px(x, y, col);
         }
-    for (int y = H - 22; y < H - 8; y++) for (int x = cx - 12; x <= cx + 12; x++) if (c.on(x, y) && y < H - 16 && R(x, y, 79) > 0.55f) c.px(x, y, C(24, 20, 20)); // soot
-    for (int k = 0; k < 2; k++) c.line((float)cx - 8, H - 5 - k * 2, (float)cx + 8, H - 9 + k * 3, tone(WOOD, 1 + k), 2); // crossed logs
-    for (int f = 0; f < 5; f++) // flames
+    for (int x = cx - 12; x <= cx + 12; x++) { c.px(x, H - 4, C(74, 66, 62)); if (R(x, 2, 97) > 0.5f) c.px(x, H - 4, C(104, 94, 88)); } // the ash bed
+    c.rect(1, H - 3, W - 2, H - 1, tone(STONE, 3)); c.hline(1, W - 2, H - 3, tone(STONE, 4)); c.hline(1, W - 2, H - 1, tone(STONE, 1)); // the hearthstone, jutting out
+    for (int sd : {-1, 1}) // iron firedogs: a post, a ball finial, a foot, a bar for the log
     {
-        int fx = cx - 8 + f * 4, fh = 7 + (int)(R(f, 5, 81) * 5);
-        for (int k = 0; k < fh; k++)
+        int ax = cx + sd * 10;
+        c.vline(ax, H - 12, H - 5, IRON[3]); c.vline(ax + sd, H - 11, H - 5, IRON[1]);
+        c.ball((float)ax + 0.5f, (float)H - 13, 1.6f, 1.6f, IRON, 3);
+        c.hline(ax - 2, ax + 2, H - 5, IRON[2]);
+        c.hline(ax, ax - sd * 4, H - 8, IRON[2]);
+    }
+    for (int k = 0; k < 3; k++) // logs: one across the dogs, two leaning in behind, bark furrowed, ends charred and glowing
+    {
+        float ly = H - 9.0f - (k == 0 ? 0 : 2 + k), l0 = cx - 10.0f + (k == 2 ? 2 : 0), l1 = cx + 10.0f - (k == 1 ? 2 : 0);
+        float dy = k == 0 ? 0.0f : (k == 1 ? 4.0f : -3.0f);
+        for (int t = 0; t <= 40; t++)
         {
-            int hw = k < fh / 2 ? 1 : 0;
-            Color col = k > fh * 2 / 3 ? C(255, 232, 140) : (k > fh / 3 ? C(255, 170, 50) : C(214, 70, 24));
-            for (int d = -hw; d <= hw; d++) c.px(fx + d, H - 9 - k, col);
+            float u = t / 40.0f, x = l0 + (l1 - l0) * u, y = ly + dy * (u - 0.5f);
+            for (int th = 0; th < 3; th++) c.px((int)std::floor(x), (int)std::floor(y) + th, tone(WOOD, th == 0 ? 2 + (R(t, k, 98) > 0.5f) : (th == 1 ? 1 : 0)));
+            if (t < 3 || t > 37) c.px((int)std::floor(x), (int)std::floor(y) + 1, C(236, 100, 34)); // the glowing ends
+            else if (R(t, k, 99) > 0.88f) c.px((int)std::floor(x), (int)std::floor(y) + 2, C(214, 80, 28)); // a seam of heat in the bark
         }
     }
-    for (int x = cx - 10; x <= cx + 10; x++) if (R(x, 4, 83) > 0.5f) c.px(x, H - 5, C(236, 90, 30)); // embers
+    for (int x = cx - 10; x <= cx + 10; x++) for (int y = H - 7; y < H - 4; y++) if (R(x, y, 83) > 0.62f && c.on(x, y) == false) c.px(x, y, R(x, y, 84) > 0.5f ? C(236, 90, 30) : C(150, 44, 18)); // coals
     for (int s = 0; s < 2; s++) // things on the mantel
     {
         int mx = s ? cx + 14 : cx - 16;
@@ -906,10 +934,29 @@ void idol(Cv& c, int H)
 void crane(Cv& c)
 { // a hearth pit and a cauldron hung from a crane of lashed poles: 92 x 66
     int W = c.w, H = c.h, m = W / 2;
-    for (int x = m - 18; x <= m + 18; x++) // the stone ring
+    for (int x = m - 19; x <= m + 19; x++) // the pit: a bed of ash and coals between two courses of rounded fieldstones
     {
-        c.px(x, H - 1, tone(STONE, 2 + (x % 3 == 0))); c.px(x, H - 2, tone(STONE, 3 - (x % 5 == 0))); c.px(x, H - 3, std::abs(x - m) > 14 ? tone(STONE, 2) : C(150, 60, 24));
-        c.px(x, H - 4, std::abs(x - m) > 14 ? tone(STONE, 3) : (R(x, 1, 141) > 0.5f ? C(236, 90, 30) : C(110, 30, 16)));
+        bool inner = std::abs(x - m) <= 14;
+        c.px(x, H - 4, inner ? (R(x, 1, 141) > 0.45f ? C(236, 90, 30) : C(120, 34, 16)) : tone(STONE, 3));
+        c.px(x, H - 3, inner ? (R(x, 2, 142) > 0.6f ? C(170, 64, 22) : C(64, 56, 52)) : tone(STONE, 2));
+    }
+    for (int row = 0; row < 2; row++) // the stone ring: each stone a little ball of its own, lit from the upper left
+        for (int k = -3; k <= 3; k++)
+        {
+            float sx = m + k * 6.0f + (row ? 3 : 0), sy = H - 3.0f - row * 2.6f;
+            if (std::fabs(sx - m) > 19.5f) continue;
+            c.ball(sx, sy, 3.6f, 2.4f, STONE, 2 + (R(k, row, 143) > 0.6f));
+        }
+    for (int i = 0; i < 6; i++) // logs stood up in a cone, blackened, the cracks red
+    {
+        float lean = (i - 2.5f) * 1.6f;
+        for (int t = 0; t < 12; t++)
+        {
+            float x = m + lean * (t / 12.0f) * 2 + (i - 2.5f) * 1.8f * (1 - t / 12.0f), y = H - 6 - t * 0.9f;
+            c.px((int)std::floor(x), (int)std::floor(y), tone(WOOD, 0 + (t % 5 == 0)));
+            c.px((int)std::floor(x) + 1, (int)std::floor(y), tone(WOOD, 1));
+            if (t > 4 && R(i, t, 144) > 0.82f) c.px((int)std::floor(x), (int)std::floor(y), C(210, 70, 24));
+        }
     }
     for (int sd : {-1, 1})
         for (int k = 0; k < 62; k++)
@@ -919,10 +966,15 @@ void crane(Cv& c)
             if (k % 14 == 6) { c.hline(x1 - 1, x1 + 2, H - 1 - k, tone(LINEN, 1)); c.hline(x2 - 1, x2 + 2, H - 1 - k, tone(LINEN, 1)); } // lashings
         }
     for (int x = m - 30; x <= m + 30; x++) { c.px(x, 2, tone(WOOD, 3)); c.px(x, 3, tone(WOOD, 2)); c.px(x, 4, tone(WOOD, 0)); }
-    for (int y = 5; y < 32; y++) { c.px(m, y, tone(IRON, y % 4 < 2 ? 3 : 1)); c.px(m + 1, y, tone(IRON, y % 4 < 2 ? 2 : 0)); } // the chain
-    c.ball(m + 0.5f, 42, 11, 10, IRON, 2);
-    c.hline(m - 10, m + 11, 33, tone(IRON, 4)); c.hline(m - 10, m + 11, 34, tone(IRON, 0));
-    c.hline(m - 9, m + 10, 33, C(120, 70, 30)); // the stew showing at the rim
+    for (int y = 5; y < 33; y++) { c.px(m, y, tone(IRON, y % 4 < 2 ? 3 : 1)); c.px(m + 1, y, tone(IRON, y % 4 < 2 ? 2 : 0)); } // the chain
+    // the cauldron: a pot-bellied iron kettle, rim and bail, rivets, soot rising up its sides from the fire
+    for (int a = 0; a <= 24; a++) { float t = a / 24.0f * 3.1416f; c.px(m - 10 + (int)std::lround(std::cos(t) * 10) + 10 - 10 + 10, 36 - (int)std::lround(std::sin(t) * 5), IRON[3]); } // the bail
+    c.ball(m + 0.5f, 43, 11.5f, 10.0f, IRON, 2);
+    for (int y = 46; y < 54; y++) for (int x = m - 11; x <= m + 12; x++) if (c.on(x, y) && R(x, y / 2, 145) > 0.35f + (53 - y) * 0.05f) c.px(x, y, lerpColor(c.at(x, y), C(12, 10, 10), 0.6f)); // soot
+    for (int k = -3; k <= 3; k++) c.px(m + k * 3, 38, IRON[4]);                               // rivets under the rim
+    c.rect(m - 11, 33, m + 12, 35, IRON[3]); c.hline(m - 11, m + 12, 33, IRON[4]); c.hline(m - 11, m + 12, 35, IRON[0]); // the rim
+    c.hline(m - 9, m + 10, 33, C(120, 70, 30)); c.hline(m - 8, m + 9, 32, C(150, 90, 40)); // the stew showing at the rim
+    c.vline(m + 12, 36, 44, IRON[1]); c.rect(m + 11, 44, m + 14, 45, IRON[2]);           // a handle ring
 }
 
 void spike(Cv& c)
@@ -974,6 +1026,117 @@ void leak(Cv& c, int var)
     c.ell((float)cx, 2.5f, 3.6f, 3.0f, Color{74, 70, 82, 255});     // the broken edge
     c.ell((float)cx, 2.5f, 2.4f, 2.0f, Color{8, 8, 12, 255});       // the hole
     c.px(cx - 1, 1, Color{150, 190, 230, 255}); c.px(cx + 1, 3, Color{110, 150, 200, 255}); // a wet glint
+}
+
+// A wrought-iron candle crown hung from the roof by a chain: brass boss, four curved arms down to a hoop, candles standing on it and a pendant
+// below. The flames are live (rig.cpp:drawDecor).
+void chandelier(Cv& c, int var, int n, int ringY)
+{
+    int cx = c.w / 2, top = ringY - 24, span = (n - 1) / 2 * 8;
+    c.slab(cx - 5, 0, cx + 5, 2, IRON, 2);
+    for (int y = 3; y < top; y++) // the chain, a face-on link then one edge-on
+    {
+        int k = (y - 3) % 6;
+        if (k < 3) { c.px(cx, y, k == 0 ? IRON[4] : IRON[2]); c.px(cx + 1, y, k == 2 ? IRON[0] : IRON[1]); }
+        else c.px(cx + (k % 2), y, k == 4 ? IRON[3] : IRON[1]);
+    }
+    for (int side = -1; side <= 1; side += 2) // the arms: out and down from the boss to the hoop's ends, with a scroll of iron under each
+    {
+        for (int a = 0; a <= 28; a++)
+        {
+            float t = a / 28.0f, u = 1 - t;
+            float x = u * u * (cx + 0.5f) + 2 * u * t * (cx + side * span * 0.25f) + t * t * (cx + side * (span + 3));
+            float y = u * u * (top + 3) + 2 * u * t * (ringY - 3) + t * t * (float)ringY;
+            c.px((int)std::floor(x), (int)std::floor(y), IRON[t < 0.5f ? 3 : 2]);
+            c.px((int)std::floor(x) + (side < 0 ? 1 : -1), (int)std::floor(y), IRON[1]);
+        }
+        for (int a = 0; a <= 12; a++) { float t = a / 12.0f * 3.0f; c.px(cx + side * (span + 3) - side * (int)std::lround(std::sin(t) * 3.0f), ringY + 4 + (int)std::lround((1 - std::cos(t)) * 2.0f), IRON[2]); }
+    }
+    c.ball(cx + 0.5f, (float)(top + 2), 3.4f, 3.4f, BRASS, 2);                // the crown's boss
+    c.slab(cx - span - 4, ringY, cx + span + 4, ringY + 2, IRON, 2);          // the hoop
+    c.hline(cx - span - 3, cx + span + 3, ringY + 3, IRON[0]);
+    for (int k = 0; k < n; k++) c.px(cx - span - 3 + k * (span * 2 + 6) / std::max(1, n - 1), ringY + 1, BRASS[4]); // brass studs along it
+    c.line((float)cx + 0.5f, (float)(ringY + 3), (float)cx + 0.5f, (float)(ringY + 9), IRON[2], 1);                // the pendant spike and ball
+    c.ball(cx + 0.5f, (float)(ringY + 10), 2.4f, 2.4f, BRASS, 2);
+    c.px(cx, ringY + 13, BRASS[3]);
+    for (int k = 0; k < n; k++) // the candles
+    {
+        int x = cx + (k - (n - 1) / 2) * 8, hgt = 5 + (int)(R(k, var, 211) * 3.0f);
+        c.rect(x - 2, ringY - 2, x + 2, ringY - 1, BRASS[3]); c.rect(x - 2, ringY - 1, x + 2, ringY - 1, BRASS[1]); // the cup
+        c.rect(x - 1, ringY - 2 - hgt, x + 1, ringY - 3, LINEN[3]);
+        c.vline(x - 1, ringY - 2 - hgt, ringY - 3, LINEN[4]); c.vline(x + 1, ringY - 2 - hgt, ringY - 3, LINEN[2]);
+        if (R(k, var, 213) > 0.4f) c.px(x + 1, ringY - 3 - (int)(R(k, var, 214) * 3.0f), LINEN[4]); // a drip of wax
+        c.px(x, ringY - 3 - hgt, C(36, 28, 24));                                                      // the wick
+    }
+}
+
+// A weathered stone statue on a plinth, `H` half-unit pixels tall and 32 wide. var: 0 a knight leaning on his planted sword, 1 a hooded mourner,
+// 2 a winged angel, 3 a hooded figure with a scythe. Lit from the upper left, folds in the drapery, cracks and a green stain of moss near the foot.
+void statue(Cv& c, int var, int H)
+{
+    int cx = 16, v = var & 3, foot = H - 15, top = 4;
+    if (v == 2) // wings first, behind the figure: broad folded wings of layered feathers
+        for (int sd : {-1, 1})
+            for (int y = 8; y < 46; y++)
+            {
+                float k = (y - 8) / 38.0f, w = std::sin(k * 3.1416f * 0.92f + 0.12f) * 13.0f + 1.0f;
+                for (int x = 0; x < (int)w; x++)
+                {
+                    int px = cx + sd * (4 + x + (int)(k * 3));
+                    float u = x / w;
+                    int t = 1 + (u < 0.35f) + ((y + x / 3) % 5 == 0 ? -1 : 0) + (sd < 0 && u < 0.2f);
+                    c.px(px, y, tone(STONE, std::max(0, std::min(4, t))));
+                }
+            }
+    if (v == 3) // the scythe's long pole and its curved blade
+    {
+        c.vline(cx + 8, 6, foot, tone(WOOD, 1)); c.vline(cx + 9, 6, foot, tone(WOOD, 0));
+        for (int a = 0; a < 16; a++) { float t = a / 15.0f * 1.7f; c.px(cx + 8 - (int)std::lround(std::sin(t) * 10), 6 + (int)std::lround((1 - std::cos(t)) * 4), tone(IRON, 3)); c.px(cx + 8 - (int)std::lround(std::sin(t) * 10), 7 + (int)std::lround((1 - std::cos(t)) * 4), IRON[1]); }
+    }
+    c.slab(cx - 11, H - 9, cx + 11, H - 1, STONE, 3);         // the plinth: two stepped blocks with chamfered tops
+    c.hline(cx - 11, cx + 11, H - 9, tone(STONE, 4)); c.hline(cx - 11, cx + 11, H - 5, tone(STONE, 1));
+    c.slab(cx - 9, H - 14, cx + 9, H - 9, STONE, 3); c.hline(cx - 9, cx + 9, H - 14, tone(STONE, 4));
+    int shoulder = 22;
+    for (int y = shoulder; y <= foot; y++) // the robe: a column that flares to the hem, folds hanging in it
+    {
+        float k = (y - shoulder) / (float)(foot - shoulder);
+        float hw = 5.2f + k * 4.6f + (v == 2 ? k * 1.2f : 0);
+        for (int x = (int)std::floor(cx - hw); x <= (int)std::ceil(cx + hw); x++)
+        {
+            float u = (x - cx) / hw;
+            int t = 2 + (u < -0.35f) + (u < -0.75f) - (u > 0.3f) - (u > 0.7f);
+            if (((x + (int)(k * 6) + v) % 4 == 0) && y > shoulder + 3) t--;                      // a fold
+            if (R(x, y / 2, 170 + v) > 0.93f) t--;                                              // chips
+            c.px(x, y, tone(STONE, std::max(0, std::min(4, t))));
+        }
+    }
+    c.ball(cx - 0.5f, (float)shoulder + 0.5f, 6.6f, 3.2f, STONE, 2);                           // the shoulders
+    if (v == 0) // a knight: great helm with a slit, his hands on the pommel of the sword standing point-down before him
+    {
+        c.rect(cx - 4, 8, cx + 4, 17, tone(STONE, 2)); c.vline(cx - 4, 8, 17, tone(STONE, 3)); c.vline(cx + 4, 8, 17, tone(STONE, 1)); c.hline(cx - 4, cx + 4, 8, tone(STONE, 4));
+        c.hline(cx - 3, cx + 3, 12, STONE[0]); c.vline(cx, 12, 17, STONE[0]);
+        c.vline(cx, 26, foot + 1, tone(IRON, 3)); c.vline(cx + 1, 26, foot + 1, tone(IRON, 1)); c.hline(cx - 5, cx + 5, 25, tone(IRON, 3)); c.hline(cx - 5, cx + 5, 26, tone(IRON, 1));
+        c.rect(cx - 3, 23, cx + 2, 24, tone(STONE, 3));
+    }
+    else
+    {
+        c.ball((float)cx, 13.0f, 4.2f, 4.8f, STONE, 2);                                         // the head
+        c.ell((float)cx, 11.0f, 6.0f, 6.4f, tone(STONE, 2));                                    // a deep hood over it
+        for (int y = 6; y < 18; y++) for (int x = cx - 6; x <= cx + 6; x++) if (c.on(x, y)) { float u = (x - cx) / 6.0f; c.px(x, y, tone(STONE, 2 + (u < -0.4f) - (u > 0.35f) - (y > 15))); }
+        if (v == 3) { c.rect(cx - 1, 12, cx + 2, 15, tone(BONE_, 3)); c.px(cx, 13, STONE[0]); c.px(cx + 2, 13, STONE[0]); }          // a skull in the dark of the hood
+        else { c.ell((float)cx + 1.0f, 13.0f, 2.6f, 3.4f, STONE[0]); c.px(cx + 1, 14, tone(STONE, 2)); }                                 // a face lost in shadow
+        if (v == 1) { c.ball((float)cx + 1, 27.0f, 2.8f, 2.2f, STONE, 3); c.hline(cx - 2, cx + 3, 26, tone(STONE, 4)); }               // hands folded at the breast
+        if (v == 2) { c.vline(cx - 6, 24, 36, tone(STONE, 3)); c.vline(cx + 6, 24, 36, tone(STONE, 1)); c.ball((float)cx - 5.5f, 37.0f, 2.0f, 2.2f, STONE, 3); c.ball((float)cx + 6.5f, 37.0f, 2.0f, 2.2f, STONE, 2); }
+        if (v == 3) { c.ball((float)cx + 7.5f, 28.0f, 2.2f, 2.2f, STONE, 3); }
+    }
+    for (int y = foot - 14; y < H; y++) for (int x = cx - 12; x <= cx + 12; x++) // weathering: moss at the foot, a hairline crack, soot
+        if (c.on(x, y))
+        {
+            float low = (y - (foot - 14)) / 14.0f;
+            if (R(x, y, 175) > 0.88f - low * 0.1f) c.px(x, y, lerpColor(c.at(x, y), C(70, 96, 54), 0.6f));
+            else if (R(x, y / 3, 176) > 0.97f) c.px(x, y, STONE[0]);
+        }
+    for (int y = 6; y < foot; y++) if (c.on(cx + 3 + (y / 5) % 2, y) && R(7, y, 177) > 0.93f) c.px(cx + 3 + (y / 5) % 2, y, STONE[0]);
 }
 
 void chain(Cv& c, int var, int H)
@@ -1110,29 +1273,42 @@ void stallBack(StallCv& c, int kind)
         int sc = (x / 4) % 2 ? 0 : 2;
         for (int y = bot; y < bot + 3 + sc; y++) c.px(x, y, tone(acc, y == bot ? 3 : 2));
     }
-    for (int k = -19; k <= 19; k++) c.px(c.X((float)k), c.Y(-33 + 1.5f * (1 - (k / 19.0f) * (k / 19.0f))), LINEN[3]), c.px(c.X((float)k) + 1, c.Y(-33 + 1.5f * (1 - (k / 19.0f) * (k / 19.0f))), LINEN[3]); // the rope of goods
-    for (int i = 0; i < 6; i++)
+    if (kind == 0) // the smith's wall: two rails with iron brackets, the wares (entities.cpp:drawStallRack) racked between them
     {
-        float fx = -16.0f + i * 6;
-        int hx = c.X(fx), hy = c.Y(-32 + 1.5f * (1 - (fx / 19.0f) * (fx / 19.0f)));
-        c.vline(hx, hy, hy + 3, LINEN[2]);
-        if (kind == 0) // horseshoes, tongs, hammers
+        for (int y : {c.Y(-32), c.Y(-19)})
         {
-            if (i % 3 == 0) { for (int a = 0; a < 20; a++) { float t = 0.5f + a / 19.0f * 4.3f; c.px(hx + (int)std::lround(std::cos(t) * 3.2f), hy + 7 + (int)std::lround(std::sin(t) * 3.4f), tone(IRON, a % 6 < 3 ? 3 : 2)); } }
-            else if (i % 3 == 1) { c.line((float)hx - 1, (float)hy + 3, (float)hx - 2, (float)hy + 15, IRON[3], 1); c.line((float)hx + 1, (float)hy + 3, (float)hx + 2, (float)hy + 15, IRON[2], 1); c.hline(hx - 1, hx + 1, hy + 4, IRON[1]); }
-            else { c.vline(hx, hy + 3, hy + 12, WOOD[3]); c.vline(hx + 1, hy + 3, hy + 12, WOOD[1]); c.slab(hx - 3, hy + 12, hx + 4, hy + 15, IRON, 3); }
+            c.rect(c.X(-21), y, c.X(21), y + 3, tone(WOOD, 1));
+            c.hline(c.X(-21), c.X(21), y, tone(WOOD, 2));
+            c.hline(c.X(-21), c.X(21), y + 3, tone(WOOD, 0));
+            for (int k = 0; k < 8; k++) { int bx = c.X(-19.0f + k * 5.4f); c.rect(bx, y - 1, bx + 1, y + 4, IRON[1]); c.px(bx, y - 1, IRON[3]); }   // the notched iron pegs
         }
-        else if (kind == 1) // herbs, charms, rune-bones
+    }
+    else
+    {
+    for (int k = -19; k <= 19; k++) c.px(c.X((float)k), c.Y(-33 + 1.5f * (1 - (k / 19.0f) * (k / 19.0f))), LINEN[3]), c.px(c.X((float)k) + 1, c.Y(-33 + 1.5f * (1 - (k / 19.0f) * (k / 19.0f))), LINEN[3]); // the rope of goods
+        for (int i = 0; i < 6; i++)
         {
-            if (i % 3 == 0) { for (int k = 0; k < 8; k++) c.line(hx + (k - 4) * 0.5f, (float)hy + 4, hx + (k - 4) * 1.1f, (float)hy + 12, tone(FOREST, 2 + k % 3), 1); c.hline(hx - 1, hx + 1, hy + 5, LINEN[3]); }
-            else if (i % 3 == 1) { c.ball(hx + 0.5f, (float)hy + 8, 3.2f, 4.0f, LINEN, 3); c.px(hx - 1, hy + 7, NIGHT[0]); c.px(hx + 1, hy + 7, NIGHT[0]); c.px(hx, hy + 9, NIGHT[1]); }
-            else { c.ball(hx + 0.5f, (float)hy + 8, 3.0f, 3.4f, PLUM, 3); c.px(hx, hy + 6, PLUM[4]); c.vline(hx, hy + 11, hy + 14, PLUM[1]); }
-        }
-        else // pelts, rope coils, a net
-        {
-            if (i % 3 == 0) { for (int y = hy + 4; y < hy + 16; y++) for (int x = hx - 3; x <= hx + 4; x++) { if (y > hy + 12 && (x + y) % 3 == 0) continue; c.px(x, y, tone(CLAY, 2 + (x < hx) - (y > hy + 11) + (R(x, y, 159) > 0.8f))); } }
-            else if (i % 3 == 1) { for (int r = 0; r < 3; r++) c.ell(hx + 0.5f, (float)hy + 8, 4.2f - r * 1.3f, 4.2f - r * 1.3f, tone(STRAW, 3 - r)); c.disc(hx + 0.5f, (float)hy + 8, 0.9f, WOOD[0]); }
-            else { for (int y = hy + 4; y < hy + 14; y++) for (int x = hx - 3; x <= hx + 4; x++) if ((x + y) % 4 == 0 || (x - y + 100) % 4 == 0) c.px(x, y, tone(LINEN, 2)); }
+            float fx = -16.0f + i * 6;
+            int hx = c.X(fx), hy = c.Y(-32 + 1.5f * (1 - (fx / 19.0f) * (fx / 19.0f)));
+            c.vline(hx, hy, hy + 3, LINEN[2]);
+            if (kind == 0) // horseshoes, tongs, hammers
+            {
+                if (i % 3 == 0) { for (int a = 0; a < 20; a++) { float t = 0.5f + a / 19.0f * 4.3f; c.px(hx + (int)std::lround(std::cos(t) * 3.2f), hy + 7 + (int)std::lround(std::sin(t) * 3.4f), tone(IRON, a % 6 < 3 ? 3 : 2)); } }
+                else if (i % 3 == 1) { c.line((float)hx - 1, (float)hy + 3, (float)hx - 2, (float)hy + 15, IRON[3], 1); c.line((float)hx + 1, (float)hy + 3, (float)hx + 2, (float)hy + 15, IRON[2], 1); c.hline(hx - 1, hx + 1, hy + 4, IRON[1]); }
+                else { c.vline(hx, hy + 3, hy + 12, WOOD[3]); c.vline(hx + 1, hy + 3, hy + 12, WOOD[1]); c.slab(hx - 3, hy + 12, hx + 4, hy + 15, IRON, 3); }
+            }
+            else if (kind == 1) // herbs, charms, rune-bones
+            {
+                if (i % 3 == 0) { for (int k = 0; k < 8; k++) c.line(hx + (k - 4) * 0.5f, (float)hy + 4, hx + (k - 4) * 1.1f, (float)hy + 12, tone(FOREST, 2 + k % 3), 1); c.hline(hx - 1, hx + 1, hy + 5, LINEN[3]); }
+                else if (i % 3 == 1) { c.ball(hx + 0.5f, (float)hy + 8, 3.2f, 4.0f, LINEN, 3); c.px(hx - 1, hy + 7, NIGHT[0]); c.px(hx + 1, hy + 7, NIGHT[0]); c.px(hx, hy + 9, NIGHT[1]); }
+                else { c.ball(hx + 0.5f, (float)hy + 8, 3.0f, 3.4f, PLUM, 3); c.px(hx, hy + 6, PLUM[4]); c.vline(hx, hy + 11, hy + 14, PLUM[1]); }
+            }
+            else // pelts, rope coils, a net
+            {
+                if (i % 3 == 0) { for (int y = hy + 4; y < hy + 16; y++) for (int x = hx - 3; x <= hx + 4; x++) { if (y > hy + 12 && (x + y) % 3 == 0) continue; c.px(x, y, tone(CLAY, 2 + (x < hx) - (y > hy + 11) + (R(x, y, 159) > 0.8f))); } }
+                else if (i % 3 == 1) { for (int r = 0; r < 3; r++) c.ell(hx + 0.5f, (float)hy + 8, 4.2f - r * 1.3f, 4.2f - r * 1.3f, tone(STRAW, 3 - r)); c.disc(hx + 0.5f, (float)hy + 8, 0.9f, WOOD[0]); }
+                else { for (int y = hy + 4; y < hy + 14; y++) for (int x = hx - 3; x <= hx + 4; x++) if ((x + y) % 4 == 0 || (x - y + 100) % 4 == 0) c.px(x, y, tone(LINEN, 2)); }
+            }
         }
     }
     if (kind == 1) // the ox skull and a banner on the left post
@@ -1628,11 +1804,19 @@ Image stallImageFine(int kind, int layer)
 // A tone (0 dark .. 4 light) of a cloth colour, for the live pennants (rig.cpp:drawDecor).
 Color clothTone(int var, int t) { return tone(CLOTHS[((var % 6) + 6) % 6], t); }
 
+void chandelierGeom(int var, int size, int& W, int& H, int& n, int& ringY)
+{
+    n = (var & 1) ? 7 : 5;
+    W = n == 7 ? 62 : 46;
+    H = std::max(size, 4) * 2 + 40;
+    ringY = H - 15;
+}
+
 int decorAnchor(int kind, int var)
 {
     switch (kind)
     {
-    case DK_TAPESTRY: case DK_DRAPE: case DK_CHAIN: case DK_TOOL: case DK_COBWEB: case DK_LEAK: return 1;
+    case DK_TAPESTRY: case DK_DRAPE: case DK_CHAIN: case DK_TOOL: case DK_COBWEB: case DK_LEAK: case DK_CHANDELIER: return 1;
     case DK_ANTLERS: return 2;
     case DK_PICTURE: case DK_SHIELD: return 2;
     case DK_LEANSHIELD: case DK_SPEARPOST: case DK_TARGET: case DK_BOWRACK: return 0;
@@ -1667,6 +1851,8 @@ Image decorImageFine(int kind, int var, int size)
     case DK_TAPESTRY: { Cv c(34 + ((var >> 5) & 1) * 8, size * 2 + 6); tapestry(c, var, c.h); return c.image(); }
     case DK_DRAPE: { Cv c(40, size * 2); drape(c, var, c.h); return c.image(); }
     case DK_CHAIN: { Cv c(12, size * 2 + 4); chain(c, var, c.h); return c.image(); }
+    case DK_STATUE: { Cv c(32, std::max(size, 24) * 2); statue(c, var, c.h); return c.image(); }
+    case DK_CHANDELIER: { int W, H, n, rY; chandelierGeom(var, size, W, H, n, rY); Cv c(W, H); chandelier(c, var, n, rY); return c.image(); }
     case DK_COBWEB: { Cv c(size * 4 + 2, size * 2 + 2); cobweb(c, var, size * 2); return c.image(); }
     case DK_LEAK: { Cv c(14, 30); leak(c, var); return c.image(); }
     case DK_ANTLERS: { Cv c(40, 28); antlers(c); return c.image(); }
@@ -1685,7 +1871,7 @@ void exportDecorSheet(const char* path)
 {
     struct Row { int kind, size, variants; };
     const Row rows[] = {{DK_DRESSER, 0, 3}, {DK_TABLE, 20, 2}, {DK_PICTURE, 0, 5}, {DK_TOOL, 0, 5}, {DK_SHELF, 14, 3}, {DK_RACK, 22, 2}, {DK_ARROWS, 0, 1}, {DK_BUNK, 22, 2}, {DK_HEARTH, 40, 1},
-                        {DK_SHIELD, 0, 12}, {DK_LEANSHIELD, 0, 12}, {DK_SPEARPOST, 30, 3}, {DK_TARGET, 0, 3}, {DK_BOWRACK, 0, 2}, {DK_RACK, 22, 2}, {DK_POST, 30, 1}, {DK_LADDER, 30, 1}, {DK_YARD, 0, 3}, {DK_TAPESTRY, 40, 39}, {DK_DRAPE, 44, 5}, {DK_CHAIN, 40, 4}, {DK_BLOOD, 14, 6}};
+                        {DK_SHIELD, 0, 12}, {DK_LEANSHIELD, 0, 12}, {DK_SPEARPOST, 30, 3}, {DK_TARGET, 0, 3}, {DK_BOWRACK, 0, 2}, {DK_RACK, 22, 2}, {DK_POST, 30, 1}, {DK_LADDER, 30, 1}, {DK_YARD, 0, 3}, {DK_TAPESTRY, 40, 39}, {DK_DRAPE, 44, 5}, {DK_CHAIN, 40, 4}, {DK_CHANDELIER, 12, 2}, {DK_STATUE, 34, 4}, {DK_BLOOD, 14, 6}};
     const int S = 3, ROWW = 1500;
     std::vector<Image> ims;
     std::vector<Vector2> pos;
