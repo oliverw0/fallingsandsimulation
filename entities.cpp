@@ -2643,7 +2643,7 @@ static void killMob(Mob& m)
 // ================================================================ the folk of Hearthwick
 // A few villagers and hens potter about between the halls: they wander, stop, turn to look at you, and
 // have a word to say when you come close.
-struct Villager { float x = 0, y = 0, anim = 0; int kind = 0, dir = 1, walk = 0, wait = 0, talkCd = 0, look = 0, pose = 0; Color coat = WHITE; }; // kind 3 hen, 4 Indi the dog
+struct Villager { float x = 0, y = 0, anim = 0; int kind = 0, dir = 1, walk = 0, wait = 0, talkCd = 0, look = 0, pose = 0, fond = 0; Color coat = WHITE; }; // kind 3 hen, 4 Indi the dog (fond: frames of sniffing you left, -1 once she's yours to follow)
 static std::vector<Villager> folk;
 static int folkGen = -1;
 static const char* FOLK_SAY[] = {"Skal!", "Fair winds to you.", "Mind the oil down there. It burns hot.", "Water puts a fire out. Remember that.",
@@ -2687,7 +2687,7 @@ static void updateVillagers()
     for (auto& v : folk)
     {
         if (v.talkCd > 0) v.talkCd--;
-        float speed = v.kind == 4 ? 0.5f : v.kind == 3 ? 0.3f : (v.kind == 2 ? 0.45f : 0.28f);
+        float speed = v.kind == 4 ? (v.fond < 0 && std::fabs(pm.cx() - v.x) > 60 ? 0.9f : 0.5f) : v.kind == 3 ? 0.3f : (v.kind == 2 ? 0.45f : 0.28f);
         float d = std::fabs(pm.cx() - v.x);
         bool near = std::fabs(pm.y + pm.h - v.y) < 20;
         if (v.kind == 4 && near && d > 16 && d < 70 && v.pose != 2 && chance(120)) // Indi trots over to you
@@ -2697,6 +2697,14 @@ static void updateVillagers()
             v.wait = 0;
         }
         if (v.kind == 4 && v.pose == 2 && near && d < 14) v.wait = std::min(v.wait, 20); // up she gets
+        if (v.kind == 4 && v.fond == 0 && near && d <= 18) { v.fond = 90; v.pose = 3; v.walk = 0; v.wait = 90; v.dir = pm.cx() < v.x ? -1 : 1; } // a good long sniff of you
+        if (v.kind == 4 && v.fond > 0 && --v.fond == 0) v.fond = -1; // ...and then she's yours
+        if (v.kind == 4 && v.fond < 0 && d < 400) // follows you about, and sits wagging her tail when you stop
+        {
+            if (d > 30 || (d > 20 && v.pose != 4)) { v.dir = pm.cx() < v.x ? -1 : 1; v.walk = 2; v.wait = 0; v.pose = 1; }
+            else if (v.walk > 0 || v.pose != 4) { v.walk = 0; v.wait = 2; v.pose = 4; }
+            else v.wait = 2;
+        }
         if (v.wait > 0)
         {
             if (--v.wait == 0) { v.dir = chance(2) ? 1 : -1; v.walk = irange(60, 260); }
@@ -2719,6 +2727,7 @@ static void updateVillagers()
         }
         if (v.kind == 4 && v.walk > 0) v.pose = 1;
         if (v.kind == 4 && v.wait > 0 && v.pose == 1) v.pose = 0;
+        if (v.kind == 4 && v.fond < 0 && v.walk == 0 && v.wait > 0 && d <= 30) v.pose = 4;
         v.y = groundUnder(v.x, v.y);
         if (v.kind != 3 && d < 26 && near)
         {
@@ -2739,10 +2748,29 @@ bool indiTag(Vector2& at)
     for (auto& v : folk)
         if (v.kind == 4 && std::fabs(pm.cx() - v.x) < 40 && std::fabs(pm.y + pm.h - v.y) < 24)
         {
-            at = {v.x + v.dir * 3.0f, v.y - (v.pose == 2 ? 13.0f : 18.0f)};
+            at = {v.x + v.dir * 3.0f, v.y - (v.pose == 2 ? 13.0f : v.pose == 4 ? 16.0f : 18.0f)};
             return true;
         }
     return false;
+}
+
+// Painted props (decor.cpp:propImageFine) as textures at half a unit per pixel, snapped to that grid.
+static const Texture2D& propTex(int what, int var)
+{
+    static std::map<int, Texture2D> cache;
+    Texture2D& t = cache[what * 4096 + var];
+    if (!t.id) { Image im = propImageFine(what, var); t = LoadTextureFromImage(im); UnloadImage(im); SetTextureFilter(t, TEXTURE_FILTER_POINT); }
+    return t;
+}
+static void drawPropTL(int what, int var, float left, float top, bool flip = false, Color tint = WHITE) // top-left corner at (left, top)
+{
+    const Texture2D& t = propTex(what, var);
+    DrawTexturePro(t, {0, 0, (float)(flip ? -t.width : t.width), (float)t.height}, {std::floor(left * 2 + 0.5f) / 2, std::floor(top * 2 + 0.5f) / 2, t.width * 0.5f, t.height * 0.5f}, {0, 0}, 0, tint);
+}
+static void drawProp(int what, int var, float x, float bottom, bool flip = false, Color tint = WHITE) // bottom centre at (x, bottom)
+{
+    const Texture2D& t = propTex(what, var);
+    drawPropTL(what, var, x - t.width * 0.25f, bottom - t.height * 0.5f, flip, tint);
 }
 
 static void drawVillagers(int camX, int camY)
@@ -2753,13 +2781,13 @@ static void drawVillagers(int camX, int camY)
         if (x < -20 || x > G.vw + 20 || y < -30 || y > G.vh + 30) continue;
         if (v.kind == 4)
         {
-            float k = v.pose == 1 ? std::fmod(v.anim, 2.6f) / 2.6f : std::fmod(G.frame / (v.pose == 2 ? 140.0f : v.pose == 3 ? 40.0f : 48.0f), 1.0f);
+            float k = v.pose == 1 ? std::fmod(v.anim, 2.6f) / 2.6f : std::fmod(G.frame / (v.pose == 2 ? 140.0f : v.pose == 3 ? 40.0f : v.pose == 4 ? 28.0f : 48.0f), 1.0f);
             drawIndi(v.pose, k, v.dir, x, y);
             continue;
         }
         if (v.kind < 3) { drawFolk(v.kind, v.look, v.anim, v.wait == 0 && v.walk > 0, v.dir, x, y, v.coat, (int)(&v - &folk[0])); continue; }
         bool b = ((int)v.anim) & 1;
-        drawSpriteTint(b ? SPR_HEN_B : SPR_HEN_A, x, y, v.dir < 0, v.coat);
+        drawProp(PR_HEN, ((v.coat.r / 3 + v.coat.b) % 4) * 2 + b, x, y, v.dir < 0);
     }
 }
 
@@ -4002,9 +4030,14 @@ void drawEntities(int camX, int camY)
     drawBodies(camX, camY); // falling slabs
     for (auto& t : G.traps)
         if (t.type == TR_ARROW && !off(t.x - camX, t.y - camY, 16)) drawDartTrap(trapFace(t) - camX, t.y + 0.5f - camY, t.dir, t.done, t.hit, t.hp);
-    // interactables
+    // interactables: props and decor sit in front of the back wall but behind the terrain (the world texture's alpha marks the
+    // solid cells and is drawn again over them), then cell-bound crates and doors, which paint on top of the terrain
+    for (int pass = 0; pass < 2; pass++)
+    {
+    if (pass == 1) drawTerrainFront();
     for (auto& it : G.inter)
     {
+        if ((it.type == IT_CRATE) != (pass == 1)) continue;
         float x = it.x - camX, y = it.y - camY;
         if (it.type == IT_ROPE ? off(x, 0, 8) || y > G.vh || it.data - camY < 0 : off(x, y, it.type == IT_BOAT ? 160 : 96)) continue;
         switch (it.type)
@@ -4028,13 +4061,13 @@ void drawEntities(int camX, int camY)
             else drawChest(x, y - CHEST_HH, it.ang, it.used, WHITE, sink);
             break;
         }
-        case IT_ANVIL: drawSpriteBig(SPR_ANVIL, x, y, false, WHITE); break;
+        case IT_ANVIL: drawProp(PR_ANVIL, 0, x, y); break;
         case IT_DECOR: drawDecor(it, x, y); break;
         case IT_SHRINE:
         {
-            drawSpriteBig(SPR_SHRINE, x, y, false, WHITE);
+            drawProp(PR_SHRINE, 0, x, y);
             Color orb = it.used ? Color{90, 90, 100, 255} : ColorFromHSV((float)(G.frame % 360), 0.5f, 1.0f);
-            float oy = y - SPR_SHRINE.h * 2 - 6 + std::sin(G.frame * 0.05f) * 1.5f;
+            float oy = y - 30 + std::sin(G.frame * 0.05f) * 1.5f;
             if (!it.used) { BeginBlendMode(BLEND_ADDITIVE); DrawCircleGradient((int)x, (int)oy, 16, {orb.r, orb.g, orb.b, 110}, {orb.r, orb.g, orb.b, 0}); EndBlendMode(); }
             DrawCircle((int)x, (int)oy, 4.5f, orb);
             break;
@@ -4048,38 +4081,14 @@ void drawEntities(int camX, int camY)
                 DrawRectanglePro({cx + ox * cs - oy * sn, cy + ox * sn + oy * cs, w, h}, {0, 0}, it.ang * RAD2DEG, c);
             };
             if (it.used) break;
-            float W = hb.x * 2, H = hb.y * 2;
-            if (it.style >= 3) // a broken plank adrift: grey-brown, wet and splintered, a rusty nail left in it
-            {
-                part(-hb.x, -hb.y, W, H, {58, 40, 26, 255});
-                part(-hb.x + 0.5f, -hb.y, W - 1, 1.5f, {128, 94, 58, 255});
-                part(-hb.x + 0.5f, -hb.y + 1.5f, W - 1, 1.5f, {82, 58, 36, 255});
-                for (float sx = -hb.x + 4; sx < hb.x - 2; sx += 5) part(sx, -hb.y, 0.6f, H, {44, 30, 20, 255}); // grain breaks
-                part(hb.x - 1.5f, -hb.y, 1.5f, 1.0f, {0, 0, 0, 0}); part(-hb.x, hb.y - 1.0f, 1.5f, 1.0f, {20, 14, 10, 255}); // ragged ends
-                part(-hb.x * 0.3f, -hb.y + 0.5f, 1, 1, {150, 110, 90, 255});
-                break;
-            }
-            if (it.style % 3 == 1) // a barrel: staves, two iron hoops, a darker rim
-            {
-                part(-hb.x, -hb.y, W, H, {84, 54, 30, 255});
-                part(-hb.x + 1, -hb.y + 0.5f, W - 2, H - 1, {128, 84, 46, 255});
-                for (float sx = -hb.x + 2.5f; sx < hb.x - 1; sx += 2) part(sx, -hb.y + 0.5f, 0.5f, H - 1, {96, 62, 34, 255});
-                part(-hb.x + 1.5f, -hb.y + 0.5f, 1, H - 1, {156, 108, 62, 255}); // the light catching one side
-                for (float hy : {-hb.y + 2, hb.y - 3}) part(-hb.x, hy, W, 1, {58, 58, 64, 255});
-            }
-            else // a plank crate (or a little box with a lid and a clasp)
-            {
-                bool box = it.style % 3 == 2;
-                part(-hb.x, -hb.y, W, H, {72, 48, 28, 255});
-                part(-hb.x + 1, -hb.y + 1, W - 2, H - 2, box ? Color{126, 82, 44, 255} : Color{150, 108, 62, 255});
-                if (box) { part(-hb.x, -hb.y + 2, W, 0.7f, {72, 48, 28, 255}); part(-0.5f, -hb.y + 1.5f, 1, 2, {210, 176, 90, 255}); }
-                else
-                {
-                    for (float py = -hb.y + 4; py < hb.y - 1; py += 4) part(-hb.x + 1, py, W - 2, 0.5f, {112, 78, 44, 255});
-                    DrawLineEx({cx + (-hb.x + 1) * cs - (hb.y - 1) * sn, cy + (-hb.x + 1) * sn + (hb.y - 1) * cs},
-                               {cx + (hb.x - 1) * cs - (-hb.y + 1) * sn, cy + (hb.x - 1) * sn + (-hb.y + 1) * cs}, 1.2f, {92, 62, 34, 255}); // the brace
-                }
-            }
+            if (!it.w) it.w = 1 + irand(8); // which of its looks it wears, kept for good
+            const Texture2D* tex;
+            if (it.style >= 3) tex = &propTex(PR_PLANK, (it.style / 3 - 1) % 3);
+            else tex = &propTex(it.style % 3 == 1 ? PR_BARREL : it.style % 3 == 2 ? PR_BOX : PR_CRATE, it.w - 1);
+            float tw = tex->width * 0.5f, th = tex->height * 0.5f;
+            Rectangle src = {0, 0, (float)tex->width, (float)tex->height}, dst = {cx, cy, tw, th};
+            DrawTexturePro(*tex, src, dst, {tw / 2, th / 2}, it.ang * RAD2DEG, WHITE);
+            if (it.style >= 3) break;
             int lost = (it.style % 3 == 2 ? 2 : 3) - it.data; // blows taken
             const Color CR = {30, 20, 12, 255};
             if (lost >= 1) // a split runs down from the top
@@ -4094,7 +4103,7 @@ void drawEntities(int camX, int camY)
                 part(-hb.x + 1, hb.y * 0.35f, hb.x * 0.9f, 0.8f, CR);
                 part(-hb.x * 0.7f, hb.y * 0.35f, 0.8f, hb.y * 0.6f, CR);
             }
-            if (it.hit > 0) { BeginBlendMode(BLEND_ADDITIVE); part(-hb.x, -hb.y, hb.x * 2, hb.y * 2, {255, 230, 190, (unsigned char)(it.hit * 10)}); EndBlendMode(); }
+            if (it.hit > 0) { BeginBlendMode(BLEND_ADDITIVE); DrawTexturePro(*tex, src, dst, {tw / 2, th / 2}, it.ang * RAD2DEG, {255, 230, 190, (unsigned char)(it.hit * 10)}); EndBlendMode(); }
             break;
         }
         case IT_LANTERN:
@@ -4108,20 +4117,16 @@ void drawEntities(int camX, int camY)
                     float t = k / (float)it.data;
                     DrawRectangle((int)std::floor(x + (lx - x) * t), (int)std::floor(y + (ly - y) * t), 1, 1, k % 2 ? Color{92, 92, 100, 255} : Color{52, 52, 58, 255});
                 }
-            auto part = [&](float ox, float oy, float w, float h, Color c) { // a piece of the lantern, turned with it
-                DrawRectanglePro({lx + ox * cs - oy * sn, ly + ox * sn + oy * cs, w, h}, {0, 0}, a * RAD2DEG, c);
-            };
             float fl = 0.85f + 0.15f * hash2((int)it.x, G.frame / 4, 9);
             BeginBlendMode(BLEND_ADDITIVE);
             DrawCircleGradient((int)lx, (int)ly + 4, 9 * fl, {255, 160, 70, 60}, {255, 160, 70, 0});
             EndBlendMode();
-            part(-0.5f, 0, 1, 1, {70, 70, 76, 255});       // ring
-            part(-2, 1, 4, 1, {46, 46, 52, 255});          // cap
-            part(-1.5f, 2, 3, 4, {(unsigned char)(255 * fl), (unsigned char)(196 * fl), 110, 255}); // the flame behind the glass
-            part(-0.5f, 3, 1, 2, {255, 244, 200, 255});
-            part(-2, 2, 0.6f, 4, {40, 40, 46, 255});       // iron frame
-            part(1.4f, 2, 0.6f, 4, {40, 40, 46, 255});
-            part(-2.5f, 6, 5, 1, {58, 58, 64, 255});       // base
+            for (int layer = 1; layer >= 0; layer--) // the flame behind the cage
+            {
+                const Texture2D& lt = propTex(PR_LANTERN, layer);
+                Color lc = layer ? Color{(unsigned char)(255 * fl), (unsigned char)(255 * fl), (unsigned char)(255 * fl), 255} : WHITE;
+                DrawTexturePro(lt, {0, 0, (float)lt.width, (float)lt.height}, {lx, ly, lt.width * 0.5f, lt.height * 0.5f}, {lt.width * 0.25f, 0}, a * RAD2DEG, lc);
+            }
             break;
         }
         case IT_TORCH:
@@ -4146,17 +4151,13 @@ void drawEntities(int camX, int camY)
         }
         case IT_SHOP:
             drawStallLayer(x, y, it.data, 0);
-            drawSpriteNative(SPR_MERCHANT, x + 4, y - 7, true);
+            { static const Color APRON[3] = {{112, 76, 48, 255}, {70, 98, 74, 255}, {120, 52, 44, 255}}; drawFolk(0, it.data % 4, 0, false, -1, x + 4, y - 7, APRON[it.data % 3], it.data); } // the stallholder, a villager like the rest
             drawStallLayer(x, y, it.data, 1);
             drawStall(x, y, it.data, 2);
             break;
         case IT_STONE:
         {
             const Weapon* w = it.used ? nullptr : &G.stoneLoot[it.data];
-            const Color ink = {56, 40, 30, 255}, wood = {120, 80, 46, 255}, woodD = {80, 52, 30, 255}, stone = {120, 116, 124, 255};
-            auto box = [&](float x0, float y0, float x1, float y1, Color c) {
-                DrawRectangle((int)x0, (int)y0, (int)(x1 - x0), (int)(y1 - y0), c);
-            };
             Vector2 wc = {x, y - 16}; // where the glow centres
             switch (it.style)
             {
@@ -4165,60 +4166,42 @@ void drawEntities(int camX, int camY)
                 wc = {x - 3, y - 8};
                 break;
             case DS_TABLE: // a cellar table, the knife left on a cutting board
-                box(x - 13, y - 10, x + 13, y - 8, wood);
-                box(x - 11, y - 8, x - 9, y, woodD);
-                box(x + 9, y - 8, x + 11, y, woodD);
-                box(x - 6, y - 12, x + 6, y - 10, {170, 130, 80, 255});
+                drawPropTL(PR_TABLE, 0, x - 13, y - 12);
                 if (w) { drawGlow(x, y - 13, w->glow, 14); drawWorldWeapon(*w, {x - 4, y - 12}, -0.08f, 7); }
                 wc = {x, y - 13};
                 break;
             case DS_RACK: // a castle weapon rack
-                box(x - 12, y - 30, x - 10, y, woodD);
-                box(x + 10, y - 30, x + 12, y, woodD);
-                box(x - 12, y - 27, x + 12, y - 25, wood);
-                box(x - 12, y - 9, x + 12, y - 7, wood);
+                drawPropTL(PR_RACK, 0, x - 12, y - 30);
                 if (w) { drawGlow(x, y - 16, w->glow, 22); drawWorldWeapon(*w, {x, y - 6}, -PI / 2, 18); }
                 break;
             case DS_GRAVE: // a fresh barrow with a sword driven into it
-                DrawEllipse((int)x, (int)y - 1, 13, 5, ink);
-                DrawEllipse((int)x, (int)y - 1, 12, 4, {92, 64, 42, 255});
-                box(x + 9, y - 20, x + 17, y - 2, stone);
-                box(x + 12, y - 18, x + 14, y - 8, {80, 76, 84, 255});
-                box(x + 10, y - 15, x + 16, y - 13, {80, 76, 84, 255});
+                drawPropTL(PR_GRAVE, 0, x - 13, y - 20);
                 if (w) { drawGlow(x - 2, y - 14, w->glow, 22); drawWorldWeapon(*w, {x - 2, y - 24}, PI / 2, 20); }
                 wc = {x - 2, y - 14};
                 break;
             case DS_CART: // an abandoned minecart full of ore
-                DrawCircleV({x - 7, y - 3}, 3, ink); DrawCircleV({x + 7, y - 3}, 3, ink);
-                DrawCircleV({x - 7, y - 3}, 2, {70, 70, 76, 255}); DrawCircleV({x + 7, y - 3}, 2, {70, 70, 76, 255});
-                box(x - 12, y - 14, x + 12, y - 5, {86, 90, 98, 255});
-                for (int k = 0; k < 6; k++) DrawRectangle((int)x - 10 + k * 4, (int)y - 16, 3, 3, RES_COLORS[(k * 3) % RES_COUNT]);
+                drawPropTL(PR_CART, it.data & 3, x - 12, y - 19);
                 if (w) { drawGlow(x + 2, y - 20, w->glow, 20); drawWorldWeapon(*w, {x + 1, y - 13}, -PI / 2 - 0.45f, 15); }
                 wc = {x + 2, y - 20};
                 break;
             case DS_ICE: // a spear frozen in a block of ice
                 if (w) { drawGlow(x, y - 15, w->glow, 22); drawWorldWeapon(*w, {x - 1, y - 3}, -PI / 2 + 0.1f, 22); }
-                DrawRectangle((int)x - 11, (int)y - 29, 23, 29, ink);
-                DrawRectangle((int)x - 10, (int)y - 28, 21, 28, {170, 220, 250, 120});
-                DrawRectangle((int)x - 8, (int)y - 26, 3, 20, {230, 248, 255, 140});
+                drawPropTL(PR_ICE, 0, x - 11, y - 29);
                 break;
             case DS_ANVIL: // laid on an anvil at the heart of the forge
-                drawSpriteBig(SPR_ANVIL, x, y, false, WHITE);
+                drawProp(PR_ANVIL, 0, x, y);
                 if (w) { drawGlow(x, y - 16, w->glow, 20); drawWorldWeapon(*w, {x - 8, y - 14}, -0.05f, 15); }
                 break;
             case DS_ALTAR: // floating above a dark altar
             {
-                box(x - 14, y - 12, x + 14, y - 8, stone);
-                box(x - 11, y - 8, x - 7, y, {90, 86, 96, 255});
-                box(x + 7, y - 8, x + 11, y, {90, 86, 96, 255});
+                drawPropTL(PR_ALTAR, 0, x - 14, y - 12);
                 float bob = std::sin(G.frame * 0.05f) * 1.5f;
                 if (w) { drawGlow(x, y - 22 + bob, w->glow, 24); drawWorldWeapon(*w, {x - 8, y - 22 + bob}, 0, 15); }
                 wc = {x, y - 22};
                 break;
             }
             default:
-                DrawEllipse((int)x, (int)y - 4, 12, 7, ink);
-                DrawEllipse((int)x, (int)y - 4, 11, 6, stone);
+                drawPropTL(PR_STONE, 0, x - 12, y - 11);
                 if (w) { drawGlow(x, y - 16, w->glow, 26); drawWorldWeapon(*w, {x, y - 6}, -PI / 2, 18); }
                 break;
             }
@@ -4259,6 +4242,7 @@ void drawEntities(int camX, int camY)
             break;
         }
         }
+    }
     }
 
     for (auto& l : G.lamps) // wall torches: the flame flickers, the light itself comes from the lighting pass
@@ -4310,10 +4294,10 @@ void drawEntities(int camX, int camY)
         switch (pu.kind)
         {
         case PU_SCROLL: drawScroll(pu.spell, x + 4, y + 5 + std::sin((G.frame + pu.age) * 0.08f) * 0.8f, 11, 1.0f); break;
-        case PU_POTION: drawSpriteBig(SPR_POTION, x + 4, y + 8, false, WHITE); break;
+        case PU_POTION: drawProp(PR_POTION, 0, x + 4, y + 8); break;
         case PU_BOMB: drawBomb(x + 4, y + 4.5f, 0, 0.8f); break;
         case PU_OND: drawOnd(x + 4, y + 3.5f + std::sin(G.frame * 0.06f + pu.b.x) * 0.8f, 0.8f); break;
-        case PU_HEART: drawSpriteBig(SPR_HEART, x + 4, y + 8, false, WHITE); break;
+        case PU_HEART: drawProp(PR_HEART, 0, x + 4, y + 8); break;
         case PU_AMULET:
         {
             Color c = AMULETS[pu.spell].col;

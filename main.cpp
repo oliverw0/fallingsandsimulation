@@ -290,12 +290,14 @@ static void buildLight(int cx, int cy)
     UpdateTexture(lightTex, lpix.data());
 }
 
+void drawTerrainFront() { DrawTextureEx(worldTex, {0, 0}, 0, 1.0f / SUB, WHITE); } // entities draw under a SUB scale, the texture is in cells
+
 static void renderScene()
 {
     int cx = G.rcx, cy = G.rcy;
     double pt = GetTime();
     world.pushX = G.p.m.cx() * SUB; world.pushY = (G.p.m.y + G.p.m.h) * SUB;
-    renderWorld(pix.data(), cx * SUB, cy * SUB, G.vw * SUB, G.vh * SUB);
+    renderWorld(pix.data(), cx * SUB, cy * SUB, G.vw * SUB, G.vh * SUB, true);
     UpdateTexture(worldTex, pix.data());
     profLap(pt, PF_WORLD);
     buildLight(cx, cy);
@@ -303,7 +305,11 @@ static void renderScene()
     prepareStallArt();
     BeginTextureMode(rt);
     ClearBackground(BLACK);
+    rlDrawRenderBatchActive();
+    rlDisableColorBlend(); // the backdrop goes down opaque: its alpha is the solid-cell mask, not a transparency
     DrawTexture(worldTex, 0, 0, WHITE);
+    rlDrawRenderBatchActive();
+    rlEnableColorBlend();
     rlPushMatrix();
     rlScalef(SUB, SUB, 1); // entities draw in world units as before
     drawEntities(cx, cy);
@@ -312,6 +318,10 @@ static void renderScene()
     DrawTexturePro(lightTex, {0, 0, (float)lw, (float)lh}, {(float)(lox - cx), (float)(loy - cy), (float)lw * LS, (float)lh * LS}, {0, 0}, 0, WHITE);
     EndBlendMode();
     rlPopMatrix();
+    rlSetBlendFactorsSeparate(RL_ZERO, RL_ONE, RL_ONE, RL_ZERO, RL_FUNC_ADD, RL_FUNC_ADD); // the backdrop's alpha was the terrain mask: make the frame opaque again
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    DrawRectangle(0, 0, rt.texture.width, rt.texture.height, WHITE);
+    EndBlendMode();
     EndTextureMode();
     float shake = G.shake * (G.reduceShake ? 0.2f : 1.0f);
     float sx = shake > 0.5f ? frange(-shake, shake) : 0;
@@ -727,6 +737,7 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (argc > 2 && std::string(argv[1]) == "--props") { exportPropSheet(argv[2]); return 0; } // dev: a contact sheet of every prop, 4x
     if (argc > 2 && std::string(argv[1]) == "--decor") { exportDecorSheet(argv[2]); return 0; } // dev: a contact sheet of every decor kind, 3x
     if (argc > 2 && std::string(argv[1]) == "--terr") // dev: lit shots of the run's terrain and buildings along the surface, <dir>/terr0..N.png (x offsets from argv[3...])
     {

@@ -98,7 +98,7 @@ void simulate(int x0, int y0, int x1, int y1);
 void parallelFor(int n, const std::function<void(int)>& fn);
 int workerCount(); // threads parallelFor spreads over, the caller included
 Color cellColor(const Cell& c, int x, int y);
-void renderWorld(Color* px, int camX, int camY, int vw, int vh);
+void renderWorld(Color* px, int camX, int camY, int vw, int vh, bool mask = false);
 void parallaxPrep(int camX, int camY, int vw, int vh, int frame);   // parallax.cpp: the layered backdrop seen through the sky
 int parallaxAt(int i, int j, Color& out, float& glow);
 float parallaxHaze(int j);

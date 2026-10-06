@@ -288,9 +288,12 @@ enum DecorKind { DK_CACTUS, DK_BUSH, DK_SKELETON, DK_GIANT,
                  DK_TAPESTRY, DK_DRAPE, DK_CHAIN, DK_BLOOD, DK_HORNS, DK_ANTLERS, DK_DRAGONPILLAR, DK_IDOL, DK_CRANE, DK_SPIKE,
                  DK_LEANSHIELD, DK_SPEARPOST, DK_TARGET, DK_BOWRACK, DK_COBWEB, DK_LEAK };
 Image decorImageFine(int kind, int var, int size);
+enum PropArt { PR_CRATE, PR_BARREL, PR_BOX, PR_PLANK, PR_ANVIL, PR_SHRINE, PR_HEART, PR_POTION, PR_HEN, PR_LANTERN, PR_TABLE, PR_RACK, PR_GRAVE, PR_CART, PR_ICE, PR_ALTAR, PR_STONE };
+Image propImageFine(int what, int var); // decor.cpp: props, pickups and displays at half a unit per pixel (entities.cpp draws them)
 int decorAnchor(int kind, int var);
 Color clothTone(int var, int t);
 void exportDecorSheet(const char* path);
+void exportPropSheet(const char* path);
 const int LS_CX = 65, LS_KEEL = 47, LM_CX = 52, LM_H = 132; // the hull image's centre column and keel row; the mast image's centre column and height (tools/ship.py)
 Image longshipImage(int part); // decor.cpp: 0 hull, 1 mast, 2 broken hull, 3 broken mast (half a unit per pixel)
 void loadStep(float frac, const char* what); // main.cpp: redraws the loading screen with a progress bar (no-op without a window)
@@ -615,6 +618,7 @@ void drawSpriteNative(const Sprite& s, float x, float bottom, bool flip);
 void drawChest(float cx, float cy, float ang, bool open, Color tint = WHITE, float sink = 0); // centre, in render-texture units
 void drawBomb(float cx, float cy, float ang, float scale);
 void drawOnd(float cx, float cy, float scale); // an Önd orb, centred
+void drawTerrainFront(); // main.cpp: the world texture redrawn through its solid-cell mask, over props and decor
 void drawDecor(const Interact& it, float x, float y); // IT_DECOR, feet at (x, y) on screen (units) // a rune bomb, centred on its body
 void drawDartTrap(float faceX, float mouthY, int dir, bool broken, int hit, int hp = 3); // the wall face it's set in, the height it fires at
 int folkLooks(int kind); // how many looks a villager kind (0 man, 1 woman, 2 child) has

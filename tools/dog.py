@@ -109,7 +109,10 @@ def anims():
     sniff = [dict(stand, aN=0.25, eN=0.5, aF=0.15, eF=0.45, nod=0.75 + 0.08 * (i % 2), y=0.6, tail=-1.9 + 0.25 * math.sin(i * 2.1), ear=0.6) for i in range(6)]
     lie = [dict(stand, aN=1.55, eN=0.0, aF=1.5, eF=0.0, tN=1.3, kN=2.3, tF=1.25, kF=2.3, nod=0.2 + 0.03 * math.sin(i / 6 * 2 * math.pi),
                 y=-3.0 + 0.3 * math.sin(i / 6 * 2 * math.pi), tail=-1.6, ear=0.4) for i in range(6)]
-    return dict(idle=idle, walk=walk, crouch=lie, cast=sniff)
+    # sitting up on her haunches, head raised to you, the flag thumping on the floor behind her
+    sit = [dict(stand, tN=1.25, kN=2.3, tF=1.25, kF=2.3, y=0.0, nod=-0.25, pant=1.0, ear=0.3 * math.sin(i / 8 * 2 * math.pi),
+                tail=-1.5 + 0.22 * math.sin(i / 8 * 2 * math.pi), wag=i * 1.5) for i in range(8)]
+    return dict(idle=idle, walk=walk, crouch=lie, cast=sniff, hang=sit)
 
 
 def spec(): return nspec('indi', setter, SETTER, anims(), 96, 64, 56, cx=48, kind='quad')

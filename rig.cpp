@@ -1399,11 +1399,11 @@ static void drawSheet(const AnimSheet& A, int fr, float x, float y, int facing, 
     DrawTexturePro(white ? t.white : t.tex, {0, fr * h, facing < 0 ? -w : w, h}, {left, top, w * U, h * U}, {0, 0}, 0, tint);
 }
 
-// Indi, the setter (pose 0 stand, 1 trot, 2 lying down, 3 sniffing), feet at (x, y) in render-texture units.
+// Indi, the setter (pose 0 stand, 1 trot, 2 lying down, 3 sniffing, 4 sitting with her tail wagging), feet at (x, y) in render-texture units.
 void drawIndi(int pose, float k, int dir, float x, float y)
 {
-    static const int CLIP[] = {AC_IDLE, AC_WALK, AC_CROUCH, AC_CAST};
-    drawSheet(ANIM_INDI, clipFrame(ANIM_INDI, CLIP[pose & 3], k), x, y, dir, WHITE, false);
+    static const int CLIP[] = {AC_IDLE, AC_WALK, AC_CROUCH, AC_CAST, AC_HANG};
+    drawSheet(ANIM_INDI, clipFrame(ANIM_INDI, CLIP[pose % 5], k), x, y, dir, WHITE, false);
 }
 
 // A villager (0 man, 1 woman, 2 child) with its feet at (x, y) in render-texture units; its coat takes `coat`'s colour.

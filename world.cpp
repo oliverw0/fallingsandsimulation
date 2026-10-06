@@ -1028,8 +1028,10 @@ static void drawGrass(Color* px, int camX, int camY, int vw, int vh)
         }
 }
 
-void renderWorld(Color* px, int camX, int camY, int vw, int vh)
+static bool g_mask; // alpha = 255 on solid terrain, 0 elsewhere (see main.cpp:drawTerrainFront)
+void renderWorld(Color* px, int camX, int camY, int vw, int vh, bool mask)
 {
+    g_mask = mask;
     int nt = workerCount();
     g_grass.resize(vh);
     for (auto& r : g_grass) r.clear();
@@ -1258,6 +1260,7 @@ static void renderRows(Color* px, int camX, int camY, int vw, int vh, int j0, in
                         }
                     }
                 }
+                if (g_mask) { Kind fk = P(c.material).kind; col.a = c.material != M::Empty && (fk == Kind::Solid || fk == Kind::Powder) ? 255 : 0; }
                 row[i] = col;
             }
         }

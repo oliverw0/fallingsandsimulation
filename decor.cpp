@@ -1200,7 +1200,422 @@ void stallFront(StallCv& c, int kind)
     }
 }
 
+// ------------------------------------------------------------------------------------------------ props
+// Crates, barrels, the anvil, the shrine, pickups, hens, lanterns and the weapon displays, at half a unit per pixel with
+// the same five-tone ramps as the furniture (entities.cpp draws them from textures; the bodies tumble).
+const Ramp DIRT = {C(30, 20, 14), C(54, 38, 26), C(82, 58, 38), C(112, 82, 54), C(146, 110, 72)};
+const Ramp ICE = {C(70, 110, 150), C(110, 160, 200), C(160, 206, 234), C(204, 238, 252), C(244, 254, 255)};
+const Ramp WINE = CRIM;
+
+// fills every pixel `in` accepts, shaded by its place in the shape: lit on the upper-left rim, dark on the lower-right, a
+// sweep of light across it (grad) and streaks of grain (sx x sy cells)
+template <class F>
+void shaded(Cv& c, int x0, int y0, int x1, int y1, F in, const Ramp& r, int base, int seed, float grad = 0, int sx = 7, int sy = 2)
+{
+    float hw = std::max(1.0f, (x1 - x0 + 1) * 0.5f), mx = (x0 + x1) * 0.5f;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+        {
+            if (!in(x, y)) continue;
+            bool lit = !in(x - 1, y) || !in(x, y - 1), dk = !in(x + 1, y) || !in(x, y + 1);
+            int t = base + (lit && !dk ? 1 : (dk && !lit ? -1 : 0));
+            t += (int)std::lround((R(x / sx, y / sy, seed) - 0.5f) * 1.7f + grad * (mx - x) / hw);
+            c.px(x, y, tone(r, t));
+        }
+}
+
+void crateArt(Cv& c, int var)
+{ // 24 x 24: four boards behind a frame, a diagonal brace, iron nails
+    int s = var * 17 + 3;
+    for (int b = 0; b < 4; b++) plank(c, 0, b * 6, 23, b * 6 + 5, true, s + b, 2 + (R(b, 1, s) > 0.62f) - (R(b, 2, s) > 0.8f));
+    plank(c, 0, 0, 3, 23, false, s + 9, 3);
+    plank(c, 20, 0, 23, 23, false, s + 10, 2);
+    c.line(5, 3, 21, 19, tone(WOOD, 1), 3); // the brace and the shadow it throws
+    c.line(4, 2, 20, 18, tone(WOOD, 3), 3);
+    c.line(4, 2, 20, 18, tone(WOOD, 4), 1);
+    for (int y : {2, 12, 21}) for (int x : {1, 22}) { c.px(x, y, IRON[3]); c.px(x, y + 1, IRON[0]); }
+    c.hline(0, 23, 0, tone(WOOD, 4)); c.hline(0, 23, 23, tone(WOOD, 0));
+    if (var & 1) for (int x = 2; x < 22; x++) if (R(x, 4, s) > 0.55f) c.px(x, 22 - (int)(R(x, 5, s) * 3), tone(FOREST, 1 + (R(x, 6, s) > 0.5f)));
+    if (var & 2) { c.line(8, 14, 8, 18, tone(WOOD, 0)); c.line(8, 14, 12, 14, tone(WOOD, 0)); c.line(12, 14, 12, 18, tone(WOOD, 0)); } // a stencilled mark
+}
+
+void barrelArt(Cv& c, int var)
+{ // 18 x 26: bulging staves, two iron hoops, a lid seen from just above
+    int s = var * 13 + 5;
+    float cx = 9.0f;
+    auto hw = [&](int y) { float u = (y - 14.0f) / 12.0f; return 8.2f - 1.5f * u * u; };
+    for (int y = 3; y < 26; y++)
+    {
+        float h = hw(y);
+        for (int x = (int)std::floor(cx - h); x < (int)std::ceil(cx + h); x++)
+        {
+            float u = (x + 0.5f - cx) / h, sp = (u + 1) * 3.5f;
+            if (std::fabs(u) > 1) continue;
+            int t = 2 + (u < -0.62f ? 2 : (u < -0.25f ? 1 : (u > 0.62f ? -2 : (u > 0.25f ? -1 : 0))));
+            int st = (int)sp;
+            if (sp - st < 0.2f) t -= 1; // the seam between staves
+            else if (R(st, 1, s) > 0.74f) t += 1;
+            else if (R(st, 2, s) < 0.2f) t -= 1;
+            if (R(x, y / 3, s) > 0.88f) t -= 1;
+            c.px(x, y, tone(WOOD, t));
+        }
+    }
+    for (int hy : {6, 7, 20, 21}) // the hoops follow the bulge
+        for (int x = (int)std::floor(cx - hw(hy)); x < (int)std::ceil(cx + hw(hy)); x++)
+        {
+            float u = (x + 0.5f - cx) / hw(hy);
+            int t = 2 + (u < -0.55f ? 2 : (u < -0.15f ? 1 : (u > 0.55f ? -2 : (u > 0.2f ? -1 : 0))));
+            c.px(x, hy, tone(IRON, hy % 2 ? t - 1 : t));
+        }
+    for (int hy : {6, 20}) { c.px(5, hy, IRON[4]); c.px(13, hy, IRON[1]); } // rivets
+    c.ell(cx, 3.2f, 7.2f, 2.8f, tone(WOOD, 1)); // the rim and the lid
+    c.ell(cx, 3.4f, 6.2f, 2.2f, tone(WOOD, 3));
+    for (int x = 4; x < 15; x++) if (R(x, 2, s) > 0.55f) c.px(x, 3, tone(WOOD, 2));
+    c.hline(5, 8, 2, tone(WOOD, 4));
+    c.hline(4, 14, 25, tone(WOOD, 0)); // the foot in shadow
+    if (var & 1) for (int y = 9; y < 19; y++) c.px(3 + (int)(R(y, 3, s) * 2), y, tone(FOREST, 1)); // damp and moss on the shaded side
+}
+
+void boxArt(Cv& c, int var)
+{ // 16 x 14: a small iron-strapped chest with a lid and a brass clasp
+    int s = var * 7 + 11;
+    plank(c, 0, 4, 15, 13, true, s, 2);
+    c.slab(0, 0, 15, 4, WOOD, 3); // the lid, overhanging a pixel
+    for (int x = 1; x < 15; x++) if (R(x / 4, 0, s) > 0.6f) c.px(x, 2, tone(WOOD, 4));
+    c.hline(0, 15, 5, tone(WOOD, 0));
+    for (int x : {3, 12}) { c.vline(x, 0, 13, tone(IRON, 2)); c.vline(x + 1, 0, 13, tone(IRON, 1)); c.px(x, 1, IRON[4]); c.px(x, 9, IRON[4]); }
+    c.rect(7, 3, 8, 7, tone(BRASS, 3)); c.px(7, 3, BRASS[4]); c.px(8, 7, BRASS[1]); c.px(7, 5, BRASS[0]); // the clasp
+    c.hline(0, 15, 13, tone(WOOD, 0));
+}
+
+void plankArt(Cv& c, int var)
+{ // floating wreckage: a wet, splintered board with a nail left in it (20, 32 or 48 long)
+    int W = c.w, s = var * 9 + 2;
+    for (int y = 0; y < 6; y++)
+        for (int x = 0; x < W; x++)
+        {
+            float tipL = 2.0f * R(y, 1, s), tipR = 2.5f * R(y, 2, s);
+            if (x < tipL || x >= W - tipR) continue; // ragged ends
+            int t = y == 0 ? 3 : (y < 3 ? 2 : (y == 5 ? 0 : 1));
+            t += (R(x / 6, y, s) > 0.8f ? 1 : 0) - (R(x / 3, y, s + 1) < 0.15f ? 1 : 0);
+            c.px(x, y, tone(WOOD, std::max(0, t - 1)));
+        }
+    for (int x = 3; x < W - 3; x += 7) c.vline(x + (int)(R(x, 1, s) * 3), 1, 4, tone(WOOD, 0)); // splits across the grain
+    c.px(W / 3, 1, tone(WOOD, 4)); c.px(W / 3 + 1, 1, tone(WOOD, 4));
+    c.px(W / 2, 2, C(150, 100, 70)); c.px(W / 2, 3, C(90, 56, 40)); // a rusty nail
+    c.hline(2, W - 4, 0, tone(WOOD, 3));                             // the wet gleam along the top
+    if (W > 24) for (int x = 4; x < W - 6; x += 5) if (R(x, 3, s) > 0.5f) c.px(x, 5, tone(FOREST, 1)); // weed
+}
+
+void anvilArt(Cv& c, int /*var*/)
+{ // 44 x 26: horn, flat face, waist and a splayed foot, in blued iron
+    auto in = [](int x, int y) {
+        float cx = 26.5f;
+        if (y >= 2 && y <= 8 && x >= 11 && x <= 43) return true;                                   // the face
+        if (x <= 10 && y >= 2 && y <= 8 && std::fabs(y + 0.5f - 5.0f) <= 0.7f + x * 0.23f) return true; // the horn
+        if (y >= 9 && y <= 17) return std::fabs(x + 0.5f - cx) <= 11.5f - 3.0f * std::sin(3.14159f * (y - 9) / 9.0f);
+        if (y >= 18 && y <= 25) return std::fabs(x + 0.5f - cx) <= 11.5f + (y - 18) * 0.4f + 1.5f && !(y >= 24 && std::fabs(x - cx) < 3);
+        return false;
+    };
+    shaded(c, 0, 0, 43, 25, in, IRON, 2, 7, 0.7f, 9, 3);
+    for (int x = 12; x < 43; x++) if (in(x, 2)) c.px(x, 2, tone(IRON, 4)); // the polished edge
+    for (int x = 11; x < 43; x++) if (in(x, 3) && R(x, 3, 5) > 0.35f) c.px(x, 3, tone(IRON, 3)); // wear on the face
+    for (int x = 11; x < 43; x++) if (in(x, 8)) c.px(x, 8, tone(IRON, 1));
+    for (int y = 9; y < 11; y++) for (int x = 17; x < 37; x++) if (in(x, y)) c.px(x, y, tone(IRON, 1)); // the face's shadow on the waist
+    c.rect(36, 3, 38, 5, tone(IRON, 0)); c.hline(36, 38, 6, tone(IRON, 3)); // the hardy hole
+    c.rect(30, 3, 31, 4, tone(IRON, 0));                                    // the pritchel
+    c.px(1, 5, tone(IRON, 4)); c.px(2, 5, tone(IRON, 3));                   // the horn's gleam
+    c.px(41, 7, tone(CLAY, 1)); c.px(40, 7, tone(CLAY, 2));                 // a trace of forge scale
+    for (int x = 12; x < 41; x += 3) c.px(x + (int)(R(x, 1, 8) * 2), 17 + (int)(R(x, 2, 8) * 2), tone(IRON, 0)); // pitting at the waist's foot
+}
+
+void shrineArt(Cv& c, int /*var*/)
+{ // 36 x 48: a runed standing stone on two steps, a bowl on top for the orb
+    auto blocks = [&](int x0, int y0, int x1, int y1, int t, int seed) {
+        shaded(c, x0, y0, x1, y1, [&](int x, int y) { return x >= x0 && x <= x1 && y >= y0 && y <= y1; }, STONE, t, seed, 0.6f, 5, 3);
+        for (int y = y0 + 3; y < y1; y += 3) for (int x = x0 + 1; x < x1; x++) if (R(x / 6, y, seed) > 0.25f) c.px(x, y, tone(STONE, 1)); // courses
+    };
+    blocks(0, 42, 35, 47, 2, 21);
+    blocks(5, 36, 30, 41, 2, 22);
+    for (int y = 12; y < 36; y++) // the shaft, a little narrower at the top
+    {
+        int l = 11 + (y < 22 ? (22 - y) / 8 : 0), r = 24 - (y < 22 ? (22 - y) / 8 : 0);
+        shaded(c, l, y, r, y, [&](int x, int) { return x >= l && x <= r; }, STONE, 2, 23 + y / 4, 0.9f, 4, 6);
+    }
+    blocks(7, 7, 28, 11, 2, 24); // the capital
+    shaded(c, 10, 3, 25, 6, [](int x, int y) { return y > 3 || (x > 11 && x < 24); }, STONE, 3, 25);
+    c.hline(12, 23, 3, tone(STONE, 0)); // the bowl's hollow
+    for (int y = 14; y < 33; y += 6) // runes cut into the shaft: a dark groove with a pale lip below it
+    {
+        int k = (y / 6) % 3;
+        auto cut = [&](int x0, int y0, int x1, int y1) { c.line((float)x0, (float)y0, (float)x1, (float)y1, tone(STONE, 0)); c.line((float)x0 + 1, (float)y0 + 1, (float)x1 + 1, (float)y1 + 1, tone(STONE, 4)); };
+        c.vline(17, y, y + 4, tone(STONE, 0));
+        if (k == 0) { cut(17, y, 21, y + 2); cut(17, y + 2, 21, y + 4); }
+        else if (k == 1) { cut(17, y, 14, y + 2); cut(17, y + 2, 21, y + 4); }
+        else { cut(14, y + 1, 20, y + 3); }
+    }
+    for (int x = 1; x < 12; x++) if (R(x, 2, 26) > 0.4f) c.px(x, 46 - (int)(R(x, 3, 26) * 3), tone(FOREST, 1 + (R(x, 4, 26) > 0.6f))); // moss
+    c.line(26, 20, 24, 27, tone(STONE, 0)); // a crack
+}
+
+void heartArt(Cv& c, int /*var*/)
+{ // 20 x 16: a plump heart, lit from the upper left, with a gleam
+    auto in = [](int x, int y) {
+        float X = (x + 0.5f - 10) / 8.8f, Y = (9.0f - (y + 0.5f)) / 6.5f;
+        float a = X * X + Y * Y - 1;
+        return a * a * a - X * X * Y * Y * Y <= 0;
+    };
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 20; x++)
+        {
+            if (!in(x, y)) continue;
+            float d = std::sqrt((x - 6.0f) * (x - 6.0f) + (y - 5.0f) * (y - 5.0f));
+            int t = d < 2.2f ? 4 : (d < 5.5f ? 3 : (d < 9.5f ? 2 : 1));
+            if (!in(x + 1, y) || !in(x, y + 1)) t = std::max(0, t - 2);
+            else if (!in(x - 1, y) || !in(x, y - 1)) t = std::min(3, t);
+            c.px(x, y, tone(CRIM, t));
+        }
+    c.px(5, 4, C(255, 214, 204)); c.px(6, 4, C(255, 190, 180)); c.px(5, 5, C(255, 170, 160)); c.px(4, 5, tone(CRIM, 4)); // the gleam
+}
+
+void potionArt(Cv& c, int /*var*/)
+{ // 16 x 20: a round flask of red draught, corked
+    const Ramp GLASS = {C(60, 92, 110), C(110, 150, 170), C(170, 206, 220), C(214, 238, 248), C(250, 255, 255)};
+    auto in = [](int x, int y) {
+        if (y >= 3 && y <= 8) return x >= 6 && x <= 9;      // the neck
+        if (y == 2) return x >= 5 && x <= 10;               // the lip
+        float dx = (x + 0.5f - 8) / 6.4f, dy = (y + 0.5f - 13.5f) / 6.2f;
+        return y >= 7 && dx * dx + dy * dy <= 1;
+    };
+    for (int y = 0; y < 20; y++)
+        for (int x = 0; x < 16; x++)
+        {
+            if (!in(x, y)) continue;
+            bool edge = !in(x - 1, y) || !in(x + 1, y) || !in(x, y - 1) || !in(x, y + 1);
+            float d = std::sqrt((x - 6.0f) * (x - 6.0f) + (y - 11.0f) * (y - 11.0f));
+            int t = d < 2.5f ? 3 : (d < 5 ? 2 : (d < 8 ? 1 : 0));
+            if (y < 6) t = std::min(t, 2); // less draught up the neck
+            c.px(x, y, edge ? tone(GLASS, x < 8 ? 3 : 1) : tone(WINE, t + 1));
+        }
+    for (int y = 11; y < 17; y++) c.px(4, y, GLASS[4]); // the glass catching the light
+    c.px(5, 9, GLASS[4]); c.px(5, 10, GLASS[4]);
+    c.hline(6, 9, 6, tone(WINE, 4)); // the surface of the draught in the neck
+    c.rect(6, 0, 9, 2, tone(WOOD, 3)); c.hline(6, 9, 0, tone(WOOD, 4)); c.vline(9, 0, 2, tone(WOOD, 1)); c.px(7, 1, tone(WOOD, 2)); // the cork
+}
+
+void henArt(Cv& c, int var)
+{ // 16 x 12, facing right: var = plumage * 2 + (0 standing, 1 pecking)
+    static const Ramp* PL[4] = {&LINEN, &OCHRE, &NIGHT, &WOOD};
+    const Ramp& pl = *PL[(var / 2) & 3];
+    bool peck = var & 1;
+    for (int k = 0; k < 4; k++) c.line(3.0f, 6.0f, 0.0f + (k == 3), 1.5f + k * 1.2f, tone(pl, k % 2 ? 1 : 2), 1); // the tail, a fan of feathers
+    c.px(0, 2, tone(pl, 3));
+    c.ball(7.5f, 7.0f, 5.6f, 3.8f, pl, 2); // the body
+    c.ell(7.0f, 7.4f, 3.2f, 2.0f, tone(pl, 1));  // the folded wing
+    c.hline(5, 9, 6, tone(pl, 3)); c.hline(5, 9, 8, tone(pl, 0));
+    int hx = peck ? 13 : 12, hy = peck ? 8 : 4;
+    c.line(10.0f, 6.0f, (float)hx, (float)hy + 1, tone(pl, 2), 2); // the neck
+    c.ball(hx + 0.5f, hy + 0.5f, 2.0f, 2.0f, pl, 3);
+    c.px(hx, hy - 1, tone(CRIM, 3)); c.px(hx + 1, hy - 2, tone(CRIM, 3)); c.px(hx + 1, hy - 1, tone(CRIM, 2)); // the comb
+    c.px(hx + 2, hy + 1, tone(OCHRE, 4)); c.px(hx + 3, hy + 1, tone(OCHRE, 3));                                // the beak
+    c.px(hx + 2, hy + 2, tone(CRIM, 2));                                                                       // the wattle
+    c.px(hx + 1, hy, C(16, 12, 10));                                                                           // the eye
+    for (int x : {6, 9}) { c.vline(x, 10, 11, tone(OCHRE, 3)); c.px(x + 1, 11, tone(OCHRE, 4)); }              // legs and toes
+}
+
+void lanternArt(Cv& c, int var)
+{ // 10 x 16: var 0 the iron cage, 1 the flame inside it
+    if (var == 1)
+    {
+        for (int y = 5; y < 11; y++)
+            for (int x = 3; x < 7; x++)
+            {
+                float d = std::sqrt((x - 4.5f) * (x - 4.5f) * 1.6f + (y - 8.0f) * (y - 8.0f) * 0.7f);
+                c.px(x, y, d < 1.1f ? C(255, 246, 210) : (d < 2.0f ? C(255, 206, 120) : C(226, 128, 52)));
+            }
+        c.px(4, 4, C(255, 190, 90)); c.px(5, 4, C(240, 150, 60)); // the tip of the flame
+        return;
+    }
+    c.rect(4, 0, 5, 1, tone(IRON, 3)); c.px(4, 0, IRON[4]);                  // the ring
+    c.px(4, 2, tone(IRON, 3)); c.px(5, 2, tone(IRON, 2));
+    c.hline(2, 7, 3, tone(IRON, 2)); c.hline(2, 7, 4, tone(IRON, 1)); c.px(2, 3, IRON[4]); c.px(3, 3, IRON[3]); // the cap
+    c.vline(2, 4, 11, tone(IRON, 3)); c.vline(7, 4, 11, tone(IRON, 1));      // the frame's uprights
+    c.hline(2, 7, 11, tone(IRON, 2));
+    c.px(3, 5, C(255, 244, 214)); c.px(3, 6, C(255, 230, 180));              // glare on the glass
+    c.hline(1, 8, 12, tone(IRON, 3)); c.hline(1, 8, 13, tone(IRON, 1)); c.px(1, 12, IRON[4]); // the base plate
+    c.hline(3, 6, 14, tone(IRON, 2)); c.hline(4, 5, 15, tone(IRON, 1));
+}
+
+void tableArt(Cv& c, int var)
+{ // 52 x 24: a cellar table, a cutting board on it
+    plank(c, 0, 4, 51, 8, true, 31 + var, 3);
+    c.hline(1, 50, 9, tone(WOOD, 0)); c.hline(2, 49, 10, tone(WOOD, 1)); // the apron's shadow
+    plank(c, 3, 9, 6, 23, false, 32, 2); plank(c, 45, 9, 48, 23, false, 33, 1);
+    plank(c, 6, 17, 45, 19, true, 34, 1); // the stretcher
+    plank(c, 14, 0, 37, 3, true, 35, 4);  // the cutting board
+    c.hline(14, 37, 3, tone(WOOD, 1));
+    c.line(17.0f, 1.0f, 22.0f, 1.0f, tone(WOOD, 2)); c.px(30, 1, tone(BLOODR, 2)); c.px(31, 1, tone(BLOODR, 3)); c.px(32, 2, tone(BLOODR, 1));
+    for (int y : {10, 20}) { c.px(4, y, IRON[3]); c.px(46, y, IRON[3]); } // pegged joints
+}
+
+void rackArt(Cv& c, int /*var*/)
+{ // 48 x 60: two posts, rails, pegs
+    plank(c, 0, 2, 3, 59, false, 41, 2); plank(c, 44, 2, 47, 59, false, 42, 1);
+    for (int x : {0, 44}) { c.rect(x, 0, x + 3, 1, tone(WOOD, 3)); c.hline(x, x + 3, 0, tone(WOOD, 4)); }  // the finials
+    plank(c, 4, 6, 43, 9, true, 43, 3);
+    plank(c, 4, 42, 43, 45, true, 44, 3);
+    plank(c, 0, 54, 7, 59, true, 45, 1); plank(c, 40, 54, 47, 59, true, 46, 1); // feet
+    for (int x = 8; x < 42; x += 6) { c.rect(x, 10, x + 1, 13, tone(IRON, 2)); c.px(x, 10, IRON[4]); c.rect(x, 46, x + 1, 49, tone(IRON, 2)); c.px(x, 46, IRON[4]); } // pegs
+    for (int y : {7, 43}) { c.px(1, y, IRON[3]); c.px(46, y, IRON[3]); }
+    c.line(3, 10, 4, 19, tone(LINEN, 2)); c.line(44, 44, 43, 52, tone(LINEN, 1)); // leather ties hanging
+}
+
+void graveArt(Cv& c, int /*var*/)
+{ // 60 x 40: a fresh barrow under turf and a cracked headstone
+    auto mound = [](int x, int y) { float dx = (x + 0.5f - 26) / 26.0f, dy = (y + 0.5f - 39) / 10.0f; return dy <= 0.05f && dx * dx + dy * dy <= 1; };
+    shaded(c, 0, 28, 52, 39, mound, DIRT, 2, 51, 0.5f, 3, 2);
+    for (int x = 3; x < 50; x++) // turf laid back along the crown, tufts of grass
+    {
+        int top = 39; while (top > 28 && mound(x, top - 1)) top--;
+        if (R(x, 1, 52) > 0.3f) c.px(x, top, tone(FOREST, 2 + (R(x, 2, 52) > 0.5f)));
+        if (R(x, 3, 52) > 0.82f) { c.vline(x, top - 2, top, tone(FOREST, 3)); c.px(x + 1, top - 1, tone(FOREST, 2)); }
+    }
+    for (int k = 0; k < 6; k++) { int x = 5 + (int)(R(k, 4, 52) * 40), y = 33 + (int)(R(k, 5, 52) * 5); if (mound(x, y)) c.px(x, y, tone(STONE, 3)); } // pebbles
+    auto stone = [](int x, int y) { float r = 8; if (y < 12) { float dx = x - 51.5f, dy = y - 12; return dx * dx + dy * dy <= r * r; } return x >= 44 && x <= 59 && y <= 38; };
+    shaded(c, 43, 3, 59, 38, stone, STONE, 2, 53, 0.8f, 5, 4);
+    c.vline(52, 9, 22, tone(STONE, 0)); c.hline(48, 56, 13, tone(STONE, 0)); // the cross cut in it
+    c.vline(53, 9, 22, tone(STONE, 4)); c.hline(48, 56, 14, tone(STONE, 4));
+    c.line(47, 4, 49, 11, tone(STONE, 0)); c.line(55, 26, 51, 33, tone(STONE, 0)); // cracks
+    for (int x = 44; x < 52; x++) if (R(x, 6, 53) > 0.45f) c.px(x, 37 - (int)(R(x, 7, 53) * 3), tone(FOREST, 1));
+    c.px(8, 30, C(220, 200, 90)); c.px(9, 31, C(210, 90, 80)); c.px(7, 31, tone(FOREST, 3)); // a few flowers left on it
+}
+
+void cartArt(Cv& c, int var)
+{ // 48 x 38: an ore cart, the heap of ore above its rim
+    int s = var * 5 + 3;
+    shaded(c, 0, 10, 47, 27, [](int x, int y) { return y >= 10 && y <= 27 && x >= (y > 22 ? 2 : 0) && x <= (y > 22 ? 45 : 47); }, IRON, 2, s, 0.8f, 3, 6);
+    for (int x = 4; x < 46; x += 6) c.vline(x, 12, 26, tone(IRON, 1)); // slats
+    c.hline(0, 47, 10, tone(IRON, 4)); c.hline(0, 47, 11, tone(IRON, 3)); c.hline(0, 47, 18, tone(IRON, 1)); // the rim, a rivet band
+    for (int x = 2; x < 47; x += 6) { c.px(x, 14, IRON[4]); c.px(x, 21, IRON[1]); }
+    c.line(8, 12, 12, 24, tone(CLAY, 1), 1); c.line(31, 14, 34, 22, tone(CLAY, 2), 1); // rust runs
+    static const Color ORE[5][3] = {{C(250, 222, 128), C(224, 176, 70), C(120, 82, 24)}, {C(214, 150, 100), C(180, 114, 70), C(100, 56, 34)},
+                                    {C(170, 174, 188), C(120, 124, 136), C(48, 48, 56)}, {C(112, 142, 214), C(64, 96, 176), C(24, 38, 90)}, {C(170, 200, 120), C(100, 150, 80), C(40, 70, 40)}};
+    for (int k = 0; k < 11; k++)
+    {
+        float cx = 4 + k * 4.0f + R(k, 1, s) * 2, cy = 7 - std::fabs(k - 5) * 0.7f + R(k, 2, s) * 2.5f, r = 3.0f + R(k, 3, s) * 1.6f;
+        const Color* o = ORE[(k * 3 + var) % 5];
+        for (int y = (int)(cy - r); y <= (int)(cy + r + 2); y++)
+            for (int x = (int)(cx - r); x <= (int)(cx + r); x++)
+            {
+                if (y < 0 || y > 11) continue;
+                float dx = (x + 0.5f - cx) / r, dy = (y + 0.5f - cy) / (r * 0.8f);
+                if (dx * dx + dy * dy > 1) continue;
+                c.px(x, y, (dx + dy) < -0.6f ? o[0] : ((dx + dy) > 0.4f ? o[2] : o[1]));
+            }
+    }
+    for (int sx : {10, 38}) // wheels: iron discs, spokes, a hub
+    {
+        c.ball((float)sx, 32.0f, 6.0f, 6.0f, IRON, 2);
+        c.disc((float)sx, 32.0f, 4.0f, tone(IRON, 1));
+        for (int k = 0; k < 4; k++) { float a = k * 0.785f; c.line(sx - std::cos(a) * 4, 32 - std::sin(a) * 4, sx + std::cos(a) * 4, 32 + std::sin(a) * 4, tone(IRON, 3)); }
+        c.disc((float)sx, 32.0f, 1.6f, tone(IRON, 4));
+    }
+}
+
+void iceArt(Cv& c, int /*var*/)
+{ // 46 x 58: a block of ice, translucent so the spear in it shows, with bright faces and a frosted top
+    auto in = [](int x, int y) { return x >= 1 && x <= 44 && y >= 3 && y <= 57 && !(y < 6 && (x < 4 || x > 41)); };
+    for (int y = 3; y < 58; y++)
+        for (int x = 1; x < 45; x++)
+        {
+            if (!in(x, y)) continue;
+            bool lit = !in(x - 1, y) || !in(x, y - 1), dk = !in(x + 1, y) || !in(x, y + 1);
+            int t = lit ? 4 : (dk ? 1 : 2) + (R(x / 5, y / 7, 61) > 0.78f ? 1 : 0);
+            Color k = tone(ICE, t);
+            k.a = lit || dk ? 235 : (unsigned char)(78 + 50 * (t - 1) + (int)(R(x, y, 62) * 24));
+            c.px(x, y, k);
+        }
+    for (int i = 0; i < 4; i++) // long facets, bright streaks slanting across the faces
+    {
+        float x0 = 6.0f + i * 10.0f;
+        c.line(x0, 52, x0 + 12 + i * 2, 12, Color{236, 250, 255, 150}, 1);
+    }
+    c.line(30, 20, 36, 44, Color{70, 110, 150, 170}, 1); c.line(36, 44, 33, 52, Color{70, 110, 150, 170}, 1); // a crack
+    for (int k = 0; k < 8; k++) c.disc(8.0f + R(k, 1, 63) * 30, 14.0f + R(k, 2, 63) * 38, 0.9f, Color{230, 248, 255, 170});    // trapped bubbles
+    for (int x = 4; x < 42; x++) { int d = 3 + (int)(R(x / 2, 1, 64) * 3); for (int y = 3; y < 3 + d; y++) if (in(x, y)) c.px(x, y, tone(LINEN, 4 - (y > 4))); } // a cap of snow
+}
+
+void altarArt(Cv& c, int /*var*/)
+{ // 56 x 24: a dark altar slab on two squat pillars, a rune inlaid along it
+    shaded(c, 0, 0, 55, 7, [](int x, int y) { return y >= 1 || (x > 1 && x < 54); }, NIGHT, 3, 71, 0.6f, 6, 2);
+    c.hline(1, 54, 0, tone(NIGHT, 4));
+    for (int x = 4; x < 52; x++) c.px(x, 4, x % 6 < 4 ? C(132, 80, 210) : C(80, 44, 140)); // the inlaid rune line
+    for (int x = 6; x < 50; x += 6) { c.px(x, 3, C(190, 140, 255)); c.px(x + 1, 5, C(190, 140, 255)); }
+    for (int px0 : {6, 42}) shaded(c, px0, 8, px0 + 7, 23, [&](int x, int) { return x >= px0 && x <= px0 + 7; }, NIGHT, 2, 72 + px0, 0.9f, 3, 4);
+    c.hline(5, 14, 8, tone(NIGHT, 0)); c.hline(41, 50, 8, tone(NIGHT, 0));
+    c.hline(4, 15, 22, tone(NIGHT, 3)); c.hline(40, 51, 22, tone(NIGHT, 3)); c.hline(4, 15, 23, tone(NIGHT, 1)); c.hline(40, 51, 23, tone(NIGHT, 1));
+    for (int x = 2; x < 20; x++) if (R(x, 1, 73) > 0.6f) c.px(x, 7, tone(FOREST, 1));
+}
+
+void stoneArt(Cv& c, int /*var*/)
+{ // 48 x 22: a flat mossy boulder worn into a plinth, a ring cut in the top
+    auto in = [](int x, int y) { float dx = (x + 0.5f - 24) / 24.0f, dy = (y + 0.5f - 15) / 15.0f; return y <= 21 && dx * dx + dy * dy <= 1; };
+    shaded(c, 0, 0, 47, 21, in, STONE, 2, 81, 0.7f, 5, 3);
+    c.ell(24, 7, 8, 2.2f, tone(STONE, 1)); c.ell(24, 7.4f, 7, 1.6f, tone(STONE, 3)); // the rune ring, and the dish worn inside it
+    for (int x = 3; x < 34; x++) { int y = 4 + (int)(R(x, 1, 82) * 4); if (in(x, y) && R(x, 2, 82) > 0.5f) c.px(x, y, tone(FOREST, 2 + (R(x, 3, 82) > 0.7f))); }
+    c.line(36, 9, 40, 16, tone(STONE, 0)); c.line(12, 14, 8, 19, tone(STONE, 0));
+}
+
 } // namespace
+
+// The painted props: what (PropArt) and var pick the picture; the size is fixed per kind.
+Image propImageFine(int what, int var)
+{
+    static const int SZ[][2] = {{24, 24}, {18, 26}, {16, 14}, {0, 6}, {44, 26}, {36, 48}, {20, 16}, {16, 20}, {16, 12}, {10, 16}, {52, 24}, {48, 60}, {60, 40}, {48, 38}, {46, 58}, {56, 24}, {48, 22}};
+    int w = SZ[what][0] ? SZ[what][0] : (var % 3 == 0 ? 20 : (var % 3 == 1 ? 32 : 48));
+    Cv c(w, SZ[what][1]);
+    switch (what)
+    {
+    case PR_CRATE: crateArt(c, var); break;
+    case PR_BARREL: barrelArt(c, var); break;
+    case PR_BOX: boxArt(c, var); break;
+    case PR_PLANK: plankArt(c, var / 3); break;
+    case PR_ANVIL: anvilArt(c, var); break;
+    case PR_SHRINE: shrineArt(c, var); break;
+    case PR_HEART: heartArt(c, var); break;
+    case PR_POTION: potionArt(c, var); break;
+    case PR_HEN: henArt(c, var); break;
+    case PR_LANTERN: lanternArt(c, var); break;
+    case PR_TABLE: tableArt(c, var); break;
+    case PR_RACK: rackArt(c, var); break;
+    case PR_GRAVE: graveArt(c, var); break;
+    case PR_CART: cartArt(c, var); break;
+    case PR_ICE: iceArt(c, var); break;
+    case PR_ALTAR: altarArt(c, var); break;
+    default: stoneArt(c, var); break;
+    }
+    return c.image();
+}
+
+// dev: every prop on one sheet, 4x (main.cpp --props <png>)
+void exportPropSheet(const char* path)
+{
+    static const int NV[] = {4, 4, 2, 3, 1, 1, 1, 1, 8, 2, 1, 1, 1, 4, 1, 1, 1};
+    Image sheet = GenImageColor(1500, 720, Color{52, 50, 60, 255});
+    int x = 8, y = 8, rowH = 0;
+    for (int what = 0; what <= PR_STONE; what++)
+        for (int v = 0; v < NV[what]; v++)
+        {
+            Image im = propImageFine(what, what == PR_PLANK ? v : v);
+            ImageResizeNN(&im, im.width * 4, im.height * 4);
+            if (x + im.width > 1490) { x = 8; y += rowH + 10; rowH = 0; }
+            ImageDraw(&sheet, im, {0, 0, (float)im.width, (float)im.height}, {(float)x, (float)y, (float)im.width, (float)im.height}, WHITE);
+            x += im.width + 10; rowH = std::max(rowH, im.height);
+            UnloadImage(im);
+        }
+    ExportImage(sheet, path);
+    UnloadImage(sheet);
+}
 
 Image stallImageFine(int kind, int layer)
 {

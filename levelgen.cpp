@@ -7,6 +7,7 @@
 #include <string>
 #include <chrono>
 #include <cstring>
+#include "sprites_trees.h"
 
 using M = CellMaterial;
 
@@ -352,173 +353,29 @@ static void paintSkeleton(int x, int fy, int dir)
 // Cobweb strung across a ceiling corner: spokes fanning down and towards `dir`, joined by threads.
 static void paintCobweb(int x, int y, int dir) { addDecor(DK_COBWEB, (float)x, (float)y, -1, irange(7, 12), dir < 0); }
 
-// ---- trees: three Norse kinds (oak, spruce, birch), painted onto the back wall a unit at a time (the renderer
-// smooths them to cell diagonals). Trunks flare into roots and taper, bark has grooves and moss, boughs fork and end
-// in bumpy leaf masses lit from the upper left, drawn back to front so the dark gaps between masses show.
-static std::vector<uint8_t> g_tm; // what the tree being painted put where: 1 leaf, 2 wood (so a last pass can light and shade it as one object)
-static int g_tx0, g_ty0, g_tw, g_th;
-static void treePx(int x, int y, Color c, uint8_t m = 2)
+// ---- trees: the user's own painted tree sheet (sprites_trees.h, from tools/trees_user.py), stamped into the back wall a
+// unit at a time (the renderer smooths them to cell diagonals). Five living kinds (small oak, birch, great oak, spruce,
+// round oak) and six dead ones (bare oak, bare birch, broken hollow trunk, stump, fallen log, blackened snag).
+static void treePx(int x, int y, Color c)
 {
     if (!world.in(x, y)) return;
     world.bgAt(x, y) = c;
     world.skyAt(x, y) = 0;
-    int lx = x - g_tx0, ly = y - g_ty0;
-    if (lx >= 0 && ly >= 0 && lx < g_tw && ly < g_th) g_tm[(size_t)ly * g_tw + lx] = m;
-}
-static void treeLeaf(int x, int y, Color c) { treePx(x, y, c, 1); }
-
-static Color leafTone(const Color ramp[4], float lit) { int i = (int)clampf(lit * 4.0f, 0, 3.99f); return ramp[i]; }
-
-// A leaf mass: a ring of small bumps round a core, each bump lit on its upper left and dark underneath.
-static void leafMass(int cx, int cy, int rx, int ry, const Color ramp[4], float holes)
-{
-    int bumps = std::max(5, (rx + ry) / 2);
-    for (int pass = 0; pass < 2; pass++) // the dark back layer first, then the lit front
-        for (int b = 0; b < bumps + 1; b++)
-        {
-            float a = b == bumps ? 0 : b * 6.2832f / bumps + hash2(cx, cy + b, seed + 3) * 0.6f;
-            float d = b == bumps ? 0 : 0.55f + 0.3f * hash2(cx + b, cy, seed + 4);
-            int bx = cx + (int)std::lround(std::cos(a) * rx * d), by = cy + (int)std::lround(std::sin(a) * ry * d);
-            int r = std::max(2, (int)(std::min(rx, ry) * (b == bumps ? 0.8f : 0.5f)));
-            for (int dy = -r; dy <= r; dy++)
-                for (int dx = -r; dx <= r; dx++)
-                {
-                    float rr = (float)(dx * dx + dy * dy);
-                    if (rr > r * r + 0.5f || hash2(bx + dx, by + dy, seed + 8) < holes) continue;
-                    float lit = 0.5f + (-dx * 0.55f - dy * 0.85f) / (r * 1.2f) + 0.22f * (hash2(bx + dx, by + dy, seed + 9) - 0.5f);
-                    if (pass == 0) lit -= 0.35f;
-                    else if (dy > r * 0.45f) lit -= 0.3f; // the shaded underside of each bump
-                    treeLeaf(bx + dx, by + dy, leafTone(ramp, lit));
-                }
-        }
 }
 
-static void trunk(int x, int fy, int top, int tw, float lean, Color bark, bool birch)
+static void placeTree(int x, int fy, int deadPct = 0)
 {
-    float phase = hash2(x, fy, seed + 21) * 6.28f;
-    for (int y = fy + 2; y >= top; y--)
-    {
-        float t = (float)(fy - y) / std::max(1, fy - top); // 0 at the foot, 1 at the crown
-        int cx = x + (int)std::lround(std::sin(y * 0.11f + phase) * lean * (0.3f + t));
-        int hw = (int)std::lround(tw * (0.5f - 0.18f * t)) + (y > fy - 6 ? (fy - y < 3 ? 2 : 1) : 0); // flares into roots
-        for (int dx = -hw; dx <= hw; dx++)
+    static const int LIVING[] = {0, 0, 0, 1, 1, 2, 3, 3, 4, 4}, DEAD[] = {5, 6, 7, 8, 9, 10};
+    const TreeSprite& s = TREE_SPR[irand(100) < deadPct ? DEAD[irand(6)] : LIVING[irand(10)]];
+    bool flip = chance(2);
+    for (int j = 0; j < s.h; j++)
+        for (int i = 0; i < s.w; i++)
         {
-            float k = 0.78f + 0.2f * hash2(cx + dx, y / 4, seed + 77);
-            k += 0.2f - 0.55f * (float)(dx + hw) / std::max(1, 2 * hw); // a rounded trunk: lit on the left, turning to shade on the right
-            if (dx == -hw) k += 0.08f; else if (dx == hw) k -= 0.12f;
-            if (!birch && hash2(cx + dx, y / 6, seed + 78) < 0.2f) k -= 0.16f; // grooves in the bark
-            Color c = shadeC(bark, clampf(k, 0.35f, 1.25f));
-            if (birch && hash2(cx + dx, y, seed + 79) > 0.93f && dx > -hw) c = {46, 42, 40, 255}; // the dark chevrons
-            else if (!birch && dx < 0 && y > fy - 22 && hash2(cx + dx, y / 3, seed + 80) > 0.8f) c = shadeC({78, 110, 52, 255}, 0.7f + 0.3f * hash2(cx, y, seed)); // moss on the weather side
-            treePx(cx + dx, y, c);
+            char ch = s.px[j * s.w + i];
+            if (ch == '.') continue;
+            const unsigned char* c = TREE_PAL[std::strchr(TREE_ALPHABET, ch) - TREE_ALPHABET];
+            treePx(x + (flip ? s.w - 1 - i : i) - s.w / 2, fy + 1 - s.h + j, {c[0], c[1], c[2], 255});
         }
-    }
-}
-
-// A bough from (x, y) going out and up to length `len`, thinning; returns where it ends.
-static std::pair<int, int> bough(int x, int y, int dir, int len, Color bark, int thick)
-{
-    int ex = x, ey = y;
-    for (int k = 0; k < len; k++)
-    {
-        ex = x + dir * k;
-        ey = y - (int)(k * 0.45f) + (int)(std::sin(k * 0.5f + x) * 0.7f);
-        int th = std::max(1, thick - k * thick / std::max(1, len));
-        for (int t = 0; t < th; t++) treePx(ex, ey + t, shadeC(bark, t == 0 ? 1.0f : 0.72f));
-    }
-    return {ex, ey};
-}
-
-// The last pass over a tree: rim light on the top and left edges of every leaf mass, a dark underside, and the canopy's shadow
-// falling down the trunk and boughs beneath it. Works from the mask `treePx` kept.
-static void shadeTree()
-{
-    auto at = [&](int lx, int ly) -> uint8_t { return lx < 0 || ly < 0 || lx >= g_tw || ly >= g_th ? 0 : g_tm[(size_t)ly * g_tw + lx]; };
-    for (int ly = 0; ly < g_th; ly++)
-        for (int lx = 0; lx < g_tw; lx++)
-        {
-            uint8_t m = at(lx, ly);
-            if (!m) continue;
-            int x = g_tx0 + lx, y = g_ty0 + ly;
-            if (!world.in(x, y)) continue;
-            Color& c = world.bgAt(x, y);
-            float k = 1;
-            if (m == 1)
-            {
-                if (!at(lx, ly - 1)) k *= 1.2f;                       // the lit crown of each mass
-                else if (!at(lx - 1, ly) || !at(lx - 1, ly - 1)) k *= 1.1f;
-                if (!at(lx, ly + 1)) k *= 0.7f;                       // its underside
-                else if (!at(lx + 1, ly)) k *= 0.86f;
-                int deep = 0; for (int d = 1; d <= 3; d++) deep += at(lx - d, ly - d) == 1 && at(lx + d, ly + d) == 1; // buried in the mass: dim
-                k *= 1.0f - 0.07f * deep;
-            }
-            else
-            {
-                int up = 0; for (int d = 1; d <= 10; d++) if (at(lx, ly - d) == 1 || at(lx - 1, ly - d) == 1) { up = d; break; }
-                if (up) k *= 0.5f + 0.045f * up; // in the canopy's shadow
-            }
-            c = Color{(unsigned char)clampf(c.r * k, 0, 255), (unsigned char)clampf(c.g * k, 0, 255), (unsigned char)clampf(c.b * k, 0, 255), 255};
-        }
-}
-
-static void placeTree(int x, int fy)
-{
-    g_tx0 = x - 40; g_ty0 = fy - 96; g_tw = 80; g_th = 102; g_tm.assign((size_t)g_tw * g_th, 0);
-    int kind = irand(10) < 4 ? 0 : (irand(10) < 6 ? 1 : 2); // oak, spruce, birch
-    if (kind == 1) // spruce: a straight trunk hung with drooping tiers, narrowing to a spike
-    {
-        int h = irange(46, 74), tiers = h / 6;
-        Color bark = {70, 48, 32, 255};
-        const Color ramp[4] = {{22, 54, 40, 255}, {32, 76, 52, 255}, {48, 102, 62, 255}, {76, 134, 80, 255}};
-        trunk(x, fy, fy - h, 4, 0.4f, bark, false);
-        for (int t = 0; t < tiers; t++)
-        {
-            int y0 = fy - h + t * (h - 8) / tiers, hw = 3 + t * (h / 9 + 1) / std::max(1, tiers) * 2 + t, drop = 7 + t / 2;
-            for (int row = 0; row < drop + 3; row++)
-            {
-                float f = (row + 1.0f) / (drop + 3);
-                int w = (int)(hw * std::min(1.0f, f * 1.15f));
-                for (int dx = -w; dx <= w; dx++)
-                {
-                    float edge = std::abs((float)dx) / std::max(1, w); // ragged, drooping toward the tip of each bough
-                    if (edge > 0.85f && hash2(x + dx, y0 + row, seed + 14) < 0.45f) continue;
-                    int yy = y0 + row + (int)(edge * edge * 3);
-                    float lit = 0.62f - edge * 0.12f + (dx < 0 ? 0.2f : -0.1f) - f * 0.28f + 0.25f * (hash2(x + dx, yy, seed + 15) - 0.5f);
-                    if (row >= drop) lit -= 0.4f; // the shadowed underside
-                    treeLeaf(x + dx, yy, leafTone(ramp, lit));
-                }
-            }
-        }
-        for (int dy = 0; dy < 4; dy++) treeLeaf(x, fy - h - dy, leafTone(ramp, 0.5f)); // the leader
-        shadeTree();
-        return;
-    }
-    bool birch = kind == 2;
-    int h = birch ? irange(30, 46) : irange(34, 54), tw = birch ? irange(3, 4) : irange(5, 7);
-    Color bark = birch ? Color{212, 206, 192, 255} : Color{88, 62, 40, 255};
-    const Color oak[4] = {{30, 70, 36, 255}, {46, 98, 42, 255}, {70, 128, 50, 255}, {108, 160, 66, 255}};
-    const Color bir[4] = {{58, 96, 40, 255}, {88, 130, 50, 255}, {128, 164, 62, 255}, {176, 190, 84, 255}};
-    const Color* ramp = birch ? bir : oak;
-    float holes = birch ? 0.16f : 0.05f;
-    int crown = fy - h; // the foot of the crown
-    trunk(x, fy, crown + 2, tw, birch ? 1.6f : 1.0f, bark, birch);
-    std::vector<std::pair<int, int>> tips;
-    int boughs = birch ? 3 : 4;
-    for (int b = 0; b < boughs; b++)
-    {
-        int by = fy - h / 2 - b * h / (boughs * 2) + irange(-2, 2), dir = (b % 2) ? 1 : -1;
-        tips.push_back(bough(x, by, dir, irange(birch ? 6 : 9, birch ? 11 : 17), bark, birch ? 2 : 3));
-    }
-    tips.push_back({x + irange(-2, 2), crown - 2});
-    for (int pass = 0; pass < 2; pass++) // far masses behind, near ones in front
-        for (size_t i = 0; i < tips.size(); i++)
-        {
-            if ((i % 2 == 0) != (pass == 0)) continue;
-            int rx = birch ? irange(6, 9) : irange(9, 14), ry = birch ? irange(5, 8) : irange(7, 11);
-            leafMass(tips[i].first, tips[i].second - ry / 3, rx, ry, ramp, holes);
-        }
-    if (!birch) leafMass(x + irange(-3, 3), crown - 6, irange(12, 15), irange(9, 12), ramp, holes); // the crown over all
-    shadeTree();
 }
 
 static const Color LAMP_WARM = {255, 168, 84, 255};
@@ -1522,7 +1379,7 @@ static LevelEnds castleLayout(const StageDef& d, int g)
     rooms.push_back(lobby);
     G.inter.push_back({IT_TORCH, (float)keepX0 - 10, (float)g});
     G.inter.push_back({IT_TORCH, (float)lobby.x0 + 8, (float)g});
-    for (int x = 70; x < keepX0 - 40; x += irange(70, 110)) placeTree(x, g);
+    for (int x = 70; x < keepX0 - 40; x += irange(70, 110)) placeTree(x, g, 60);
     { // a well in the courtyard
         int wx = irange(150, 260);
         for (int y = g - 8; y < g; y++)
@@ -3164,7 +3021,7 @@ static void buildStage(int s, int entryFloor)
         }
     dressCaves(d);
     if (d.kind == SK_CRYPT) for (int i = 0; i < 12 && next(sp); i++) paintCircle(sp.x, sp.y - 2, 3, M::Bone, true);
-    if (d.surface) for (int x = D + 30; x < W - 340; x += irange(24, 70)) { int fy; if (std::abs(x - mineX) > 34 && findFloor(x, 4, fy) && std::abs(fy - surf[x]) < 4 && std::none_of(doorYards.begin(), doorYards.end(), [&](const std::pair<int, int>& r) { return x >= r.first - 8 && x <= r.second + 8; })) placeTree(x, fy); }
+    if (d.surface) for (int x = D + 30; x < W - 340; x += irange(24, 70)) { int fy; if (std::abs(x - mineX) > 34 && findFloor(x, 4, fy) && std::abs(fy - surf[x]) < 4 && std::none_of(doorYards.begin(), doorYards.end(), [&](const std::pair<int, int>& r) { return x >= r.first - 8 && x <= r.second + 8; })) placeTree(x, fy, 15); }
 
     // liquids pool on floors, gas pockets float anywhere
     for (auto& l : findSpots(d.liquidCount * 3 / 2, D + 60, W - 260, 6, 10))
