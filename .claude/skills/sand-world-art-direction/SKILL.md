@@ -5,7 +5,7 @@ description: Art-direction rules for mixing 3D-rendered pixel-art characters (De
 
 # Sand-World Art Direction
 
-Combining 3D-rendered pixel art with a falling-sand world is a valid choice, not a weird one. Noita already pairs pixel characters with a physics-heavy sand world. Dead Cells shows 3D-to-pixel rendering reads as genuine pixel art when it's done cleanly.
+Combining 3D-rendered pixel art with a falling-sand world is a valid choice, not a weird one. Noita already pairs pixel characters with a physics-heavy sand world. Dead Cells shows 3D-to-pixel rendering reads as genuine pixel art when it's done cleanly. Here, characters are Blender models rendered to a no-AA G-buffer and palette-shaded in Python (`dead-cells-rig`); Blender never decides a colour, so characters and terrain share one palette.
 
 The risk is never the concept; it is **inconsistency**. When the hybrid fails, it fails in one of four places, and they are almost always the first two. Check them in this order.
 
@@ -40,11 +40,11 @@ Implementation requirements:
 
 **Rule:** if a renderer produces the sprite, it also produces a **normal map** for every frame, and the game lights characters with those normals.
 
-- The 2.5D primitive renderer already computes a per-pixel normal. Write it out alongside the colour frame, encoded as RGB = (n·0.5 + 0.5) and in the same atlas layout, so frame N's normals sit at the same coordinates as frame N's colours.
+- The Blender renders already produce a per-pixel normal pass (see `dead-cells-rig`). Write it out alongside the colour frame, encoded as RGB = (n·0.5 + 0.5) and in the same atlas layout, so frame N's normals sit at the same coordinates as frame N's colours.
 - Bake the colour frames with **soft, neutral** lighting (ramp shading, outlines, a small ambient term). Leave strong directional light to the runtime shader. Otherwise the baked key light and the dynamic lights fight each other.
 - In-game, a simple shader: base colour × (ambient + Σ lights · max(0, n·L)). Then quantise the result back onto the material's 5-step ramp so the output stays pixel-art banded, not smooth.
 - Keep the rim light baked; it is what separates characters from busy terrain.
-- Ragdoll limb atlases (pre-rotated at 32 angles) need normal maps too, rotated with the geometry. This is easy when the renderer rotates the geometry before shading, and impossible with hand-drawn sprites. It is a core advantage of this pipeline; don't throw it away.
+- Ragdoll limb atlases (pre-rotated at 32 angles) need normal maps too, rotated with the geometry. This is easy when Blender renders each rotated limb, and impossible with hand-drawn sprites. It is a core advantage of this pipeline; don't throw it away.
 
 ## 3. Palette harmony: same sun for world and characters
 

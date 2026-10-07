@@ -1,4 +1,5 @@
-# The Viking axeman, Dead Cells style (brief: .claude/skills/dead-cells-rig/SKILL.md).
+# The Viking axeman, Dead Cells style (.claude/skills/dead-cells-rig/SKILL.md). The body now comes from Blender (viking3d.py);
+# the capsule build below is the fallback when Blender is missing. Canvas.render is still the shader for both.
 # Lit 3D-ish primitives (tapered capsules, flat polygons) on a skeleton are rasterised with a z-buffer, then shaded from
 # a 5-step ramp per material: banded light from the upper left, a cool rim on the back edge, a dark outline, dark lines
 # where a nearer part crosses a farther one. No anti-aliasing: every pixel is a ramp colour. Everything character-specific
@@ -15,19 +16,24 @@ RAMPS = {
     'tunic':      [C(46, 24, 56), C(128, 66, 36), C(206, 132, 38), C(246, 190, 70), C(255, 236, 160)],
     'tunic_trim': [C(30, 16, 40), C(84, 40, 36), C(140, 74, 34), C(180, 104, 40), C(214, 140, 60)],
     'steel':      [C(22, 22, 40), C(56, 60, 84), C(102, 108, 132), C(152, 160, 180), C(210, 218, 232)],
-    'helm':       [C(24, 22, 30), C(62, 60, 70), C(108, 106, 116), C(158, 156, 166), C(214, 212, 222)],   # his own steel: fixed colours
+    'helm':       [C(50, 50, 58), C(76, 76, 86), C(108, 108, 118), C(152, 152, 162), C(206, 206, 216)],   # his own steel: fixed colours
     'tunic_w':    [C(44, 28, 50), C(104, 68, 40), C(168, 124, 52), C(208, 168, 92), C(236, 212, 150)],       # the tunic, faded by weather
     'dirt':       [C(24, 18, 22), C(56, 42, 38), C(86, 66, 52), C(114, 90, 68), C(142, 116, 88)],             # mud and soot worked into cloth and leather
     'armour':     [C(24, 24, 30), C(66, 66, 76), C(112, 112, 124), C(160, 160, 172), C(214, 214, 226)],       # worn armour: takes the armour metal's colour in game (tag 3)
-    'belt':       [C(26, 14, 24), C(66, 34, 30), C(108, 58, 38), C(148, 88, 54), C(188, 128, 78)],
+    'belt':       [C(28, 14, 16), C(60, 32, 26), C(92, 52, 36), C(122, 76, 50), C(152, 102, 66)],
     'pants':      [C(12, 8, 22), C(30, 22, 46), C(50, 38, 70), C(74, 58, 94), C(104, 88, 122)],
     'wrap':       [C(34, 24, 36), C(86, 70, 70), C(140, 122, 108), C(186, 170, 148), C(222, 210, 186)],
     'boot':       [C(10, 6, 14), C(28, 18, 24), C(50, 32, 32), C(76, 50, 44), C(108, 76, 60)],
-    'skin':       [C(60, 28, 40), C(142, 78, 62), C(212, 140, 106), C(240, 180, 140), C(255, 222, 190)],
+    'skin':       [C(70, 36, 36), C(130, 80, 60), C(184, 124, 90), C(214, 156, 116), C(232, 184, 140)],
     'beard':      [C(44, 20, 22), C(120, 54, 24), C(186, 98, 36), C(226, 148, 60), C(252, 200, 110)],
     'fur':        [C(18, 12, 18), C(44, 30, 30), C(80, 56, 46), C(118, 88, 68), C(158, 126, 98)],
     'wood':       [C(28, 14, 16), C(70, 36, 28), C(112, 62, 40), C(150, 92, 56), C(186, 126, 78)],
     'glove':      [C(14, 8, 20), C(38, 24, 46), C(62, 42, 72), C(92, 66, 102), C(124, 96, 132)],
+    'mustard':    [C(70, 38, 28), C(134, 82, 26), C(192, 132, 30), C(222, 168, 52), C(240, 202, 106)],   # the hero's tunic (user's reference art)
+    'trim':       [C(38, 36, 30), C(78, 72, 52), C(120, 108, 76), C(150, 138, 102), C(178, 166, 130)],         # grey-green collar and cuffs
+    'hair':       [C(28, 14, 14), C(66, 36, 24), C(104, 62, 36), C(142, 94, 56), C(178, 130, 84)],
+    'trews':      [C(28, 28, 30), C(54, 54, 48), C(86, 84, 68), C(110, 106, 84), C(134, 128, 102)],           # grey-olive wool
+    'leather':    [C(24, 14, 16), C(52, 30, 28), C(82, 50, 38), C(110, 72, 50), C(138, 96, 66)],            # tall riding boots, bracers
     'gem':        [C(36, 36, 48), C(104, 104, 120), C(168, 168, 184), C(222, 222, 236), C(255, 255, 255)],
 }
 MATS = list(RAMPS)
@@ -64,8 +70,10 @@ class Canvas:
         s.nobj = 0
         s.X, s.Y = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
 
-    def capsule(s, A, B, rA, rB, zA, zB, mat, tex=None, caps=True, clip=None, dark=0, obj=None):
-        """A tapered capsule. Spheres are capsules with A = B. tex(t, nrm, px, py) -> (aux offset, material override or None)."""
+    def capsule(s, A, B, rA, rB, zA, zB, mat, tex=None, caps=True, clip=None, dark=0, obj=None, local=False):
+        """A tapered capsule. Spheres are capsules with A = B. tex(t, nrm, px, py) -> (aux offset, material override or None).
+        local=True hands tex and clip the part's own coordinates (u along the bone from A, v across it, in reference units)
+        instead of canvas pixels, so their noise and cuts ride on the limb rather than crawling over it as it moves."""
         if obj is None: s.nobj += 1; obj = s.nobj
         A, B = V(*A), V(*B)
         ab = B - A
@@ -84,7 +92,14 @@ class Canvas:
         d = np.hypot(dx, dy)
         inside = d <= r
         if not caps: inside &= (traw >= 0) & (traw <= 1)
-        if clip is not None: inside &= clip(X, Y)
+        TX, TY = X, Y
+        if local:
+            px_, py_ = X - A[0], Y - A[1]
+            if L2 < 1e-9: TX, TY = px_ / s.S, py_ / s.S
+            else:
+                ax, ay = ab / math.sqrt(L2)
+                TX, TY = (px_ * ax + py_ * ay) / s.S, (py_ * ax - px_ * ay) / s.S
+        if clip is not None: inside &= clip(TX, TY)
         if not inside.any(): return
         rr = np.maximum(r, 1e-6)
         nx, ny = dx / rr, dy / rr
@@ -92,7 +107,7 @@ class Canvas:
         depth = zA + (zB - zA) * t + nz * r
         aux = np.zeros(X.shape, int); mo = None
         if tex:
-            aux, mo = tex(t, (nx, ny, nz), X, Y)
+            aux, mo = tex(t, (nx, ny, nz), TX, TY)
             aux = np.broadcast_to(aux, X.shape).astype(int)
         mat_ = MI[mat] if mo is None else np.where(mo >= 0, mo, MI[mat])
         sl = (slice(y0, y1), slice(x0, x1))

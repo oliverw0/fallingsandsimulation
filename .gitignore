@@ -50,3 +50,6 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Blender G-buffer frames for the Viking (tools/viking3d.py)
+.cache/

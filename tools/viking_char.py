@@ -219,126 +219,117 @@ def armour_tex(look):
     return tex
 
 
-def build(d, P):
-    """Draw the Viking for pose P into Draw d (the z-buffer sorts it). He is weathered: faded, mud-stained, patched, scarred."""
-    look = P.get('look', 0)
+def joints(P):
+    """The skeleton for pose P in local space (before the figure's `rot`): hip, lean, chest, neck, head centre, shoulders
+    {'n','f'}, legs {s: (hip, knee, ankle)}, arms {s: (shoulder, elbow, wrist)}. Shared by build() and the 3D body (viking3d.py)."""
     hip = V(*P['hip'])
     lean = P['lean']
     C_ = hip + 23 * dirv(lean)
     N = C_ + 3 * dirv(lean)
-    hd = N + 10.2 * dirv(P['head']) + V(1.2, 0)
+    hd = N + 11.0 * dirv(P['head']) + V(1.2, 0)
     sh = {'n': C_ + V(0.5, 2.5), 'f': C_ + V(-2.5, 2.5)}
     hips = {'n': hip + V(1.0, 0), 'f': hip + V(-1.0, 0)}
     legs = {s: (hips[s], two_bone(hips[s], P['f' + s], BONE['thigh'], BONE['shin'], P['kn']), V(*P['f' + s])) for s in 'nf'}
     arms = {s: (sh[s], two_bone(sh[s], P['h' + s], BONE['uarm'], BONE['farm'], P['ke']), V(*P['h' + s])) for s in 'nf'}
+    return hip, lean, C_, N, hd, sh, legs, arms
+
+
+def build(d, P):
+    """Draw the Viking for pose P into Draw d (the z-buffer sorts it). The look follows the user's reference art: a mustard tunic
+    torn ragged at the knee, full sleeves, leather belt, baldric and pouch, a round spectacle helm over long brown hair and beard,
+    grey-olive trousers in tall brown boots. Every texture is pinned to its part (local=True) so nothing crawls between frames,
+    and the shading stays in big clean bands (no screen-space grime)."""
+    look = P.get('look', 0)
+    hip, lean, C_, N, hd, sh, legs, arms = joints(P)
     arm_tex = armour_tex(look)
+    cloth = 'armour' if look else 'mustard'
+    Z = lambda X: np.zeros_like(X, int)
 
-    def dirt(X, Y, seed, thresh, mo=None):
-        """Mud and soot: clumps where the noise beats `thresh` (an array or a number)."""
-        m = blobs(X, Y, seed, 2) > thresh
-        return np.where(m, MI['dirt'], -1 if mo is None else mo)
-
-    # ---- the cloth: faded, with grime thickest toward the hem, quilting worn pale, a mended patch on the flank
-    def tex_torso(t, n, X, Y):
-        aux, mo = tex_belt_band(t, n, X, Y)
-        if look:
-            a2, _ = arm_tex(t, n, X, Y)
-            return a2, mo
-        xi, yi = np.floor(X), np.floor(Y)
-        aux = aux + np.where(((xi + yi) % 5) == 0, -1, 0)
-        mo = np.where(mo >= 0, mo, dirt(X, Y, 11, 0.8 + 0.6 * t))
-        lx, ly = d.inv(X, Y)
-        patch = (lx > -3.2) & (lx < 3.0) & (ly > hip[1] - 17) & (ly < hip[1] - 10.5)
-        edge = patch & ((lx < -2.4) | (lx > 2.2) | (ly < hip[1] - 16.2) | (ly > hip[1] - 11.3))
-        mo = np.where(patch, MI['wrap'], mo)
-        aux = aux + np.where(patch & ~edge, -1, 0) + np.where(edge, -2, 0) + np.where(patch & ((xi + yi) % 3 == 0), -1, 0)   # a stitched patch
+    # ---- torso (u: hip -> chest, v: + forward): belt, buckle strap, a baldric from the back shoulder down to the front hip
+    def tex_torso(t, n, U, Vv):
+        aux, mo = (arm_tex(t, n, U, Vv)[0] if look else Z(U)), np.full(U.shape, -1)
+        belt = (U > 1.6) & (U < 5.0)
+        strap = np.abs(U - (12.0 - 0.75 * Vv)) < 1.4
+        mo = np.where(belt | strap, MI['belt'], mo)
+        aux = aux + np.where(belt & ((U < 2.2) | (U > 4.4)), -1, 0) + np.where(strap & (np.abs(U - (12.0 - 0.75 * Vv)) > 0.8), -1, 0)
         return aux, mo
 
-    def tex_skirt(t, n, X, Y):
-        if look:
-            a2, mo = arm_tex(t, n, X, Y)
-            return a2, np.where(t > 0.9, MI['tunic_trim'], -1)
-        aux, mo = tex_hem(t, n, X, Y)
-        return aux, np.where(mo >= 0, mo, dirt(X, Y, 12, 0.92 - 0.34 * t))
+    # ---- skirt (u down from the belt, v + backward): deep torn tatters, a shadowed band above the hem
+    L_SK = 16.5
+    def hem(U, Vv):
+        col = np.floor(Vv / 1.7)
+        tooth = hnoise(col, 3.0, 5)                         # each tatter its own length...
+        frac = Vv / 1.7 - col
+        tri = 1 - np.abs(frac - 0.5) * 2                    # ...cut to a point
+        return U <= L_SK - 5.5 * tooth * (1 - tri) - 1.2 * (1 - tri)
+    def tex_skirt(t, n, U, Vv):
+        if look: return arm_tex(t, n, U, Vv)[0], np.where(U > L_SK - 3, MI['tunic_trim'], -1)
+        return np.where(U > L_SK - 7.5, -1, 0) + np.where(np.abs(Vv - 2.0) < 0.5, -1, 0), None   # a fold down the back
 
-    def tex_sleeve(t, n, X, Y):
-        if look: return arm_tex(t, n, X, Y)
-        return np.where(hnoise(np.floor(X), np.floor(Y), 13) > 0.94, -1, 0), dirt(X, Y, 14, 0.9)
+    def tex_sleeve(t, n, U, Vv):
+        return (arm_tex(t, n, U, Vv)[0] if look else Z(U)), None
 
-    def tex_shin(t, n, X, Y):
-        aux, mo = tex_wraps(t, n, X, Y)
-        return aux, np.where(blobs(X, Y, 21, 2) > 0.7 + 0.5 * (1 - t), MI['dirt'], mo)   # the wraps muddied toward the boot
+    def tex_forearm(t, n, U, Vv):     # sleeve to the bracer, the bracer laced
+        br = t > 0.5
+        aux = np.where(br & (np.floor(U * 1.2) % 2 == 0), 1, 0) + np.where(br & (t < 0.58), -1, 0)
+        return aux, np.where(br, MI['leather'], MI[cloth])
 
-    def tex_boot(t, n, X, Y):
-        return np.zeros_like(X, int), dirt(X, Y, 22, 0.76)
-
-    def tex_mantle(t, n, X, Y):
-        a2, mo = tex_fur(t, n, X, Y)
-        return a2 - np.where(blobs(X, Y, 23, 3) > 0.78, 1, 0), mo
+    def tex_shin(t, n, U, Vv):        # trouser, then the tall boot with a turned-down top
+        boot = t > 0.32
+        return np.where((t > 0.32) & (t < 0.44), 1, 0) - np.where((t > 0.44) & (t < 0.5), 1, 0), np.where(boot, MI['leather'], -1)
 
     def leg(s, z, dark):
         h_, k, a = legs[s]
-        d.cap(h_, k, 5.2, 4.2, z, z, 'pants', dark=dark)
-        d.cap(k, a, 4.2, 3.4, z, z, 'pants', dark=dark, tex=tex_shin)
-        if look:   # armour over the thigh (chausses / cuisses), so the leg is covered by it, not stuck on top of it
-            d.cap(h_, h_ + (k - h_) * 0.66, 5.9, 5.3, z + 1.0, z + 1.0, 'armour', dark=dark, tex=arm_tex)
+        d.cap(h_, k, 5.4, 4.3, z, z, 'trews', dark=dark)
+        d.cap(k, a, 4.6, 3.6, z, z, 'trews', dark=dark, tex=tex_shin, local=True)
+        if look:
+            d.cap(h_, h_ + (k - h_) * 0.66, 5.9, 5.3, z + 1.0, z + 1.0, 'armour', dark=dark, tex=arm_tex, local=True)
         td = V(*P['toe']) if P['toe'] != (0.0, 0.0) else V(6.5, 1.0)
-        d.cap(a + V(-1, -1), a + V(0, 1.0), 3.8, 3.4, z, z, 'boot', dark=dark, tex=tex_boot)
-        d.cap(a + V(0, 1.0), a + td, 3.6, 2.6, z, z, 'boot', dark=dark, tex=tex_boot)
-        d.cap(a + V(-1, -4), a + V(0, -1), 4.0, 3.8, z, z, 'boot', dark=dark, tex=tex_boot)
+        d.cap(a + V(-1, -1), a + V(0, 1.0), 3.9, 3.4, z, z, 'leather', dark=dark)
+        d.cap(a + V(0, 1.0), a + td, 3.6, 2.5, z, z, 'leather', dark=dark)
+        d.cap(a + V(-1.4, 2.6), a + V(td[0] - 0.5, 2.6), 0.9, 0.9, z + 0.5, z + 0.5, 'boot', dark=dark)   # the sole
 
     def arm(s, z, dark):
         a, e, w = arms[s]
-        d.cap(a, e, 4.6, 3.8, z, z, 'armour' if look else 'tunic_w', dark=dark, tex=tex_sleeve)
-        d.cap(e, w, 3.8, 3.2, z, z, 'glove', dark=dark, tex=cuff(0.55, 0.85, 'belt'))
+        d.cap(a, e, 4.8, 4.0, z, z, cloth, dark=dark, tex=tex_sleeve, local=True)
+        d.cap(e, w, 4.0, 3.4, z, z, cloth, dark=dark, tex=tex_forearm, local=True)
         fw = (w - e) / (np.hypot(*(w - e)) + 1e-9)
-        d.ball(w + fw * 1.0, 3.7, z, 'glove', dark=dark)
-        if look >= 2:   # a pauldron over the shoulder
-            d.ball(a + V(0.4, -0.6), 5.4 if look == 3 else 4.8, z + 2.5, 'armour', dark=dark, tex=arm_tex)
+        d.ball(w + fw * 1.0, 3.4, z, 'skin', dark=dark)
+        if look >= 2:
+            d.ball(a + V(0.4, -0.6), 5.4 if look == 3 else 4.8, z + 2.5, 'armour', dark=dark, tex=arm_tex, local=True)
 
     leg('f', -6, 1)
     arm('f', P['far_arm_z'], 1)
     if P['held']: draw_held(d, P['held'])
-    s0 = hip + V(0, 2)
-    s1 = s0 + 15.5 * dirv(90 + P['skirt'])
-    ragged = (lambda X, Y: d.inv(X, Y)[1] <= s1[1] - 2.8 * hnoise(np.floor(d.inv(X, Y)[0] * 0.8), 7, 1)) if not look else None   # a torn, uneven hem
-    d.cap(s0, s1, 9, 12, -4, -4, 'armour' if look else 'tunic_w', caps=False, tex=tex_skirt, clip=ragged)
-    d.cap(hip, C_, 8.4, 10.2, 0, 0, 'armour' if look else 'tunic_w', tex=tex_torso)
-    d.ball(hip + 0.1 * (C_ - hip) + V(4.0, 0.8), 1.5, 9, 'helm')
-    d.ball(C_ + V(-4.2, 3.0), 7.8, 2.5, 'fur', tex=tex_mantle)
+    s0 = hip + V(0, 1)
+    s1 = s0 + L_SK * dirv(90 + P['skirt'])
+    d.cap(s0, s1, 9, 12.5, -4, -4, cloth, caps=False, tex=tex_skirt, clip=None if look else hem, local=True)
+    d.cap(hip, hip + 19.5 * dirv(lean), 8.6, 10.0, 0, 0, cloth, tex=tex_torso, local=True)   # (stops short of the chest: the shoulders sit below the jaw)
+    d.ball(hip + V(9.4, 3.4), 1.5, 12, 'helm')                                    # the belt buckle
+    d.cap(hip + V(8.6, 4.6), hip + V(9.4, 11.0), 1.0, 0.8, 11, 11, 'belt')        # the belt's tail, hanging
+    d.cap(hip + V(-8.0, 3.0), hip + V(-8.6, 7.0), 2.8, 3.2, 6, 6, 'belt')          # a pouch on the back hip
+    # ---- head: long hair falling from under the helm, the face, a full beard
+    d.cap(hd + V(-5.0, 0.0), hd + V(-7.4, 11.0), 4.6, 3.0, 1, 1, 'hair', tex=lambda t, n, U, Vv: (np.where(np.floor(Vv * 0.9) % 2 == 0, -1, 0), None), local=True)
     d.cap(N + V(0.2, 2.0), hd + V(0.4, 2.0), 3.3, 3.0, 3, 3, 'skin')
-    if look >= 2: d.cap(N + V(0.4, 1.4), N + V(0.4, 4.4), 4.6, 5.0, 5, 5, 'armour', tex=arm_tex)   # a gorget
     d.ball(hd + V(2.5, 2.5), 6.4, 4, 'skin')
-    bs, bw = hd + V(3.5, 4.5), P['beard']
-    def tex_beard(t, n, X, Y):
-        a2, _ = tex_fur(t, n, X, Y)
-        return a2, np.where(blobs(X, Y, 41, 1) > 0.84, MI['wrap'], -1)   # grey coming through the red
-    d.cap(bs, bs + V(0.8 + bw, 8.0), 5.6, 2.2, 6, 6, 'beard', tex=tex_beard)
-    d.cap(hd + V(4.0, 4.4), hd + V(8.4, 4.2), 1.9, 1.4, 8, 8, 'beard')
-    d.cap(bs + V(0.5, 4.5), bs + V(1.4 + bw, 13.0), 1.4, 1.1, 8, 8, 'beard', tex=tex_braid)
-    hy = hd[1] + 3.0
-    peak = hd + V(0.9, -9.0)
-    mid = hd + V(0.4, -4.6)
-    def tex_helm(t, n, X, Y):
-        xi, yi = np.floor(X), np.floor(Y)
-        ly = d.inv(X, Y)[1]
-        aux = np.where(ly > hd[1] + 0.2, -2, 0)
-        aux = aux - np.where(blobs(X, Y, 31, 3) > 0.88, 1, 0) - np.where(hnoise(xi, yi, 32) > 0.97, 1, 0) + np.where(hnoise(xi, yi, 33) > 0.985, 2, 0)   # dents, scratches, a bright scuff
-        return aux, np.where(blobs(X, Y, 34, 1) > 0.95, MI['belt'], -1)    # a few rust flecks
-    d.cap(hd + V(0, -0.6), mid, 8.8, 7.0, 7, 7, 'helm', clip=lambda X, Y: d.inv(X, Y)[1] <= hy, tex=tex_helm)     # a rounded ogive dome...
-    d.cap(mid, peak, 7.0, 2.4, 7, 7, 'helm', tex=tex_helm)                                                        # ...rising to a point
-    for xo in (-6.2, -0.4, 5.6):         # the iron-and-bronze bands, brim to peak (thin, so the steel shows between them)
-        d.cap(hd + V(xo, -0.2), peak + V(xo * 0.1, 0.9), 0.6, 0.45, 20, 20, 'belt')
-    d.cap(hd + V(-8.6, 0.3), hd + V(8.6, 0.3), 1.1, 1.1, 20, 20, 'belt')                                            # the brim band
-    d.ball(peak + V(0, 0.2), 1.1, 21, 'helm')                                                                        # the peak rivet
-    d.cap(hd + V(8.6, -0.6), hd + V(9.4, 6.2), 1.2, 0.9, 14, 14, 'helm')                                            # the nasal guard, down over the nose
-    d.cap(hd + V(1.4, 1.2), hd + V(3.2, 6.6), 2.7, 1.8, 13, 13, 'helm', tex=lambda t, n, X, Y: (np.where(hnoise(np.floor(X), np.floor(Y), 36) > 0.95, -1, 0), None))   # a cheek-plate
-    ex, ey = d.P(hd + V(6.2, 2.2))
-    d.cv.eye[(int(ex), int(ey))] = EYE_CORE
-    d.cv.eye[(int(ex) - 1, int(ey))] = EYE
-    for q in range(4):   # an old scar down the cheek
-        sx, sy = d.P(hd + V(1.4 + q * 0.8, 1.2 + q * 1.3))
-        d.cv.eye[(int(sx), int(sy))] = (176, 98, 92)
+    bs, bw = hd + V(3.6, 4.2), P['beard']
+    tex_beard = lambda t, n, U, Vv: (np.where(np.floor(Vv * 1.1) % 2 == 0, -1, 0), None)   # strands down the beard
+    d.cap(hd + V(1.6, 6.4), bs + V(1.2 + bw, 6.4), 3.6, 2.4, 9, 9, 'hair', tex=tex_beard, local=True)     # jaw to chin
+    d.cap(hd + V(-1.4, 3.0), hd + V(0.6, 7.0), 2.0, 2.6, 7, 7, 'hair')                                   # sideburn
+    d.cap(hd + V(5.6, 4.6), hd + V(9.0, 5.0), 1.6, 1.3, 8, 8, 'hair')              # the moustache
+    # ---- the helm: a round steel cap with a brim band and a spectacle guard (round eye-ring + nasal)
+    hy = hd[1] + 0.4
+    def tex_helm(t, n, U, Vv):
+        return np.where((Vv > 0.2) & (Vv < 1.2), -1, 0), None                    # the riveted band across the crown
+    d.ball(hd + V(0.2, -1.6), 8.8, 7, 'helm', clip=lambda U, Vv: Vv <= hy - (hd[1] - 1.6), tex=tex_helm, local=True)
+    d.cap(hd + V(-8.6, hy - hd[1] - 0.6), hd + V(8.8, hy - hd[1] - 0.6), 1.2, 1.2, 18, 18, 'helm')   # the brim
+    ec = hd + V(6.4, 2.3)                                                             # the eye-ring
+    d.ball(ec, 2.8, 15, 'helm', tex=lambda t, n, U, Vv: (np.where(U * U + Vv * Vv < 2.0, -4, 0), np.where(U * U + Vv * Vv < 2.0, MI['boot'], -1)), local=True)
+    d.cap(hd + V(9.0, hy - hd[1]), hd + V(9.6, 5.6), 1.2, 0.9, 16, 16, 'helm')       # the nasal
+    if P['eye']:   # the peak hold: a glint in the dark of the eye-ring
+        ex, ey = d.P(ec)
+        d.cv.eye[(int(ex), int(ey))] = EYE_CORE
+        d.cv.eye[(int(ex) - 1, int(ey))] = EYE
     leg('n', 6, 0)
     arm('n', 10, 0)
 

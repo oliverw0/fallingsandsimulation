@@ -68,7 +68,7 @@ def run(w, n=8):
         sn, cs = math.sin(ph), math.cos(ph)
         hip = (1.8 * math.sin(ph + 1.2), -HIP_REST + 3.0 * abs(math.sin(ph)) + 2.0)    # the hips shift with each stride
         lean = -70.0 + 3.6 * math.sin(ph + 0.6) + 1.2 * math.sin(2 * ph)                   # and the torso rocks over the legs
-        fx = lambda s, c: (22.0 * s, -13.0 * max(0.0, c))  # a long stride: the forward swing lifts the foot
+        fx = lambda s, c: (14.0 * s, -9.0 * max(0.0, c))   # a jogging stride under the robe: the forward swing lifts the foot
         held, hn, hf = ready(w, hip, lean, run=True, bob=0.8 * math.sin(2 * ph), wob=3.0 * math.sin(2 * ph))
         out.append(pose(hip=hip, lean=lean, head=-80.0 + 1.5 * math.sin(2 * ph), fn=fx(sn, cs), ff=fx(-sn, -cs), hn=hn,
                         hf=hf or (2 - 9.0 * sn, -30.0 + 3.0 * cs), held=held, skirt=-12.0 - 8.0 * abs(sn), beard=-2.0))

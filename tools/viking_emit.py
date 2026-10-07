@@ -8,12 +8,15 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from viking_clips import *
 import viking_clips as VC
+import shutil
+import viking3d as V3
+USE_3D = shutil.which('blender') is not None   # the body comes from the Blender model (viking3d.py); without Blender, the 2.5D build()
 
 SCALE = 0.62
 FW, FH, GX, GND = 112, 100, 48, 86
 CLIP_NAMES = ['idle', 'run', 'atk0', 'atk1', 'atk2', 'atk3', 'aim', 'fire', 'jump', 'fall', 'land', 'crouch', 'crouchwalk', 'crawl', 'rollin', 'roll', 'rollout',
               'climb', 'wall', 'hang', 'swim', 'tread', 'hurt', 'hookaim']
-SMEAR = [(255, 252, 236, 235), (255, 232, 160, 205), (255, 170, 60, 175), (226, 92, 40, 140)]   # by how old that part of the sweep is
+SMEAR = [(250, 252, 220, 240), (120, 236, 255, 215), (56, 150, 255, 180), (40, 72, 196, 140)]   # by how old that part of the sweep is
 
 
 # ---------------------------------------------------------------- the weapons' cutting parts, for the smear
@@ -88,7 +91,10 @@ def bake(P):
     """-> index grid (h x w) of palette indices, 0 = clear."""
     cv = Canvas(FW, FH, GND, SCALE)
     d = Draw(cv, GX, 1, SCALE, rot=math.radians(P['rot']), pivot=P['pivot'])
-    build(d, P)
+    if USE_3D:
+        V3.body(cv, d, P, P.get('look', 0))
+        if P['held']: draw_held(d, P['held'])
+    else: build(d, P)
     rgb, tag, op = cv.render(rim_side=1)
     idx = np.zeros((FH, FW), int)
     sm = smear_layer(P, P.get('smear_from'), d, FW, FH) if P.get('smear_from') else None
@@ -108,12 +114,14 @@ LOOK_COUNT = 4
 def build_sheets():
     """-> {(set name, look): (frames, clip table)}"""
     sheets = {}
+    sets = {'none': {'idle': idle_none(), 'run': run_none()}}
+    for w in WEAPONS: sets[w] = weapon_clips(w)
+    body = body_clips()
+    body['hookaim'] = aim('hook')
+    sets['body'] = body
+    if USE_3D: V3.ensure([P for clips in sets.values() for poses, ms in clips.values() for P in poses], SCALE, FW, FH, GX, GND)
+    else: print('viking_emit: no blender on PATH, using the 2.5D body', file=sys.stderr)
     for look in range(LOOK_COUNT):
-        sets = {'none': {'idle': idle_none(), 'run': run_none()}}
-        for w in WEAPONS: sets[w] = weapon_clips(w)
-        body = body_clips()
-        body['hookaim'] = aim('hook')
-        sets['body'] = body
         for name, clips in sets.items():
             frames, table = [], {}
             for cn in CLIP_NAMES:
